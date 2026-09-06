@@ -269,10 +269,17 @@ LOGGING = {
 
 if not DEBUG:
     # Behind a TLS-terminating reverse proxy (nginx/certbot) in production.
+    # HTTPS_ENABLED must stay False until nginx actually has a cert (see
+    # deploy/README.md step 8) - flipping the *_SECURE cookie flags on
+    # before then makes the browser silently drop every cookie (including
+    # the CSRF one) because it was told "HTTPS only" on a plain HTTP site,
+    # which breaks every form submit, admin login included.
+    HTTPS_ENABLED = os.environ.get("DJANGO_SECURE_SSL_REDIRECT", "False") == "True"
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-    SECURE_SSL_REDIRECT = os.environ.get("DJANGO_SECURE_SSL_REDIRECT", "True") == "True"
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = 60 * 60 * 24 * 30
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
+    SECURE_SSL_REDIRECT = HTTPS_ENABLED
+    SESSION_COOKIE_SECURE = HTTPS_ENABLED
+    CSRF_COOKIE_SECURE = HTTPS_ENABLED
+    if HTTPS_ENABLED:
+        SECURE_HSTS_SECONDS = 60 * 60 * 24 * 30
+        SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+        SECURE_HSTS_PRELOAD = True
