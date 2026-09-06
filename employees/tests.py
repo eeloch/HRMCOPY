@@ -3,7 +3,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from .models import Department, Employee, Position
+from .models import BiometricIdentity, Department, Employee, Position
 
 
 class EmployeeImportAPIViewTests(APITestCase):
@@ -79,4 +79,41 @@ class EmployeeImportAPIViewTests(APITestCase):
         self.assertEqual(
             Employee.objects.count(),
             0,
+        )
+
+
+class EmployeeProfileAPIViewTests(APITestCase):
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="profile-viewer",
+            password="test-password",
+        )
+        self.client.force_authenticate(user=self.user)
+        self.employee = Employee.objects.create(
+            employee_id="EMP-100",
+            first_name="Chidi",
+            last_name="Nwosu",
+        )
+
+    def test_profile_with_no_biometric_identity(self):
+        response = self.client.get(f"/api/employees/{self.employee.pk}/profile/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["biometric"])
+
+    def test_profile_with_a_biometric_identity(self):
+        BiometricIdentity.objects.create(
+            employee=self.employee,
+            system="vendor_flask_gateway",
+            source_identifier="gateway",
+            external_user_id="42",
+        )
+
+        response = self.client.get(f"/api/employees/{self.employee.pk}/profile/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["biometric"],
+            {"user_id": "42", "system": "vendor_flask_gateway", "source": "gateway"},
         )

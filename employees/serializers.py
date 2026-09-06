@@ -394,9 +394,9 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
             return None
 
         return {
-            "user_id": biometric.biometric_user_id,
-            "system": biometric.biometric_system,
-            "source": biometric.biometric_source,
+            "user_id": biometric.external_user_id,
+            "system": biometric.system,
+            "source": biometric.source_identifier,
         }
 
     def get_years_of_service(self, obj):
