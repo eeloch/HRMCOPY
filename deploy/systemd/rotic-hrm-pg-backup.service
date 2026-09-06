@@ -1,0 +1,10 @@
+[Unit]
+Description=Rotic HRM - nightly Postgres + media backup
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=rotic
+Group=rotic
+EnvironmentFile=/opt/rotic_hrm/.env
+ExecStart=/opt/rotic_hrm/deploy/scripts/pg_backup.sh

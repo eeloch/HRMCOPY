@@ -1,0 +1,667 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+
+import Sidebar from "@/components/Sidebar";
+import { apiFetch, getAccessToken } from "@/lib/api";
+
+
+type Employee = {
+  id: number;
+  employee_id: string;
+  biometric_user_id: string | null;
+
+  first_name: string;
+  middle_name: string;
+  last_name: string;
+  full_name: string;
+
+  department: number | null;
+  department_name: string | null;
+
+  position: number | null;
+  position_name: string | null;
+
+  phone: string;
+  email: string;
+
+  date_of_birth: string | null;
+  employment_date: string | null;
+
+  basic_salary: string;
+
+  lives_in_company_hostel: boolean;
+  hostel_room_number: string;
+
+  status: string;
+
+  current_shift:
+    | {
+        id: number;
+        name: string;
+        start_time: string;
+        end_time: string;
+      }
+    | null;
+};
+
+
+export default function EmployeeProfilePage() {
+  const params = useParams();
+  const router = useRouter();
+
+  const id = params.id as string;
+
+  const [employee, setEmployee] =
+    useState<Employee | null>(null);
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [error, setError] =
+    useState("");
+
+
+  useEffect(() => {
+    if (!getAccessToken()) {
+      router.push("/login");
+      return;
+    }
+
+    loadEmployee();
+  }, [id]);
+
+
+  async function loadEmployee() {
+    setLoading(true);
+    setError("");
+
+    try {
+      const response = await apiFetch(
+        `/employees/${id}/`
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          "Unable to load employee."
+        );
+      }
+
+      const data = await response.json();
+
+      setEmployee(data);
+
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load employee."
+      );
+
+    } finally {
+      setLoading(false);
+    }
+  }
+
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-100">
+        <Sidebar />
+
+        <main className="ml-64 p-8">
+          Loading employee...
+        </main>
+      </div>
+    );
+  }
+
+
+  if (error || !employee) {
+    return (
+      <div className="min-h-screen bg-slate-100">
+        <Sidebar />
+
+        <main className="ml-64 p-8">
+          <div className="bg-red-50 border border-red-200 text-red-700 p-5 rounded-xl">
+            {error || "Employee not found."}
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+
+  return (
+    <div className="min-h-screen bg-slate-100">
+      <Sidebar />
+
+      <main className="ml-64 p-8">
+
+        <button
+          onClick={() =>
+            router.push("/employees")
+          }
+          className="text-blue-600 text-sm font-medium mb-5"
+        >
+          ← Employees
+        </button>
+
+
+        {/* PROFILE HEADER */}
+
+        <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-7">
+
+          <div className="flex justify-between items-start">
+
+            <div className="flex items-center gap-5">
+
+              <div className="w-16 h-16 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xl font-bold">
+
+                {employee.first_name?.[0]}
+                {employee.last_name?.[0]}
+
+              </div>
+
+
+              <div>
+
+                <div className="flex items-center gap-3">
+
+                  <h1 className="text-3xl font-bold text-slate-900">
+                    {employee.full_name}
+                  </h1>
+
+                  <StatusBadge
+                    status={employee.status}
+                  />
+
+                </div>
+
+
+                <div className="text-slate-500 mt-2">
+
+                  Staff No.{" "}
+                  <span className="font-medium text-slate-700">
+                    {employee.employee_id}
+                  </span>
+
+                  {" • "}
+
+                  {employee.position_name ||
+                    "No position"}
+
+                  {" • "}
+
+                  {employee.department_name ||
+                    "No department"}
+
+                </div>
+
+              </div>
+
+            </div>
+
+
+            <button
+              onClick={() =>
+                router.push(
+                  `/employees/${employee.id}/edit`
+                )
+              }
+              className="border border-slate-300 hover:bg-slate-50 px-5 py-2.5 rounded-xl font-medium"
+            >
+              Edit Employee
+            </button>
+
+          </div>
+
+        </div>
+
+
+        {/* NAVIGATION */}
+
+        <div className="mt-6 bg-white border border-slate-200 rounded-xl px-4">
+
+          <div className="flex overflow-x-auto">
+
+            <Tab active>
+              Overview
+            </Tab>
+
+            <Tab>
+              Attendance
+            </Tab>
+
+            <Tab>
+              Shift
+            </Tab>
+
+            <Tab>
+              Payroll
+            </Tab>
+
+            <Tab>
+              Biometric
+            </Tab>
+
+            <Tab>
+              Leave
+            </Tab>
+
+            <Tab>
+              PPE
+            </Tab>
+
+            <Tab>
+              Meals
+            </Tab>
+
+          </div>
+
+        </div>
+
+
+        {/* SUMMARY CARDS */}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5 mt-6">
+
+          <SummaryCard
+            label="Monthly Basic Salary"
+            value={
+              `₦${Number(
+                employee.basic_salary
+              ).toLocaleString()}`
+            }
+          />
+
+          <SummaryCard
+            label="Current Shift"
+            value={
+              employee.current_shift?.name ||
+              "Not assigned"
+            }
+          />
+
+          <SummaryCard
+            label="Biometric ID"
+            value={
+              employee.biometric_user_id ||
+              "Not linked"
+            }
+          />
+
+          <SummaryCard
+            label="Accommodation"
+            value={
+              employee.lives_in_company_hostel
+                ? employee.hostel_room_number
+                  ? `Hostel - Room ${employee.hostel_room_number}`
+                  : "Company Hostel"
+                : "Not Resident"
+            }
+          />
+
+        </div>
+
+
+        {/* INFORMATION */}
+
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mt-6">
+
+          <section className="bg-white border border-slate-200 rounded-2xl shadow-sm">
+
+            <SectionHeader
+              title="Personal Information"
+            />
+
+            <div className="p-6 grid grid-cols-2 gap-6">
+
+              <Info
+                label="First Name"
+                value={employee.first_name}
+              />
+
+              <Info
+                label="Middle Name"
+                value={
+                  employee.middle_name || "—"
+                }
+              />
+
+              <Info
+                label="Last Name"
+                value={employee.last_name}
+              />
+
+              <Info
+                label="Phone"
+                value={
+                  employee.phone || "—"
+                }
+              />
+
+              <Info
+                label="Email"
+                value={
+                  employee.email || "—"
+                }
+              />
+
+              <Info
+                label="Date of Birth"
+                value={
+                  employee.date_of_birth ||
+                  "—"
+                }
+              />
+
+            </div>
+
+          </section>
+
+
+          <section className="bg-white border border-slate-200 rounded-2xl shadow-sm">
+
+            <SectionHeader
+              title="Employment Information"
+            />
+
+            <div className="p-6 grid grid-cols-2 gap-6">
+
+              <Info
+                label="Staff Number"
+                value={employee.employee_id}
+              />
+
+              <Info
+                label="Department"
+                value={
+                  employee.department_name ||
+                  "—"
+                }
+              />
+
+              <Info
+                label="Position"
+                value={
+                  employee.position_name ||
+                  "—"
+                }
+              />
+
+              <Info
+                label="Employment Date"
+                value={
+                  employee.employment_date ||
+                  "—"
+                }
+              />
+
+              <Info
+                label="Status"
+                value={employee.status}
+              />
+
+              <Info
+                label="Biometric ID"
+                value={
+                  employee.biometric_user_id ||
+                  "Not linked"
+                }
+              />
+
+            </div>
+
+          </section>
+
+        </div>
+
+
+        {/* BIOMETRIC + SHIFT */}
+
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 mt-6">
+
+          <section className="bg-white border border-slate-200 rounded-2xl shadow-sm">
+
+            <SectionHeader
+              title="Biometric Connection"
+            />
+
+            <div className="p-6">
+
+              {employee.biometric_user_id ? (
+
+                <div>
+
+                  <div className="flex items-center gap-2">
+
+                    <span className="w-2.5 h-2.5 rounded-full bg-green-500" />
+
+                    <span className="font-semibold text-green-700">
+                      Linked
+                    </span>
+
+                  </div>
+
+                  <p className="text-sm text-slate-500 mt-3">
+                    Biometric User ID
+                  </p>
+
+                  <div className="font-bold text-xl mt-1">
+                    {employee.biometric_user_id}
+                  </div>
+
+                </div>
+
+              ) : (
+
+                <div>
+
+                  <div className="font-semibold text-amber-700">
+                    Not linked
+                  </div>
+
+                  <p className="text-sm text-slate-500 mt-2">
+                    This employee does not currently
+                    have a biometric user ID.
+                  </p>
+
+                </div>
+
+              )}
+
+            </div>
+
+          </section>
+
+
+          <section className="bg-white border border-slate-200 rounded-2xl shadow-sm">
+
+            <SectionHeader
+              title="Shift Assignment"
+            />
+
+            <div className="p-6">
+
+              {employee.current_shift ? (
+
+                <>
+                  <div className="font-bold text-xl">
+                    {employee.current_shift.name}
+                  </div>
+
+                  <div className="text-slate-500 mt-2">
+                    {formatTime(
+                      employee.current_shift.start_time
+                    )}
+                    {" → "}
+                    {formatTime(
+                      employee.current_shift.end_time
+                    )}
+                  </div>
+                </>
+
+              ) : (
+
+                <div>
+
+                  <div className="font-semibold text-amber-700">
+                    No active shift
+                  </div>
+
+                  <p className="text-sm text-slate-500 mt-2">
+                    Assign a work shift before
+                    processing attendance.
+                  </p>
+
+                </div>
+
+              )}
+
+            </div>
+
+          </section>
+
+        </div>
+
+      </main>
+    </div>
+  );
+}
+
+
+function SummaryCard({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
+
+      <div className="text-sm text-slate-500">
+        {label}
+      </div>
+
+      <div className="font-bold text-xl text-slate-900 mt-2">
+        {value}
+      </div>
+
+    </div>
+  );
+}
+
+
+function SectionHeader({
+  title,
+}: {
+  title: string;
+}) {
+  return (
+    <div className="px-6 py-4 border-b border-slate-200">
+
+      <h2 className="font-bold text-slate-900">
+        {title}
+      </h2>
+
+    </div>
+  );
+}
+
+
+function Info({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div>
+
+      <div className="text-xs uppercase tracking-wide text-slate-400">
+        {label}
+      </div>
+
+      <div className="font-medium text-slate-800 mt-1 capitalize">
+        {value}
+      </div>
+
+    </div>
+  );
+}
+
+
+function StatusBadge({
+  status,
+}: {
+  status: string;
+}) {
+  const active =
+    status === "active";
+
+  return (
+    <span
+      className={
+        `px-3 py-1 rounded-full text-xs font-semibold capitalize ${
+          active
+            ? "bg-green-100 text-green-700"
+            : "bg-slate-100 text-slate-700"
+        }`
+      }
+    >
+      {status}
+    </span>
+  );
+}
+
+
+function Tab({
+  children,
+  active = false,
+}: {
+  children: React.ReactNode;
+  active?: boolean;
+}) {
+  return (
+    <button
+      className={
+        `px-5 py-4 text-sm font-medium whitespace-nowrap border-b-2 ${
+          active
+            ? "border-blue-600 text-blue-600"
+            : "border-transparent text-slate-500 hover:text-slate-900"
+        }`
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
+
+function formatTime(
+  time: string
+) {
+  const [
+    hours,
+    minutes,
+  ] = time.split(":");
+
+  const date = new Date();
+
+  date.setHours(
+    Number(hours),
+    Number(minutes)
+  );
+
+  return date.toLocaleTimeString(
+    "en-NG",
+    {
+      hour: "numeric",
+      minute: "2-digit",
+    }
+  );
+}

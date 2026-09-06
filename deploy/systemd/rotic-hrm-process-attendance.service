@@ -1,0 +1,10 @@
+[Unit]
+Description=Rotic HRM - process yesterday's attendance
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=rotic
+Group=rotic
+EnvironmentFile=/opt/rotic_hrm/.env
+ExecStart=/opt/rotic_hrm/deploy/scripts/process_attendance.sh

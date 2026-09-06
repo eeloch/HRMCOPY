@@ -1,0 +1,16 @@
+[Unit]
+Description=Rotic HRM - Next.js frontend
+After=network.target
+
+[Service]
+User=rotic
+Group=rotic
+WorkingDirectory=/opt/rotic_hrm/frontend
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
