@@ -139,3 +139,98 @@ class DeviceCommandListCreateAPIView(APIView):
         ).values_list("external_user_id", flat=True)
         numeric_ids = [int(value) for value in used_ids if value.isdigit()]
         return max(numeric_ids, default=0) + 1
+
+
+class DeviceReconcileEnrolledIdsAPIView(APIView):
+    """Bulk-link a device's already-enrolled IDs to employees by matching numbers.
+
+    For a device that was enrolled before this system existed (staff scanned
+    directly at the terminal, with the terminal's own enrollid set to the
+    employee's numeric staff ID), this replaces enrolling everyone from
+    scratch: it reads the most recent "Check Who's Enrolled" result and
+    creates a BiometricIdentity for every enrollid that unambiguously matches
+    exactly one employee's ID, leaving anything uncertain for manual review
+    rather than guessing.
+    """
+
+    permission_classes = [IsAuthenticated, CanManageDevices]
+
+    def post(self, request, device_id):
+        try:
+            device = BiometricDevice.objects.get(pk=device_id)
+        except BiometricDevice.DoesNotExist:
+            return Response({"detail": "Device not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        latest_refresh = DeviceCommand.objects.filter(
+            device=device, command_type="refresh_enrolled_ids", status="acked",
+        ).order_by("-id").first()
+        if not latest_refresh:
+            return Response(
+                {"detail": "Run 'Check Who's Enrolled' for this device first, and wait for it to complete."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        device_ids = latest_refresh.result.get("record") or []
+        numeric_map, ambiguous_ids = self._build_numeric_employee_map()
+
+        linked = []
+        already_linked = 0
+        conflicts = []
+        unmatched = []
+
+        for device_id_value in device_ids:
+            if BiometricIdentity.objects.filter(
+                system=IDENTITY_SYSTEM, source_identifier=device.serial_number, external_user_id=device_id_value,
+            ).exists():
+                already_linked += 1
+                continue
+
+            normalized = str(int(device_id_value)) if device_id_value.isdigit() else None
+            if normalized is None or normalized in ambiguous_ids:
+                unmatched.append(device_id_value)
+                continue
+
+            employee = numeric_map.get(normalized)
+            if employee is None:
+                unmatched.append(device_id_value)
+                continue
+
+            existing_for_employee = BiometricIdentity.objects.filter(
+                employee=employee, system=IDENTITY_SYSTEM, source_identifier=device.serial_number,
+            ).first()
+            if existing_for_employee:
+                conflicts.append({
+                    "device_id": device_id_value,
+                    "employee_id": employee.employee_id,
+                    "already_linked_to_device_id": existing_for_employee.external_user_id,
+                })
+                continue
+
+            BiometricIdentity.objects.create(
+                employee=employee, system=IDENTITY_SYSTEM,
+                source_identifier=device.serial_number, external_user_id=device_id_value, is_active=True,
+            )
+            linked.append({"device_id": device_id_value, "employee_id": employee.employee_id, "employee_name": employee.full_name})
+
+        return Response({
+            "total_enrolled_on_device": len(device_ids),
+            "linked": len(linked),
+            "already_linked": already_linked,
+            "unmatched": unmatched,
+            "conflicts": conflicts,
+            "linked_employees": linked,
+        })
+
+    @staticmethod
+    def _build_numeric_employee_map():
+        """{normalized numeric staff id: Employee}, excluding any id shared by more than one employee record."""
+        groups = {}
+        for employee in Employee.objects.only("id", "employee_id", "first_name", "middle_name", "last_name"):
+            if not employee.employee_id.isdigit():
+                continue
+            key = str(int(employee.employee_id))
+            groups.setdefault(key, []).append(employee)
+
+        numeric_map = {key: matches[0] for key, matches in groups.items() if len(matches) == 1}
+        ambiguous_ids = {key for key, matches in groups.items() if len(matches) > 1}
+        return numeric_map, ambiguous_ids

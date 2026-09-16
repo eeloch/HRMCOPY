@@ -14,6 +14,15 @@ type DeviceCommand = {
   created_at: string;
 };
 
+type ReconcileResult = {
+  total_enrolled_on_device: number;
+  linked: number;
+  already_linked: number;
+  unmatched: string[];
+  conflicts: { device_id: string; employee_id: string; already_linked_to_device_id: string }[];
+  linked_employees: { device_id: string; employee_id: string; employee_name: string }[];
+};
+
 type Props = {
   deviceId: number;
   employees: ShiftEmployee[];
@@ -28,6 +37,9 @@ export function DeviceCommandPanel({ deviceId, employees }: Props) {
   const [deleteEmployee, setDeleteEmployee] = useState("");
   const [active, setActive] = useState<DeviceCommand | null>(null);
   const [error, setError] = useState("");
+  const [reconciling, setReconciling] = useState(false);
+  const [reconcileResult, setReconcileResult] = useState<ReconcileResult | null>(null);
+  const [reconcileError, setReconcileError] = useState("");
   const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -71,6 +83,8 @@ export function DeviceCommandPanel({ deviceId, employees }: Props) {
   async function queueCommand(body: Record<string, unknown>) {
     setError("");
     setActive(null);
+    setReconcileResult(null);
+    setReconcileError("");
     stopPolling();
     try {
       const response = await apiFetch(`/attendance/devices/${deviceId}/commands/`, {
@@ -115,6 +129,30 @@ export function DeviceCommandPanel({ deviceId, employees }: Props) {
     }
     return "";
   }
+
+  async function runReconcile() {
+    setReconciling(true);
+    setReconcileError("");
+    setReconcileResult(null);
+    try {
+      const response = await apiFetch(`/attendance/devices/${deviceId}/reconcile/`, { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          response.status === 403
+            ? "You don't have permission to manage enrolled staff."
+            : data.detail || "Unable to link employees."
+        );
+      }
+      setReconcileResult(data);
+    } catch (reconcileErr) {
+      setReconcileError(reconcileErr instanceof Error ? reconcileErr.message : "Unable to link employees.");
+    } finally {
+      setReconciling(false);
+    }
+  }
+
+  const canReconcile = active?.command_type === "refresh_enrolled_ids" && active.status === "acked";
 
   return (
     <div className="grid gap-6 border-t border-slate-200 bg-slate-50 p-5 md:grid-cols-3">
@@ -165,11 +203,52 @@ export function DeviceCommandPanel({ deviceId, employees }: Props) {
         >
           Check Who&apos;s Enrolled
         </button>
+        {canReconcile && (
+          <button
+            type="button"
+            disabled={reconciling}
+            onClick={() => void runReconcile()}
+            className="mt-2 w-full rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {reconciling ? "Linking..." : "Link Matching Employees"}
+          </button>
+        )}
+        <p className="mt-2 text-xs text-slate-500">
+          If staff were already enrolled on this terminal before it connected here (e.g. its ID matches their staff number), this links them automatically instead of re-enrolling one by one.
+        </p>
       </div>
 
       {(active || error) && (
         <div className="rounded-xl border border-slate-200 bg-white p-4 md:col-span-3">
           {error ? <p className="text-sm text-red-700">{error}</p> : <p className="text-sm text-slate-700">{statusMessage()}</p>}
+        </div>
+      )}
+
+      {(reconcileResult || reconcileError) && (
+        <div className="rounded-xl border border-slate-200 bg-white p-4 md:col-span-3">
+          {reconcileError ? (
+            <p className="text-sm text-red-700">{reconcileError}</p>
+          ) : reconcileResult && (
+            <div className="text-sm text-slate-700">
+              <p className="font-semibold text-emerald-700">
+                Linked {reconcileResult.linked} of {reconcileResult.total_enrolled_on_device} enrolled IDs to employees.
+              </p>
+              <p className="mt-1 text-slate-600">
+                {reconcileResult.already_linked} were already linked, {reconcileResult.unmatched.length} had no matching employee
+                {reconcileResult.conflicts.length > 0 && `, ${reconcileResult.conflicts.length} conflicted with an existing link`}.
+              </p>
+              {reconcileResult.unmatched.length > 0 && (
+                <p className="mt-2 text-xs text-slate-500">
+                  Unmatched device IDs (no employee with that staff number): {reconcileResult.unmatched.join(", ")}
+                </p>
+              )}
+              {reconcileResult.conflicts.length > 0 && (
+                <p className="mt-2 text-xs text-amber-700">
+                  Conflicts (employee already linked to a different ID on this device): {reconcileResult.conflicts.map((c) => `${c.employee_id} (has ${c.already_linked_to_device_id}, device says ${c.device_id})`).join("; ")}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

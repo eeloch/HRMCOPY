@@ -368,3 +368,104 @@ class DeviceCommandAPITests(TestCase):
         response = self.client.get(self.url())
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
+
+
+class DeviceReconcileEnrolledIdsAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.manager = get_user_model().objects.create_user(username="reconcile-manager", password="test-password")
+        self.manager.user_permissions.add(Permission.objects.get(codename="manage_devices"))
+        self.viewer = get_user_model().objects.create_user(username="reconcile-viewer", password="test-password")
+        self.device = BiometricDevice.objects.create(
+            name="Main Entrance", serial_number="AYTK14145399", location="Factory gate", device_type="factory",
+        )
+
+    def url(self):
+        return f"/api/attendance/devices/{self.device.id}/reconcile/"
+
+    def refresh_result(self, record):
+        return DeviceCommand.objects.create(
+            device=self.device, command_type="refresh_enrolled_ids", status="acked",
+            result={"record": record, "result": True},
+        )
+
+    def test_requires_manage_devices_permission(self):
+        self.refresh_result(["1"])
+        self.client.force_authenticate(self.viewer)
+        response = self.client.post(self.url())
+        self.assertEqual(response.status_code, 403)
+
+    def test_requires_a_completed_refresh_first(self):
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url())
+        self.assertEqual(response.status_code, 400)
+
+    def test_links_employees_by_matching_numeric_id(self):
+        Employee.objects.create(employee_id="000016", first_name="Sunday", last_name="Dare")
+        self.refresh_result(["16"])
+
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["linked"], 1)
+        identity = BiometricIdentity.objects.get(system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="16")
+        self.assertEqual(identity.employee.employee_id, "000016")
+
+    def test_device_id_with_no_matching_employee_is_reported_unmatched(self):
+        self.refresh_result(["3"])
+
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.data["linked"], 0)
+        self.assertEqual(response.data["unmatched"], ["3"])
+
+    def test_already_linked_ids_are_skipped_and_counted_separately(self):
+        employee = Employee.objects.create(employee_id="000016", first_name="Sunday", last_name="Dare")
+        BiometricIdentity.objects.create(employee=employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="16")
+        self.refresh_result(["16"])
+
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.data["linked"], 0)
+        self.assertEqual(response.data["already_linked"], 1)
+        self.assertEqual(BiometricIdentity.objects.filter(employee=employee).count(), 1)
+
+    def test_ambiguous_employee_id_collision_is_not_auto_linked(self):
+        Employee.objects.create(employee_id="000016", first_name="First", last_name="Person")
+        Employee.objects.create(employee_id="16", first_name="Second", last_name="Person")
+        self.refresh_result(["16"])
+
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.data["linked"], 0)
+        self.assertEqual(response.data["unmatched"], ["16"])
+        self.assertFalse(BiometricIdentity.objects.exists())
+
+    def test_employee_already_linked_to_a_different_id_on_this_device_is_flagged_as_conflict(self):
+        employee = Employee.objects.create(employee_id="000016", first_name="Sunday", last_name="Dare")
+        BiometricIdentity.objects.create(employee=employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="999")
+        self.refresh_result(["16"])
+
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.data["linked"], 0)
+        self.assertEqual(len(response.data["conflicts"]), 1)
+        self.assertEqual(response.data["conflicts"][0]["already_linked_to_device_id"], "999")
+
+    def test_uses_the_most_recent_completed_refresh(self):
+        Employee.objects.create(employee_id="000001", first_name="Old", last_name="List")
+        Employee.objects.create(employee_id="000002", first_name="New", last_name="List")
+        self.refresh_result(["1"])
+        self.refresh_result(["2"])
+
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.data["linked"], 1)
+        self.assertTrue(BiometricIdentity.objects.filter(external_user_id="2").exists())
+        self.assertFalse(BiometricIdentity.objects.filter(external_user_id="1").exists())
