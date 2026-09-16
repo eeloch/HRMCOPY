@@ -483,6 +483,9 @@ class EmployeeImportAPIView(APIView):
         update_existing = request.data.get(
             "update_existing"
         ) in ("true", "1", "True", True)
+        skip_invalid = request.data.get(
+            "skip_invalid"
+        ) in ("true", "1", "True", True)
 
         results = validate_employee_rows(
             rows,
@@ -493,11 +496,18 @@ class EmployeeImportAPIView(APIView):
             for item in results
             if not item["valid"]
         ]
+        rows_to_import = [
+            item
+            for item in results
+            if item["valid"]
+        ] if skip_invalid else results
 
-        if not results or invalid_rows:
+        if not results or (invalid_rows and not skip_invalid) or not rows_to_import:
             return Response(
                 {
                     "detail": (
+                        "None of the rows in this spreadsheet could be imported."
+                        if skip_invalid else
                         "The spreadsheet must pass validation "
                         "before it can be imported."
                     ),
@@ -523,7 +533,7 @@ class EmployeeImportAPIView(APIView):
             for employee in Employee.objects.filter(
                 id__in=[
                     item["data"]["existing_employee_id"]
-                    for item in results
+                    for item in rows_to_import
                     if item["data"].get("existing_employee_id")
                 ]
             )
@@ -532,7 +542,7 @@ class EmployeeImportAPIView(APIView):
         serializers = []
         serialization_errors = []
 
-        for item in results:
+        for item in rows_to_import:
             existing_id = item["data"].get("existing_employee_id")
             serializer = EmployeeCreateUpdateSerializer(
                 instance=existing_employees.get(existing_id),
@@ -550,7 +560,7 @@ class EmployeeImportAPIView(APIView):
 
             serializers.append(serializer)
 
-        if serialization_errors:
+        if serialization_errors and (not skip_invalid or not serializers):
             return Response(
                 {
                     "detail": (
@@ -559,7 +569,7 @@ class EmployeeImportAPIView(APIView):
                     "summary": {
                         "imported": 0,
                         "updated": 0,
-                        "skipped": len(results) - len(serialization_errors),
+                        "skipped": len(rows_to_import) - len(serialization_errors),
                         "failed": len(serialization_errors),
                     },
                     "errors": serialization_errors,
@@ -578,14 +588,20 @@ class EmployeeImportAPIView(APIView):
             else:
                 created_count += 1
 
+        skipped_rows = [
+            {"row": item["row"], "errors": item["errors"]}
+            for item in invalid_rows
+        ] + serialization_errors
+
         return Response(
             {
                 "summary": {
                     "imported": created_count,
                     "updated": updated_count,
-                    "skipped": 0,
+                    "skipped": len(skipped_rows),
                     "failed": 0,
                 },
+                "errors": skipped_rows,
             },
             status=status.HTTP_201_CREATED,
         )

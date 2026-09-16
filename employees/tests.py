@@ -168,6 +168,75 @@ class EmployeeImportAPIViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(Employee.objects.count(), 0)
 
+    def test_skip_invalid_flag_imports_the_good_rows_and_reports_the_rest(self):
+        response = self.client.post(
+            "/api/employees/import/",
+            {
+                "file": SimpleUploadedFile(
+                    "employees.csv",
+                    (
+                        "employee_id,first_name,last_name,department,position\n"
+                        "EMP-010,Good,Row,Operations,Operator\n"
+                        "EMP-011,Bad,Row,,Operator\n"
+                    ).encode("utf-8"),
+                    content_type="text/csv",
+                ),
+                "skip_invalid": "true",
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["summary"], {"imported": 1, "updated": 0, "skipped": 1, "failed": 0})
+        self.assertTrue(Employee.objects.filter(employee_id="EMP-010").exists())
+        self.assertFalse(Employee.objects.filter(employee_id="EMP-011").exists())
+        self.assertEqual(response.data["errors"][0]["row"], 3)
+
+    def test_skip_invalid_flag_still_fails_when_every_row_is_invalid(self):
+        response = self.client.post(
+            "/api/employees/import/",
+            {
+                "file": SimpleUploadedFile(
+                    "employees.csv",
+                    (
+                        "employee_id,first_name,last_name,department,position\n"
+                        "EMP-012,Bad,Row,,Operator\n"
+                    ).encode("utf-8"),
+                    content_type="text/csv",
+                ),
+                "skip_invalid": "true",
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Employee.objects.count(), 0)
+
+    def test_skip_invalid_combines_with_update_existing(self):
+        Employee.objects.create(employee_id="EMP-013", first_name="Original", last_name="Name")
+
+        response = self.client.post(
+            "/api/employees/import/",
+            {
+                "file": SimpleUploadedFile(
+                    "employees.csv",
+                    (
+                        "employee_id,first_name,last_name,department,position\n"
+                        "EMP-013,Updated,Name,Operations,Operator\n"
+                        "EMP-014,Bad,Row,,Operator\n"
+                    ).encode("utf-8"),
+                    content_type="text/csv",
+                ),
+                "update_existing": "true",
+                "skip_invalid": "true",
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["summary"], {"imported": 0, "updated": 1, "skipped": 1, "failed": 0})
+        self.assertEqual(Employee.objects.get(employee_id="EMP-013").first_name, "Updated")
+
 
 class EmployeeImportPreviewAPIViewTests(APITestCase):
 
@@ -218,6 +287,33 @@ class EmployeeImportPreviewAPIViewTests(APITestCase):
 
         self.assertFalse(response.data["can_import"])
         self.assertTrue(any("Duplicate Employee ID" in error for error in response.data["results"][0]["errors"]))
+
+    def test_misspelled_department_gets_a_did_you_mean_suggestion(self):
+        response = self.preview(
+            "employee_id,first_name,last_name,department,position\n"
+            "EMP-020,Ada,Okafor,Opertaions,Operator\n"
+        )
+
+        errors = response.data["results"][0]["errors"]
+        self.assertTrue(any("Did you mean 'Operations'?" in error for error in errors))
+
+    def test_misspelled_position_gets_a_did_you_mean_suggestion(self):
+        response = self.preview(
+            "employee_id,first_name,last_name,department,position\n"
+            "EMP-021,Ada,Okafor,Operations,Opertaor\n"
+        )
+
+        errors = response.data["results"][0]["errors"]
+        self.assertTrue(any("Did you mean 'Operator'?" in error for error in errors))
+
+    def test_wildly_different_department_name_gets_no_suggestion(self):
+        response = self.preview(
+            "employee_id,first_name,last_name,department,position\n"
+            "EMP-022,Ada,Okafor,Zzzzzzzzz,Operator\n"
+        )
+
+        errors = response.data["results"][0]["errors"]
+        self.assertFalse(any("Did you mean" in error for error in errors))
 
 
 class EmployeeProfileAPIViewTests(APITestCase):

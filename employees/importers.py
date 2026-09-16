@@ -1,9 +1,20 @@
 import csv
+import difflib
 import io
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from openpyxl import load_workbook
+
+
+def suggest_match(value, candidates, cutoff=0.6):
+    """Closest existing name to a value that failed an exact lookup, or None.
+
+    Used to turn "Department 'Extrution' does not exist" into a "did you
+    mean 'Extrusion'?" hint instead of leaving the admin to guess at a typo.
+    """
+    matches = difflib.get_close_matches(value, candidates, n=1, cutoff=cutoff)
+    return matches[0] if matches else None
 
 
 HEADER_ALIASES = {
@@ -607,6 +618,8 @@ def validate_employee_rows(
 
     results = []
 
+    all_department_names = list(Department.objects.values_list("name", flat=True))
+
     employee_occurrences = {}
 
     for fallback_row_number, row in enumerate(
@@ -771,9 +784,11 @@ def validate_employee_rows(
             )
 
             if not department:
-                errors.append(
-                    f"Department '{department_name}' does not exist in HRM."
-                )
+                message = f"Department '{department_name}' does not exist in HRM."
+                suggestion = suggest_match(department_name, all_department_names)
+                if suggestion:
+                    message += f" Did you mean '{suggestion}'?"
+                errors.append(message)
 
         if not position_name:
             warnings.append(
@@ -790,9 +805,14 @@ def validate_employee_rows(
             )
 
             if not position:
-                errors.append(
-                    f"Position '{position_name}' does not exist in {department.name}."
+                message = f"Position '{position_name}' does not exist in {department.name}."
+                department_position_names = list(
+                    Position.objects.filter(department=department).values_list("name", flat=True)
                 )
+                suggestion = suggest_match(position_name, department_position_names)
+                if suggestion:
+                    message += f" Did you mean '{suggestion}'?"
+                errors.append(message)
 
         #
         # Salary

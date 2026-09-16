@@ -125,6 +125,9 @@ export default function EmployeeImportPage() {
   const [updateExisting, setUpdateExisting] =
     useState(false);
 
+  const [skipInvalid, setSkipInvalid] =
+    useState(false);
+
   const [
     selectedDepartments,
     setSelectedDepartments,
@@ -280,7 +283,7 @@ export default function EmployeeImportPage() {
   async function importEmployees() {
     if (
       !file ||
-      preview?.can_import !== true ||
+      !canImport ||
       importing
     ) {
       return;
@@ -305,6 +308,11 @@ export default function EmployeeImportPage() {
         updateExisting ? "true" : "false"
       );
 
+      body.append(
+        "skip_invalid",
+        skipInvalid ? "true" : "false"
+      );
+
       const response = await apiFetch(
         "/employees/import/",
         {
@@ -325,15 +333,17 @@ export default function EmployeeImportPage() {
 
       const imported = data.summary?.imported ?? 0;
       const updated = data.summary?.updated ?? 0;
+      const skipped = data.summary?.skipped ?? 0;
 
       importSucceeded = true;
 
       const parts = [];
       if (imported) parts.push(`${imported} new employee${imported === 1 ? "" : "s"} created`);
       if (updated) parts.push(`${updated} existing employee${updated === 1 ? "" : "s"} updated`);
+      if (skipped) parts.push(`${skipped} row${skipped === 1 ? "" : "s"} skipped due to errors`);
 
       setImportMessage(
-        `${parts.join(" and ") || "No changes were needed"}. Redirecting to Employees...`
+        `${parts.join(", ") || "No changes were needed"}. Redirecting to Employees...`
       );
 
       window.setTimeout(
@@ -593,7 +603,7 @@ export default function EmployeeImportPage() {
 
 
   const canImport =
-    preview?.can_import === true &&
+    (preview?.can_import === true || (skipInvalid && (preview?.valid_rows ?? 0) > 0)) &&
     !uploading &&
     !importing;
 
@@ -739,20 +749,34 @@ export default function EmployeeImportPage() {
             )}
 
 
-            <div className="mt-6 flex items-center justify-between gap-4">
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
 
-              <label className="flex items-center gap-2 text-sm text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={updateExisting}
-                  onChange={(event) => {
-                    setUpdateExisting(event.target.checked);
-                    setPreview(null);
-                  }}
-                  className="h-4 w-4 rounded border-slate-300"
-                />
-                Update existing employees instead of rejecting them
-              </label>
+              <div className="flex flex-col gap-2">
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={updateExisting}
+                    onChange={(event) => {
+                      setUpdateExisting(event.target.checked);
+                      setPreview(null);
+                    }}
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                  Update existing employees instead of rejecting them
+                </label>
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={skipInvalid}
+                    onChange={(event) => {
+                      setSkipInvalid(event.target.checked);
+                      setPreview(null);
+                    }}
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                  Skip rows with errors and import everything else
+                </label>
+              </div>
 
               <button
                 type="button"
