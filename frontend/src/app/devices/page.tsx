@@ -168,7 +168,7 @@ export default function BiometricDevicesPage() {
                         <tr className="hover:bg-slate-50">
                           <td className="px-5 py-4 font-semibold text-slate-900">{device.name}</td>
                           <td className="px-5 py-4 font-mono text-sm text-slate-700">{device.serial_number}</td>
-                          <td className="px-5 py-4"><StatusBadge status={device.purpose === "meal_ticket" ? "info" : "active"} /> <span className="ml-1 text-sm text-slate-600">{device.purpose === "meal_ticket" ? "Meal Ticket" : "Attendance"}</span></td>
+                          <td className="px-5 py-4"><StatusBadge status={device.purpose} /></td>
                           <td className="px-5 py-4 text-sm text-slate-600">{device.location}</td>
                           <td className="px-5 py-4"><StatusBadge status={device.is_online ? "active" : "inactive"} /> <span className="ml-1 text-sm text-slate-600">{device.is_online ? "Online" : "Offline"}</span></td>
                           <td className="px-5 py-4 text-sm text-slate-600">{formatLastSeen(device.last_sync_at)}</td>

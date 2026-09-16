@@ -21,6 +21,8 @@ const statusStyles: Record<string, string> = {
   inactive: "bg-slate-100 text-slate-700 ring-slate-200",
   held: "bg-slate-100 text-slate-700 ring-slate-200",
   waived: "bg-blue-50 text-blue-700 ring-blue-100",
+  attendance: "bg-blue-50 text-blue-700 ring-blue-100",
+  meal_ticket: "bg-violet-50 text-violet-700 ring-violet-100",
 };
 
 export function StatusBadge({ status }: { status: string }) {
