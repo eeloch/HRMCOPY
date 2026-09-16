@@ -52,6 +52,7 @@ class EmployeeImportAPIViewTests(APITestCase):
             response.data["summary"],
             {
                 "imported": 1,
+                "updated": 0,
                 "skipped": 0,
                 "failed": 0,
             },
@@ -80,6 +81,143 @@ class EmployeeImportAPIViewTests(APITestCase):
             Employee.objects.count(),
             0,
         )
+
+    def test_rejects_existing_employee_id_by_default(self):
+        Employee.objects.create(
+            employee_id="EMP-003", first_name="Original", last_name="Name",
+        )
+
+        response = self.upload(
+            "employee_id,first_name,last_name,department,position\n"
+            "EMP-003,Ada,Okafor,Operations,Operator\n"
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Employee.objects.get(employee_id="EMP-003").first_name, "Original")
+
+    def test_update_existing_flag_updates_the_existing_employee_instead_of_rejecting(self):
+        employee = Employee.objects.create(
+            employee_id="EMP-004", first_name="Original", last_name="Name",
+        )
+
+        response = self.client.post(
+            "/api/employees/import/",
+            {
+                "file": SimpleUploadedFile(
+                    "employees.csv",
+                    (
+                        "employee_id,first_name,last_name,department,position\n"
+                        "EMP-004,Updated,Person,Operations,Operator\n"
+                    ).encode("utf-8"),
+                    content_type="text/csv",
+                ),
+                "update_existing": "true",
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["summary"], {"imported": 0, "updated": 1, "skipped": 0, "failed": 0})
+        employee.refresh_from_db()
+        self.assertEqual(employee.first_name, "Updated")
+        self.assertEqual(employee.last_name, "Person")
+        self.assertEqual(Employee.objects.count(), 1)
+
+    def test_update_existing_flag_still_creates_genuinely_new_employees(self):
+        Employee.objects.create(employee_id="EMP-005", first_name="Existing", last_name="Person")
+
+        response = self.client.post(
+            "/api/employees/import/",
+            {
+                "file": SimpleUploadedFile(
+                    "employees.csv",
+                    (
+                        "employee_id,first_name,last_name,department,position\n"
+                        "EMP-005,Existing,Person,Operations,Operator\n"
+                        "EMP-006,Brand,New,Operations,Operator\n"
+                    ).encode("utf-8"),
+                    content_type="text/csv",
+                ),
+                "update_existing": "true",
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["summary"], {"imported": 1, "updated": 1, "skipped": 0, "failed": 0})
+        self.assertTrue(Employee.objects.filter(employee_id="EMP-006").exists())
+
+    def test_duplicate_ids_within_the_same_file_still_fail_even_with_update_existing(self):
+        response = self.client.post(
+            "/api/employees/import/",
+            {
+                "file": SimpleUploadedFile(
+                    "employees.csv",
+                    (
+                        "employee_id,first_name,last_name,department,position\n"
+                        "EMP-007,First,Row,Operations,Operator\n"
+                        "EMP-007,Second,Row,Operations,Operator\n"
+                    ).encode("utf-8"),
+                    content_type="text/csv",
+                ),
+                "update_existing": "true",
+            },
+            format="multipart",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Employee.objects.count(), 0)
+
+
+class EmployeeImportPreviewAPIViewTests(APITestCase):
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="previewer", password="test-password")
+        self.client.force_authenticate(user=self.user)
+        self.department = Department.objects.create(name="Operations")
+        Position.objects.create(department=self.department, name="Operator")
+        Employee.objects.create(employee_id="EMP-008", first_name="Original", last_name="Name")
+
+    def preview(self, content, update_existing=None):
+        payload = {
+            "file": SimpleUploadedFile("employees.csv", content.encode("utf-8"), content_type="text/csv"),
+        }
+        if update_existing is not None:
+            payload["update_existing"] = update_existing
+        return self.client.post("/api/employees/import/preview/", payload, format="multipart")
+
+    def test_existing_employee_id_blocks_import_by_default(self):
+        response = self.preview(
+            "employee_id,first_name,last_name,department,position\n"
+            "EMP-008,Ada,Okafor,Operations,Operator\n"
+        )
+
+        self.assertFalse(response.data["can_import"])
+        self.assertIn("Employee ID already exists in HRM.", response.data["results"][0]["errors"])
+
+    def test_update_existing_flag_turns_the_duplicate_into_a_warning_not_an_error(self):
+        response = self.preview(
+            "employee_id,first_name,last_name,department,position\n"
+            "EMP-008,Ada,Okafor,Operations,Operator\n",
+            update_existing="true",
+        )
+
+        self.assertTrue(response.data["can_import"])
+        row = response.data["results"][0]
+        self.assertEqual(row["errors"], [])
+        self.assertTrue(any("will UPDATE that record" in warning for warning in row["warnings"]))
+        self.assertEqual(row["data"]["existing_employee_id"], Employee.objects.get(employee_id="EMP-008").id)
+
+    def test_update_existing_flag_does_not_suppress_genuine_within_file_duplicates(self):
+        response = self.preview(
+            "employee_id,first_name,last_name,department,position\n"
+            "EMP-009,First,Row,Operations,Operator\n"
+            "EMP-009,Second,Row,Operations,Operator\n",
+            update_existing="true",
+        )
+
+        self.assertFalse(response.data["can_import"])
+        self.assertTrue(any("Duplicate Employee ID" in error for error in response.data["results"][0]["errors"]))
 
 
 class EmployeeProfileAPIViewTests(APITestCase):

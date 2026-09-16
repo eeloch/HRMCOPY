@@ -401,8 +401,13 @@ class EmployeeImportPreviewAPIView(
             )
 
 
+        update_existing = request.data.get(
+            "update_existing"
+        ) in ("true", "1", "True", True)
+
         results = validate_employee_rows(
-            rows
+            rows,
+            update_existing=update_existing,
         )
 
 
@@ -475,8 +480,13 @@ class EmployeeImportAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        update_existing = request.data.get(
+            "update_existing"
+        ) in ("true", "1", "True", True)
+
         results = validate_employee_rows(
-            rows
+            rows,
+            update_existing=update_existing,
         )
         invalid_rows = [
             item
@@ -493,6 +503,7 @@ class EmployeeImportAPIView(APIView):
                     ),
                     "summary": {
                         "imported": 0,
+                        "updated": 0,
                         "skipped": len(results) - len(invalid_rows),
                         "failed": len(invalid_rows),
                     },
@@ -507,12 +518,25 @@ class EmployeeImportAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        existing_employees = {
+            employee.id: employee
+            for employee in Employee.objects.filter(
+                id__in=[
+                    item["data"]["existing_employee_id"]
+                    for item in results
+                    if item["data"].get("existing_employee_id")
+                ]
+            )
+        }
+
         serializers = []
         serialization_errors = []
 
         for item in results:
+            existing_id = item["data"].get("existing_employee_id")
             serializer = EmployeeCreateUpdateSerializer(
-                data=item["data"]
+                instance=existing_employees.get(existing_id),
+                data=item["data"],
             )
 
             if not serializer.is_valid():
@@ -534,6 +558,7 @@ class EmployeeImportAPIView(APIView):
                     ),
                     "summary": {
                         "imported": 0,
+                        "updated": 0,
                         "skipped": len(results) - len(serialization_errors),
                         "failed": len(serialization_errors),
                     },
@@ -542,13 +567,22 @@ class EmployeeImportAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        created_count = 0
+        updated_count = 0
+
         for serializer in serializers:
+            is_update = serializer.instance is not None
             serializer.save()
+            if is_update:
+                updated_count += 1
+            else:
+                created_count += 1
 
         return Response(
             {
                 "summary": {
-                    "imported": len(serializers),
+                    "imported": created_count,
+                    "updated": updated_count,
                     "skipped": 0,
                     "failed": 0,
                 },

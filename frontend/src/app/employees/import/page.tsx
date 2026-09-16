@@ -21,6 +21,7 @@ type ImportRow = {
 
   data: {
     employee_id: string;
+    existing_employee_id?: number | null;
     full_name?: string;
 
     first_name: string;
@@ -119,6 +120,9 @@ export default function EmployeeImportPage() {
     useState(false);
 
   const [dragging, setDragging] =
+    useState(false);
+
+  const [updateExisting, setUpdateExisting] =
     useState(false);
 
   const [
@@ -230,6 +234,11 @@ export default function EmployeeImportPage() {
         file
       );
 
+      body.append(
+        "update_existing",
+        updateExisting ? "true" : "false"
+      );
+
       const response =
         await apiFetch(
           "/employees/import/preview/",
@@ -291,6 +300,11 @@ export default function EmployeeImportPage() {
         file
       );
 
+      body.append(
+        "update_existing",
+        updateExisting ? "true" : "false"
+      );
+
       const response = await apiFetch(
         "/employees/import/",
         {
@@ -310,13 +324,16 @@ export default function EmployeeImportPage() {
       }
 
       const imported = data.summary?.imported ?? 0;
+      const updated = data.summary?.updated ?? 0;
 
       importSucceeded = true;
 
+      const parts = [];
+      if (imported) parts.push(`${imported} new employee${imported === 1 ? "" : "s"} created`);
+      if (updated) parts.push(`${updated} existing employee${updated === 1 ? "" : "s"} updated`);
+
       setImportMessage(
-        `${imported} employee${
-          imported === 1 ? "" : "s"
-        } imported successfully. Redirecting to Employees...`
+        `${parts.join(" and ") || "No changes were needed"}. Redirecting to Employees...`
       );
 
       window.setTimeout(
@@ -569,6 +586,11 @@ export default function EmployeeImportPage() {
       (row) => !row.valid
     ) ?? [];
 
+  const noticeRows =
+    preview?.results.filter(
+      (row) => row.valid && (row.warnings?.length ?? 0) > 0
+    ) ?? [];
+
 
   const canImport =
     preview?.can_import === true &&
@@ -717,7 +739,20 @@ export default function EmployeeImportPage() {
             )}
 
 
-            <div className="mt-6 flex justify-end">
+            <div className="mt-6 flex items-center justify-between gap-4">
+
+              <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={updateExisting}
+                  onChange={(event) => {
+                    setUpdateExisting(event.target.checked);
+                    setPreview(null);
+                  }}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                Update existing employees instead of rejecting them
+              </label>
 
               <button
                 type="button"
@@ -1132,6 +1167,68 @@ export default function EmployeeImportPage() {
                         )
                       )}
 
+                    </tbody>
+
+                  </table>
+
+                </div>
+
+              </div>
+
+            )}
+
+
+          {/* NOTICES (e.g. rows that will update an existing employee) */}
+
+          {preview &&
+            noticeRows.length >
+              0 && (
+
+              <div className="mt-8 bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+
+                <div className="px-6 py-5 border-b border-slate-200">
+
+                  <h2 className="font-bold text-slate-900 text-lg">
+                    Notices
+                  </h2>
+
+                  <p className="text-sm text-slate-500 mt-1">
+                    {noticeRows.length} row{noticeRows.length === 1 ? "" : "s"} will
+                    pass validation, but there is something worth reviewing.
+                  </p>
+
+                </div>
+
+                <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+
+                  <table className="w-full text-sm">
+
+                    <thead className="bg-slate-50 text-slate-600 sticky top-0">
+                      <tr>
+                        <th className="text-left px-6 py-3">Row</th>
+                        <th className="text-left px-6 py-3">Employee ID</th>
+                        <th className="text-left px-6 py-3">Employee</th>
+                        <th className="text-left px-6 py-3">Notice</th>
+                      </tr>
+                    </thead>
+
+                    <tbody className="divide-y divide-slate-100">
+                      {noticeRows.map((row) => (
+                        <tr key={row.row} className="hover:bg-slate-50">
+                          <td className="px-6 py-4 font-semibold text-slate-900">{row.row}</td>
+                          <td className="px-6 py-4 text-slate-700">{row.data.employee_id || "—"}</td>
+                          <td className="px-6 py-4 text-slate-700">
+                            {[row.data.first_name, row.data.middle_name, row.data.last_name].filter(Boolean).join(" ") || row.data.full_name || "—"}
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="space-y-1">
+                              {(row.warnings ?? []).map((message, index) => (
+                                <div key={index} className="text-amber-700">{message}</div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
 
                   </table>

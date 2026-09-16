@@ -596,7 +596,8 @@ def read_employee_file(
 
 
 def validate_employee_rows(
-    rows
+    rows,
+    update_existing=False,
 ):
     from .models import (
         Department,
@@ -694,6 +695,8 @@ def validate_employee_rows(
         #
         # Employee ID
         #
+        existing_employee_id = None
+
         if not employee_id:
             errors.append(
                 "Employee / Staff ID is required."
@@ -705,6 +708,9 @@ def validate_employee_rows(
             )
 
             if len(duplicate_rows) > 1:
+                # Two rows in the *same* spreadsheet claim this ID - there's no
+                # way to auto-resolve which one should win, so this stays an
+                # error regardless of update_existing.
                 row_list = ", ".join(
                     str(r)
                     for r in duplicate_rows
@@ -712,12 +718,22 @@ def validate_employee_rows(
                 errors.append(
                     f"Duplicate Employee ID '{employee_id}' found on rows {row_list}."
                 )
-            elif Employee.objects.filter(
-                employee_id=employee_id
-            ).exists():
-                errors.append(
-                    "Employee ID already exists in HRM."
-                )
+            else:
+                existing_employee = Employee.objects.filter(
+                    employee_id=employee_id
+                ).first()
+
+                if existing_employee and not update_existing:
+                    errors.append(
+                        "Employee ID already exists in HRM."
+                    )
+                elif existing_employee:
+                    existing_employee_id = existing_employee.id
+                    warnings.append(
+                        f"Employee ID '{employee_id}' already exists in HRM "
+                        f"({existing_employee.full_name}) - this row will "
+                        "UPDATE that record instead of creating a new one."
+                    )
 
         if not first_name:
             errors.append(
@@ -861,6 +877,7 @@ def validate_employee_rows(
 
         cleaned = {
             "employee_id": employee_id,
+            "existing_employee_id": existing_employee_id,
             "full_name": full_name,
             "first_name": first_name,
             "middle_name": middle_name,
