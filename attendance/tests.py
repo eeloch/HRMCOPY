@@ -15,6 +15,7 @@ from attendance.services.overtime import approve_overtime, reject_overtime, sync
 from audit.models import AuditEvent
 from employees.models import BiometricIdentity, Employee
 from leave.models import LeaveRequest, LeaveStatus, LeaveType
+from notifications.models import Notification
 from meals.models import (
     MealAbsencePenalty,
     MealAbsencePenaltyStatus,
@@ -99,6 +100,52 @@ class VendorGatewayBridgeTests(TestCase):
 
         self.assertEqual(AttendanceEvent.objects.get(device=self.device).employee, self.employee)
         self.assertEqual(AttendanceEvent.objects.get(device=other_device).employee, other_employee)
+
+
+@override_settings(BIOMETRIC_BRIDGE_SECRET="test-bridge-secret")
+class RevokedBiometricAccessTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = get_user_model().objects.create_superuser(username="revoke-admin", password="test-password")
+        self.employee = Employee.objects.create(employee_id="REVOKED-001", first_name="Former", last_name="Staff", status="inactive")
+        self.device = BiometricDevice.objects.create(name="Revoke device", serial_number="REVDEV1", location="Factory", device_type="factory")
+        self.identity = BiometricIdentity.objects.create(
+            employee=self.employee, system="vendor_flask_gateway", source_identifier="REVDEV1",
+            external_user_id="500", is_active=False,
+        )
+        self.payload = {"records": [{"gateway_record_id": 1, "enroll_id": "500", "device_serial_number": "REVDEV1", "timestamp": "2026-09-16 08:00:00", "mode": 0, "inout": 0, "event": 0}]}
+
+    def post(self, payload=None):
+        return self.client.post("/api/attendance/integrations/vendor-gateway/punches/", payload or self.payload, format="json", HTTP_X_BIOMETRIC_BRIDGE_KEY="test-bridge-secret")
+
+    def test_revoked_identity_is_reported_distinctly_and_creates_no_attendance_event(self):
+        response = self.post().json()
+
+        self.assertEqual(response["revoked_access"], 1)
+        self.assertEqual(response["created"], 0)
+        self.assertFalse(AttendanceEvent.objects.exists())
+
+    def test_revoked_identity_notifies_superusers(self):
+        self.post()
+
+        notification = Notification.objects.get(recipient=self.admin)
+        self.assertEqual(notification.event_type, "biometrics.revoked_access_attempt")
+        self.assertEqual(notification.employee, self.employee)
+        self.assertIn("Former Staff", notification.message)
+
+    def test_second_attempt_same_day_does_not_duplicate_the_notification(self):
+        self.post()
+        self.post({**self.payload, "records": [{**self.payload["records"][0], "gateway_record_id": 2}]})
+
+        self.assertEqual(Notification.objects.filter(event_type="biometrics.revoked_access_attempt").count(), 1)
+
+    def test_unmapped_id_is_still_reported_as_unmapped_not_revoked(self):
+        payload = {"records": [{**self.payload["records"][0], "gateway_record_id": 3, "enroll_id": "999999"}]}
+
+        response = self.post(payload).json()
+
+        self.assertEqual(response["unmapped_employee"], 1)
+        self.assertEqual(response["revoked_access"], 0)
 
 
 class BiometricEventFeedTests(TestCase):

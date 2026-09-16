@@ -160,6 +160,19 @@ class Employee(models.Model):
             name for name in names if name
         )
 
+    def save(self, *args, **kwargs):
+        previous_status = (
+            Employee.objects.filter(pk=self.pk).values_list("status", flat=True).first()
+            if self.pk else None
+        )
+        super().save(*args, **kwargs)
+        if previous_status == "active" and self.status != "active":
+            # Revoke, don't delete: keeps the device enrollment and the
+            # identity record intact for audit, but stops it resolving to an
+            # employee - see BiometricIngestionService, which flags rather
+            # than silently accepts a scan against a revoked identity.
+            self.biometric_identities.filter(is_active=True).update(is_active=False)
+
     def __str__(self):
         return f"{self.employee_id} - {self.full_name}"
 

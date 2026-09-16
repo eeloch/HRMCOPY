@@ -59,4 +59,4 @@ class VendorGatewayPunchBridgeAPIView(APIView):
         summary.invalid += len(invalid)
         results = [{"gateway_record_id": gateway_id, "status": result.status, "reason": result.reason} for (gateway_id, _), result in zip(valid, summary.results)]
         results.extend({"gateway_record_id": gateway_id, "status": "invalid", "reason": record["invalid"]} for gateway_id, record in invalid)
-        return Response({"received": len(normalized), "created": summary.created, "duplicate": summary.duplicate, "unmapped_employee": summary.unmapped_employee, "unknown_device": summary.unknown_device, "invalid": summary.invalid, "results": results})
+        return Response({"received": len(normalized), "created": summary.created, "duplicate": summary.duplicate, "unmapped_employee": summary.unmapped_employee, "unknown_device": summary.unknown_device, "revoked_access": summary.revoked_access, "invalid": summary.invalid, "results": results})

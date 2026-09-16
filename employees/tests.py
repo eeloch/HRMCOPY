@@ -1,5 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -412,4 +413,59 @@ class EmployeeProfileAPIViewTests(APITestCase):
         self.assertEqual(
             response.data["biometric"],
             {"user_id": "42", "system": "vendor_flask_gateway", "source": "gateway"},
+        )
+
+
+class EmployeeStatusRevokesBiometricAccessTests(TestCase):
+
+    def setUp(self):
+        self.employee = Employee.objects.create(employee_id="EMP-100", first_name="Ada", last_name="Okafor", status="active")
+        self.identity = BiometricIdentity.objects.create(
+            employee=self.employee, system="vendor_flask_gateway", source_identifier="DEVICE-1", external_user_id="100",
+        )
+
+    def test_leaving_active_status_revokes_all_biometric_identities(self):
+        self.employee.status = "inactive"
+        self.employee.save()
+
+        self.identity.refresh_from_db()
+        self.assertFalse(self.identity.is_active)
+
+    def test_suspended_also_revokes_access(self):
+        self.employee.status = "suspended"
+        self.employee.save()
+
+        self.identity.refresh_from_db()
+        self.assertFalse(self.identity.is_active)
+
+    def test_saving_without_a_status_change_does_not_touch_identities(self):
+        self.employee.first_name = "Adaeze"
+        self.employee.save()
+
+        self.identity.refresh_from_db()
+        self.assertTrue(self.identity.is_active)
+
+    def test_returning_to_active_does_not_automatically_restore_access(self):
+        self.employee.status = "inactive"
+        self.employee.save()
+        self.employee.status = "active"
+        self.employee.save()
+
+        self.identity.refresh_from_db()
+        self.assertFalse(self.identity.is_active)
+
+    def test_creating_an_already_inactive_employee_does_not_crash(self):
+        employee = Employee.objects.create(employee_id="EMP-101", first_name="New", last_name="Hire", status="inactive")
+        self.assertEqual(employee.status, "inactive")
+
+    def test_multiple_devices_are_all_revoked_together(self):
+        BiometricIdentity.objects.create(
+            employee=self.employee, system="vendor_flask_gateway", source_identifier="DEVICE-2", external_user_id="200",
+        )
+
+        self.employee.status = "terminated"
+        self.employee.save()
+
+        self.assertEqual(
+            BiometricIdentity.objects.filter(employee=self.employee, is_active=True).count(), 0,
         )
