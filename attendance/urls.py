@@ -19,12 +19,16 @@ from .views import (
     OvertimeRecordListAPIView,
     VendorGatewayPunchBridgeAPIView,
     BiometricEventListAPIView,
+    BiometricDeviceListCreateAPIView,
+    BiometricDeviceDetailAPIView,
 )
 
 
 urlpatterns = [
     path("integrations/vendor-gateway/punches/", VendorGatewayPunchBridgeAPIView.as_view(), name="vendor-gateway-punches"),
     path("biometric-events/", BiometricEventListAPIView.as_view(), name="biometric-event-list"),
+    path("devices/", BiometricDeviceListCreateAPIView.as_view(), name="biometric-device-list-create"),
+    path("devices/<int:device_id>/", BiometricDeviceDetailAPIView.as_view(), name="biometric-device-detail"),
     path(
         "today/",
         TodayAttendanceAPIView.as_view(),

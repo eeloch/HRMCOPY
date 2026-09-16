@@ -120,6 +120,11 @@ class BiometricDevice(models.Model):
         ("office", "Office"),
     ]
 
+    PURPOSES = [
+        ("attendance", "Attendance"),
+        ("meal_ticket", "Meal Ticket"),
+    ]
+
     name = models.CharField(
         max_length=100,
     )
@@ -143,6 +148,12 @@ class BiometricDevice(models.Model):
         choices=DEVICE_TYPES,
     )
 
+    purpose = models.CharField(
+        max_length=20,
+        choices=PURPOSES,
+        default="attendance",
+    )
+
     ip_address = models.GenericIPAddressField(
         null=True,
         blank=True,
@@ -156,6 +167,9 @@ class BiometricDevice(models.Model):
         null=True,
         blank=True,
     )
+
+    class Meta:
+        permissions = [("manage_devices", "Can register and manage biometric devices")]
 
     def __str__(self):
         return f"{self.name} - {self.serial_number}"

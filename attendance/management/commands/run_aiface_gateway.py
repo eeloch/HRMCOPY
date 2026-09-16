@@ -20,7 +20,9 @@ from datetime import datetime
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.utils import timezone
 
+from attendance.models import BiometricDevice
 from attendance.integrations.aiface_protocol import (
     build_reg_ack,
     build_sendlog_ack,
@@ -84,6 +86,7 @@ class Command(BaseCommand):
                 if cmd == "reg":
                     sn = message.get("sn")
                     self.stdout.write(f"[{peer}] reg from device sn={sn}")
+                    await asyncio.to_thread(self._mark_device_online, sn, peer[0] if peer else None)
                     await ws.send(json.dumps(build_reg_ack(datetime.now())))
                 elif cmd == "sendlog":
                     await self._handle_sendlog(ws, message, bridge_url, secret)
@@ -95,6 +98,8 @@ class Command(BaseCommand):
             pass
         finally:
             self.stdout.write(f"[{peer}] disconnected (sn={sn})")
+            if sn:
+                await asyncio.to_thread(self._mark_device_offline, sn)
 
     async def _handle_sendlog(self, ws, message, bridge_url, secret):
         sn = message.get("sn")
@@ -114,6 +119,17 @@ class Command(BaseCommand):
                 result = False
 
         await ws.send(json.dumps(build_sendlog_ack(datetime.now(), result=result, count=count, logindex=logindex)))
+
+    @staticmethod
+    def _mark_device_online(serial_number, ip_address):
+        """No-op for a serial number with no matching BiometricDevice row (unregistered devices are surfaced via the sendlog bridge response instead)."""
+        BiometricDevice.objects.filter(serial_number=serial_number).update(
+            is_online=True, last_sync_at=timezone.now(), ip_address=ip_address,
+        )
+
+    @staticmethod
+    def _mark_device_offline(serial_number):
+        BiometricDevice.objects.filter(serial_number=serial_number).update(is_online=False)
 
     @staticmethod
     def _post_to_bridge(bridge_url, secret, records):
