@@ -11,6 +11,7 @@ const statusStyles: Record<string, string> = {
   late: "bg-amber-50 text-amber-700 ring-amber-100",
   pending: "bg-amber-50 text-amber-700 ring-amber-100",
   warning: "bg-amber-50 text-amber-700 ring-amber-100",
+  incomplete: "bg-amber-50 text-amber-700 ring-amber-100",
   absent: "bg-red-50 text-red-700 ring-red-100",
   rejected: "bg-red-50 text-red-700 ring-red-100",
   error: "bg-red-50 text-red-700 ring-red-100",

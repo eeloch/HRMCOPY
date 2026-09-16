@@ -771,8 +771,10 @@ def validate_employee_rows(
         position = None
 
         if not department_name:
-            errors.append(
-                "Department is required."
+            warnings.append(
+                "Department is blank - this employee will be imported "
+                "without a department. Their profile will be flagged as "
+                "incomplete until it's assigned one."
             )
         else:
             department = (

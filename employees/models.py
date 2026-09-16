@@ -70,6 +70,7 @@ class Employee(models.Model):
         Department,
         on_delete=models.SET_NULL,
         null=True,
+        blank=True,
         related_name="employees",
     )
 

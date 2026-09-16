@@ -1,6 +1,10 @@
+from django.contrib.auth import get_user_model
 from django.db.models import Q
 
 from django.db import transaction
+
+from notifications.models import NotificationSeverity
+from notifications.services import NotificationService
 
 from rest_framework import status
 
@@ -579,14 +583,23 @@ class EmployeeImportAPIView(APIView):
 
         created_count = 0
         updated_count = 0
+        saved_employees = []
 
         for serializer in serializers:
             is_update = serializer.instance is not None
-            serializer.save()
+            saved_employees.append(serializer.save())
             if is_update:
                 updated_count += 1
             else:
                 created_count += 1
+
+        incomplete_employees = [
+            employee
+            for employee in saved_employees
+            if employee.department_id is None
+        ]
+        if incomplete_employees:
+            self._notify_incomplete_profiles(incomplete_employees)
 
         skipped_rows = [
             {"row": item["row"], "errors": item["errors"]}
@@ -605,6 +618,23 @@ class EmployeeImportAPIView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+    @staticmethod
+    def _notify_incomplete_profiles(employees):
+        """One notification per admin per import run, not one per employee - avoids flooding the notification bell on a large import."""
+        names = ", ".join(employee.full_name for employee in employees[:5])
+        if len(employees) > 5:
+            names += f", and {len(employees) - 5} more"
+
+        for user in get_user_model().objects.filter(is_superuser=True):
+            NotificationService.create(
+                recipient=user,
+                event_type="employees.import_incomplete_profile",
+                title="Employees imported without a department",
+                message=f"{len(employees)} employee(s) were imported without a department and need their profile completed: {names}.",
+                severity=NotificationSeverity.WARNING,
+                related_url="/employees",
+            )
 
 
 class EmployeeImportOrganizationAPIView(APIView):

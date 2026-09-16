@@ -169,7 +169,7 @@ export default function EmployeesPage() {
                         <div className="text-sm text-slate-500">{employee.employee_id}</div>
                       </td>
                       <td className="px-5 py-5 text-slate-700">
-                        {employee.department_name || "-"}
+                        {employee.department_name || <StatusBadge status="incomplete" />}
                       </td>
                       <td className="px-5 py-5 text-slate-700">
                         {employee.position_name || "-"}
