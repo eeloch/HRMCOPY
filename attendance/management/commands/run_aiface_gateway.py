@@ -105,9 +105,10 @@ class Command(BaseCommand):
         gateway_records = [translate_sendlog_record(sn, record) for record in records]
         result = True
         if gateway_records:
+            enroll_ids = [r["enroll_id"] for r in gateway_records]
             try:
                 response = await asyncio.to_thread(self._post_to_bridge, bridge_url, secret, gateway_records)
-                self.stdout.write(f"[{sn}] sendlog: {response}")
+                self.stdout.write(f"[{sn}] sendlog enroll_ids={enroll_ids}: {response}")
             except (urllib.error.URLError, ValueError) as error:
                 self.stderr.write(f"[{sn}] bridge post failed, asking device to retry: {error}")
                 result = False
