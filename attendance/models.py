@@ -455,3 +455,43 @@ class OvertimeRecord(models.Model):
 
     def __str__(self):
         return f"{self.employee.employee_id} - overtime {self.work_date}"
+
+
+class DeviceCommand(models.Model):
+    """An outbox row the AiFace gateway polls and delivers to a connected terminal.
+
+    Only one command may be in flight per device at a time - the AiFace
+    protocol itself requires commands be sent one-by-one, waiting for the
+    device's response before the next is sent (see the vendor's own
+    Notes.txt). The gateway enforces that by only picking up a device's next
+    pending command once its previous one reaches "acked" or "failed".
+    """
+
+    COMMAND_TYPES = [
+        ("enroll_user", "Enroll User"),
+        ("delete_user", "Delete User"),
+        ("refresh_enrolled_ids", "Refresh Enrolled IDs"),
+    ]
+
+    STATUSES = [
+        ("pending", "Pending"),
+        ("sent", "Sent"),
+        ("acked", "Acknowledged"),
+        ("failed", "Failed"),
+    ]
+
+    device = models.ForeignKey(BiometricDevice, on_delete=models.CASCADE, related_name="commands")
+    command_type = models.CharField(max_length=30, choices=COMMAND_TYPES)
+    payload = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=20, choices=STATUSES, default="pending")
+    result = models.JSONField(default=dict, blank=True)
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"{self.command_type} -> {self.device.serial_number} ({self.status})"

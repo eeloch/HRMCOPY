@@ -21,6 +21,7 @@ from .views import (
     BiometricEventListAPIView,
     BiometricDeviceListCreateAPIView,
     BiometricDeviceDetailAPIView,
+    DeviceCommandListCreateAPIView,
 )
 
 
@@ -29,6 +30,7 @@ urlpatterns = [
     path("biometric-events/", BiometricEventListAPIView.as_view(), name="biometric-event-list"),
     path("devices/", BiometricDeviceListCreateAPIView.as_view(), name="biometric-device-list-create"),
     path("devices/<int:device_id>/", BiometricDeviceDetailAPIView.as_view(), name="biometric-device-detail"),
+    path("devices/<int:device_id>/commands/", DeviceCommandListCreateAPIView.as_view(), name="device-command-list-create"),
     path(
         "today/",
         TodayAttendanceAPIView.as_view(),

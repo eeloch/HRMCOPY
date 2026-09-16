@@ -4,7 +4,8 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from attendance.management.commands.run_aiface_gateway import Command
-from attendance.models import BiometricDevice
+from attendance.models import BiometricDevice, DeviceCommand
+from employees.models import BiometricIdentity, Employee
 
 
 class BiometricDeviceAPITests(TestCase):
@@ -133,3 +134,237 @@ class GatewayOnlineStatusTests(TestCase):
     def test_unregistered_serial_number_is_a_safe_no_op(self):
         Command._mark_device_online("UNKNOWN-SERIAL", "1.2.3.4")
         Command._mark_device_offline("UNKNOWN-SERIAL")
+
+
+class GatewayCommandQueueTests(TestCase):
+    def setUp(self):
+        self.device = BiometricDevice.objects.create(
+            name="Main Entrance",
+            serial_number="AYTK14145399",
+            location="Factory gate",
+            device_type="factory",
+        )
+
+    def test_next_command_to_send_returns_oldest_pending_command(self):
+        older = DeviceCommand.objects.create(device=self.device, command_type="refresh_enrolled_ids", payload={})
+        DeviceCommand.objects.create(device=self.device, command_type="delete_user", payload={"enrollid": 5})
+
+        result = Command._next_command_to_send("AYTK14145399")
+
+        self.assertIsNotNone(result)
+        command_id, wire_message = result
+        self.assertEqual(command_id, older.id)
+        self.assertEqual(wire_message["cmd"], "getuserids")
+
+    def test_no_pending_command_returns_none(self):
+        self.assertIsNone(Command._next_command_to_send("AYTK14145399"))
+
+    def test_a_command_already_in_flight_blocks_the_next_one(self):
+        DeviceCommand.objects.create(device=self.device, command_type="refresh_enrolled_ids", payload={}, status="sent")
+        DeviceCommand.objects.create(device=self.device, command_type="delete_user", payload={"enrollid": 5})
+
+        self.assertIsNone(Command._next_command_to_send("AYTK14145399"))
+
+    def test_mark_command_sent_records_timestamp(self):
+        command = DeviceCommand.objects.create(device=self.device, command_type="refresh_enrolled_ids", payload={})
+
+        Command._mark_command_sent(command.id)
+
+        command.refresh_from_db()
+        self.assertEqual(command.status, "sent")
+        self.assertIsNotNone(command.sent_at)
+
+    def test_resolve_command_marks_successful_response_acked(self):
+        command = DeviceCommand.objects.create(
+            device=self.device, command_type="refresh_enrolled_ids", payload={}, status="sent",
+        )
+        response = {"ret": "getuserids", "sn": "AYTK14145399", "result": True, "count": 2, "record": ["3", "7"]}
+
+        Command._resolve_command("AYTK14145399", response)
+
+        command.refresh_from_db()
+        self.assertEqual(command.status, "acked")
+        self.assertEqual(command.result, response)
+        self.assertIsNotNone(command.completed_at)
+
+    def test_resolve_command_marks_failed_response(self):
+        command = DeviceCommand.objects.create(
+            device=self.device, command_type="delete_user", payload={"enrollid": 5}, status="sent",
+        )
+        response = {"ret": "deleteuser", "sn": "AYTK14145399", "result": False, "reason": 1}
+
+        Command._resolve_command("AYTK14145399", response)
+
+        command.refresh_from_db()
+        self.assertEqual(command.status, "failed")
+
+    def test_resolve_command_with_no_in_flight_command_is_a_safe_no_op(self):
+        Command._resolve_command("AYTK14145399", {"ret": "getuserids", "result": True})
+
+
+class GatewayIdentityLinkingTests(TestCase):
+    def setUp(self):
+        self.device = BiometricDevice.objects.create(
+            name="Main Entrance",
+            serial_number="AYTK14145399",
+            location="Factory gate",
+            device_type="factory",
+        )
+        self.employee = Employee.objects.create(employee_id="EMP-001", first_name="Ada", last_name="Okafor")
+
+    def test_successful_enrollment_creates_biometric_identity(self):
+        command = DeviceCommand.objects.create(
+            device=self.device, command_type="enroll_user", status="sent",
+            payload={"enrollid": 5, "employee_id": self.employee.id, "name": "Ada Okafor", "biometric_type": "face"},
+        )
+
+        Command._resolve_command("AYTK14145399", {"ret": "adduser", "result": True, "enrollid": 5})
+
+        identity = BiometricIdentity.objects.get(employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399")
+        self.assertEqual(identity.external_user_id, "5")
+        self.assertTrue(identity.is_active)
+
+    def test_failed_enrollment_does_not_create_biometric_identity(self):
+        DeviceCommand.objects.create(
+            device=self.device, command_type="enroll_user", status="sent",
+            payload={"enrollid": 5, "employee_id": self.employee.id, "name": "Ada Okafor", "biometric_type": "face"},
+        )
+
+        Command._resolve_command("AYTK14145399", {"ret": "adduser", "result": False, "reason": 1})
+
+        self.assertFalse(BiometricIdentity.objects.filter(employee=self.employee).exists())
+
+    def test_re_enrolling_updates_existing_identity_instead_of_duplicating(self):
+        BiometricIdentity.objects.create(
+            employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5",
+        )
+        command = DeviceCommand.objects.create(
+            device=self.device, command_type="enroll_user", status="sent",
+            payload={"enrollid": 9, "employee_id": self.employee.id, "name": "Ada Okafor", "biometric_type": "fingerprint"},
+        )
+
+        Command._resolve_command("AYTK14145399", {"ret": "adduser", "result": True})
+
+        self.assertEqual(BiometricIdentity.objects.filter(employee=self.employee).count(), 1)
+        identity = BiometricIdentity.objects.get(employee=self.employee)
+        self.assertEqual(identity.external_user_id, "9")
+
+    def test_successful_deletion_removes_biometric_identity(self):
+        BiometricIdentity.objects.create(
+            employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5",
+        )
+        DeviceCommand.objects.create(
+            device=self.device, command_type="delete_user", status="sent",
+            payload={"enrollid": 5, "employee_id": self.employee.id},
+        )
+
+        Command._resolve_command("AYTK14145399", {"ret": "deleteuser", "result": True})
+
+        self.assertFalse(BiometricIdentity.objects.filter(employee=self.employee).exists())
+
+    def test_deleted_enrollid_can_be_reassigned_to_a_new_employee(self):
+        BiometricIdentity.objects.create(
+            employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5",
+        )
+        DeviceCommand.objects.create(
+            device=self.device, command_type="delete_user", status="sent", payload={"enrollid": 5, "employee_id": self.employee.id},
+        )
+        Command._resolve_command("AYTK14145399", {"ret": "deleteuser", "result": True})
+
+        new_employee = Employee.objects.create(employee_id="EMP-002", first_name="Bola", last_name="Ade")
+        command = DeviceCommand.objects.create(
+            device=self.device, command_type="enroll_user", status="sent",
+            payload={"enrollid": 5, "employee_id": new_employee.id, "name": "Bola Ade", "biometric_type": "face"},
+        )
+
+        Command._resolve_command("AYTK14145399", {"ret": "adduser", "result": True})
+
+        identity = BiometricIdentity.objects.get(system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5")
+        self.assertEqual(identity.employee, new_employee)
+
+
+class DeviceCommandAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.manager = get_user_model().objects.create_user(username="device-manager-2", password="test-password")
+        self.manager.user_permissions.add(Permission.objects.get(codename="manage_devices"))
+        self.viewer = get_user_model().objects.create_user(username="device-viewer-2", password="test-password")
+        self.device = BiometricDevice.objects.create(
+            name="Main Entrance", serial_number="AYTK14145399", location="Factory gate", device_type="factory",
+        )
+        self.employee = Employee.objects.create(employee_id="EMP-010", first_name="Chika", last_name="Nwosu")
+
+    def url(self):
+        return f"/api/attendance/devices/{self.device.id}/commands/"
+
+    def test_viewer_without_permission_cannot_queue_a_command(self):
+        self.client.force_authenticate(self.viewer)
+        response = self.client.post(self.url(), {"command_type": "refresh_enrolled_ids"}, format="json")
+        self.assertEqual(response.status_code, 403)
+
+    def test_manager_can_queue_refresh_enrolled_ids(self):
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "refresh_enrolled_ids"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["command_type"], "refresh_enrolled_ids")
+        self.assertEqual(response.data["status"], "pending")
+
+    def test_enroll_user_assigns_a_free_enrollid_starting_at_1(self):
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": self.employee.id, "biometric_type": "face"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["payload"]["enrollid"], 1)
+        self.assertEqual(response.data["payload"]["name"], "Chika Nwosu")
+
+    def test_enroll_user_assigns_the_next_free_enrollid_after_existing_ones(self):
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="7")
+        other_employee = Employee.objects.create(employee_id="EMP-011", first_name="Tobi", last_name="Lawal")
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": other_employee.id, "biometric_type": "face"}, format="json")
+        self.assertEqual(response.data["payload"]["enrollid"], 8)
+
+    def test_re_enrolling_reuses_the_employees_existing_enrollid_on_this_device(self):
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="3")
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": self.employee.id, "biometric_type": "fingerprint"}, format="json")
+        self.assertEqual(response.data["payload"]["enrollid"], 3)
+
+    def test_enroll_user_requires_a_valid_biometric_type(self):
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": self.employee.id, "biometric_type": "palm"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_enroll_user_requires_an_existing_employee(self):
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": 999999, "biometric_type": "face"}, format="json")
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_user_requires_employee_to_be_enrolled_on_this_device(self):
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "delete_user", "employee": self.employee.id}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_delete_user_uses_the_employees_enrollid_on_this_device(self):
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="4")
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "delete_user", "employee": self.employee.id}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["payload"]["enrollid"], 4)
+
+    def test_unsupported_command_type_is_rejected(self):
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "reboot_device"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_cannot_queue_a_second_command_while_one_is_in_progress(self):
+        DeviceCommand.objects.create(device=self.device, command_type="refresh_enrolled_ids", payload={}, status="sent")
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "refresh_enrolled_ids"}, format="json")
+        self.assertEqual(response.status_code, 409)
+
+    def test_any_authenticated_user_can_view_command_history(self):
+        DeviceCommand.objects.create(device=self.device, command_type="refresh_enrolled_ids", payload={}, status="acked")
+        self.client.force_authenticate(self.viewer)
+        response = self.client.get(self.url())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["results"]), 1)

@@ -1,9 +1,11 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { Fragment, FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
+import { DeviceCommandPanel } from "@/components/devices/DeviceCommandPanel";
+import type { ShiftEmployee } from "@/components/shifts/types";
 import { AppCard, PageHeader, Section, StatusBadge } from "@/components/ui";
 import { apiFetch, getAccessToken } from "@/lib/api";
 
@@ -39,6 +41,8 @@ function formatLastSeen(value: string | null) {
 export default function BiometricDevicesPage() {
   const router = useRouter();
   const [devices, setDevices] = useState<BiometricDevice[]>([]);
+  const [employees, setEmployees] = useState<ShiftEmployee[]>([]);
+  const [expandedDeviceId, setExpandedDeviceId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [formError, setFormError] = useState("");
@@ -54,10 +58,17 @@ export default function BiometricDevicesPage() {
     setLoading(true);
     setError("");
     try {
-      const response = await apiFetch("/attendance/devices/");
-      if (!response.ok) throw new Error("Unable to load biometric devices.");
-      const data: { results?: BiometricDevice[] } = await response.json();
-      setDevices(data.results || []);
+      const [deviceResponse, employeeResponse] = await Promise.all([
+        apiFetch("/attendance/devices/"),
+        apiFetch("/employees/"),
+      ]);
+      if (!deviceResponse.ok) throw new Error("Unable to load biometric devices.");
+      const deviceData: { results?: BiometricDevice[] } = await deviceResponse.json();
+      setDevices(deviceData.results || []);
+      if (employeeResponse.ok) {
+        const employeeData: { results?: ShiftEmployee[] } = await employeeResponse.json();
+        setEmployees(employeeData.results || []);
+      }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load biometric devices.");
     } finally {
@@ -153,15 +164,29 @@ export default function BiometricDevicesPage() {
                   <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3">Name</th><th className="px-5 py-3">Serial Number</th><th className="px-5 py-3">Purpose</th><th className="px-5 py-3">Location</th><th className="px-5 py-3">Status</th><th className="px-5 py-3">Last Seen</th><th className="px-5 py-3" /></tr></thead>
                   <tbody className="divide-y divide-slate-100">
                     {devices.map((device) => (
-                      <tr key={device.id} className="hover:bg-slate-50">
-                        <td className="px-5 py-4 font-semibold text-slate-900">{device.name}</td>
-                        <td className="px-5 py-4 font-mono text-sm text-slate-700">{device.serial_number}</td>
-                        <td className="px-5 py-4"><StatusBadge status={device.purpose === "meal_ticket" ? "info" : "active"} /> <span className="ml-1 text-sm text-slate-600">{device.purpose === "meal_ticket" ? "Meal Ticket" : "Attendance"}</span></td>
-                        <td className="px-5 py-4 text-sm text-slate-600">{device.location}</td>
-                        <td className="px-5 py-4"><StatusBadge status={device.is_online ? "active" : "inactive"} /> <span className="ml-1 text-sm text-slate-600">{device.is_online ? "Online" : "Offline"}</span></td>
-                        <td className="px-5 py-4 text-sm text-slate-600">{formatLastSeen(device.last_sync_at)}</td>
-                        <td className="px-5 py-4 text-right"><button type="button" onClick={() => void removeDevice(device)} className="text-sm font-semibold text-red-600 hover:underline">Remove</button></td>
-                      </tr>
+                      <Fragment key={device.id}>
+                        <tr className="hover:bg-slate-50">
+                          <td className="px-5 py-4 font-semibold text-slate-900">{device.name}</td>
+                          <td className="px-5 py-4 font-mono text-sm text-slate-700">{device.serial_number}</td>
+                          <td className="px-5 py-4"><StatusBadge status={device.purpose === "meal_ticket" ? "info" : "active"} /> <span className="ml-1 text-sm text-slate-600">{device.purpose === "meal_ticket" ? "Meal Ticket" : "Attendance"}</span></td>
+                          <td className="px-5 py-4 text-sm text-slate-600">{device.location}</td>
+                          <td className="px-5 py-4"><StatusBadge status={device.is_online ? "active" : "inactive"} /> <span className="ml-1 text-sm text-slate-600">{device.is_online ? "Online" : "Offline"}</span></td>
+                          <td className="px-5 py-4 text-sm text-slate-600">{formatLastSeen(device.last_sync_at)}</td>
+                          <td className="px-5 py-4 text-right whitespace-nowrap">
+                            <button type="button" onClick={() => setExpandedDeviceId(expandedDeviceId === device.id ? null : device.id)} className="mr-4 text-sm font-semibold text-blue-700 hover:underline">
+                              {expandedDeviceId === device.id ? "Hide" : "Manage Staff"}
+                            </button>
+                            <button type="button" onClick={() => void removeDevice(device)} className="text-sm font-semibold text-red-600 hover:underline">Remove</button>
+                          </td>
+                        </tr>
+                        {expandedDeviceId === device.id && (
+                          <tr>
+                            <td colSpan={7} className="p-0">
+                              <DeviceCommandPanel deviceId={device.id} employees={employees} />
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     ))}
                   </tbody>
                 </table>

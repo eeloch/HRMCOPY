@@ -17,6 +17,11 @@ import hashlib
 from datetime import datetime
 from typing import Any, Mapping
 
+# BiometricIdentity.system value for every identity resolved through this
+# gateway. source_identifier is the specific device's serial number - see
+# translate_sendlog_record and the enrollment views in attendance/views/devices.py.
+IDENTITY_SYSTEM = "vendor_flask_gateway"
+
 
 def build_reg_ack(now: datetime) -> dict:
     """Response to the device's `reg` handshake.
@@ -65,6 +70,49 @@ def stable_record_id(device_serial_number: str, record: Mapping[str, Any]) -> in
     )
     digest = hashlib.sha256(f"{device_serial_number}|{basis}".encode()).hexdigest()
     return int(digest[:12], 16) + 1
+
+
+BIOMETRIC_TYPE_BACKUPNUM = {"face": 50, "fingerprint": 0}
+
+
+def build_adduser_command(sn: str, enrollid: int, name: str, biometric_type: str) -> dict:
+    """Server -> device: start on-device enrollment.
+
+    This only kicks off the prompt on the terminal's own screen - the device
+    replies once the person has actually scanned there (or the attempt is
+    cancelled/times out), not immediately. See protocol section 5.12 (`adduser`).
+    """
+    return {
+        "cmd": "adduser",
+        "sn": sn,
+        "enrollid": enrollid,
+        "aliasid": str(enrollid),
+        "backupnum": BIOMETRIC_TYPE_BACKUPNUM.get(biometric_type, 50),
+        "admin": 0,
+        "flag": 0,
+        "name": name,
+    }
+
+
+def build_deleteuser_command(sn: str, enrollid: int) -> dict:
+    """backupnum 12 removes the whole user (every enrolled biometric slot), not just one."""
+    return {"cmd": "deleteuser", "sn": sn, "enrollid": enrollid, "aliasid": str(enrollid), "backupnum": 12}
+
+
+def build_getuserids_command(sn: str) -> dict:
+    """Every currently-enrolled id in one response, unpaginated (protocol section 5.7)."""
+    return {"cmd": "getuserids", "sn": sn}
+
+
+def build_device_command(sn: str, command_type: str, payload: Mapping[str, Any]) -> dict:
+    """Translate a DeviceCommand row's (command_type, payload) into the wire message to send."""
+    if command_type == "enroll_user":
+        return build_adduser_command(sn, payload["enrollid"], payload.get("name", ""), payload.get("biometric_type", "face"))
+    if command_type == "delete_user":
+        return build_deleteuser_command(sn, payload["enrollid"])
+    if command_type == "refresh_enrolled_ids":
+        return build_getuserids_command(sn)
+    raise ValueError(f"Unknown command_type: {command_type!r}")
 
 
 def translate_sendlog_record(device_serial_number: str, record: Mapping[str, Any]) -> dict:

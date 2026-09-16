@@ -3,6 +3,10 @@ from datetime import datetime
 from django.test import SimpleTestCase
 
 from attendance.integrations.aiface_protocol import (
+    build_adduser_command,
+    build_deleteuser_command,
+    build_device_command,
+    build_getuserids_command,
     build_reg_ack,
     build_sendlog_ack,
     build_senduser_ack,
@@ -119,3 +123,56 @@ class TranslateSendlogRecordTests(SimpleTestCase):
         translated = translate_sendlog_record("LF00000001", record)
 
         self.assertNotIn("image", translated)
+
+
+class BuildAdduserCommandTests(SimpleTestCase):
+    def test_face_enrollment_uses_backupnum_50(self):
+        command = build_adduser_command("LF00000001", 42, "Test Employee", "face")
+
+        self.assertEqual(command["cmd"], "adduser")
+        self.assertEqual(command["enrollid"], 42)
+        self.assertEqual(command["name"], "Test Employee")
+        self.assertEqual(command["backupnum"], 50)
+
+    def test_fingerprint_enrollment_uses_backupnum_0(self):
+        command = build_adduser_command("LF00000001", 42, "Test Employee", "fingerprint")
+
+        self.assertEqual(command["backupnum"], 0)
+
+    def test_unknown_biometric_type_defaults_to_face(self):
+        command = build_adduser_command("LF00000001", 42, "Test Employee", "palm")
+
+        self.assertEqual(command["backupnum"], 50)
+
+
+class BuildDeleteuserCommandTests(SimpleTestCase):
+    def test_deletes_the_whole_user_not_one_slot(self):
+        command = build_deleteuser_command("LF00000001", 42)
+
+        self.assertEqual(command, {"cmd": "deleteuser", "sn": "LF00000001", "enrollid": 42, "aliasid": "42", "backupnum": 12})
+
+
+class BuildGetuseridsCommandTests(SimpleTestCase):
+    def test_requests_the_full_unpaginated_id_list(self):
+        self.assertEqual(build_getuserids_command("LF00000001"), {"cmd": "getuserids", "sn": "LF00000001"})
+
+
+class BuildDeviceCommandTests(SimpleTestCase):
+    def test_dispatches_enroll_user_to_adduser(self):
+        command = build_device_command("LF00000001", "enroll_user", {"enrollid": 5, "name": "A", "biometric_type": "face"})
+
+        self.assertEqual(command["cmd"], "adduser")
+
+    def test_dispatches_delete_user_to_deleteuser(self):
+        command = build_device_command("LF00000001", "delete_user", {"enrollid": 5})
+
+        self.assertEqual(command["cmd"], "deleteuser")
+
+    def test_dispatches_refresh_enrolled_ids_to_getuserids(self):
+        command = build_device_command("LF00000001", "refresh_enrolled_ids", {})
+
+        self.assertEqual(command["cmd"], "getuserids")
+
+    def test_unknown_command_type_raises(self):
+        with self.assertRaises(ValueError):
+            build_device_command("LF00000001", "reboot_device", {})

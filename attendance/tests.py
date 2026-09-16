@@ -67,7 +67,7 @@ class VendorGatewayBridgeTests(TestCase):
         self.client = APIClient()
         self.employee = Employee.objects.create(employee_id="BRIDGE-001", first_name="Bridge", last_name="Employee")
         self.device = BiometricDevice.objects.create(name="Bridge device", serial_number="TEST123", location="Factory", device_type="factory")
-        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="gateway", external_user_id="1001")
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="TEST123", external_user_id="1001")
         self.payload = {"source": "vendor_flask_gateway", "records": [{"gateway_record_id": 123, "enroll_id": "1001", "device_serial_number": "TEST123", "timestamp": "2026-09-03 19:30:00", "mode": 0, "inout": 0, "event": 0}]}
 
     def post(self, payload=None, secret="test-bridge-secret"):
@@ -87,6 +87,18 @@ class VendorGatewayBridgeTests(TestCase):
         self.assertEqual(self.post(image_payload).json()["invalid"], 1)
         mixed = {"records": [self.payload["records"][0], {**self.payload["records"][0], "gateway_record_id": 124, "enroll_id": "unknown"}]}
         result = self.post(mixed).json(); self.assertEqual(result["created"], 1); self.assertEqual(result["unmapped_employee"], 1)
+
+    def test_same_enrollid_on_different_devices_resolves_to_different_employees(self):
+        other_employee = Employee.objects.create(employee_id="BRIDGE-002", first_name="Other", last_name="Employee")
+        other_device = BiometricDevice.objects.create(name="Other device", serial_number="TEST456", location="Hostel", device_type="hostel")
+        BiometricIdentity.objects.create(employee=other_employee, system="vendor_flask_gateway", source_identifier="TEST456", external_user_id="1001")
+
+        self.assertEqual(self.post().json()["created"], 1)
+        other_payload = {"records": [{**self.payload["records"][0], "gateway_record_id": 124, "device_serial_number": "TEST456"}]}
+        self.assertEqual(self.post(other_payload).json()["created"], 1)
+
+        self.assertEqual(AttendanceEvent.objects.get(device=self.device).employee, self.employee)
+        self.assertEqual(AttendanceEvent.objects.get(device=other_device).employee, other_employee)
 
 
 class BiometricEventFeedTests(TestCase):

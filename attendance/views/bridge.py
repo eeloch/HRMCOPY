@@ -10,11 +10,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from attendance.integrations import BiometricIngestionService, NormalizedBiometricPunch
+from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
 
 
 FORBIDDEN_BIOMETRIC_FIELDS = {"image", "photo", "face", "fingerprint", "template", "signature", "base64"}
-BRIDGE_SYSTEM = "vendor_flask_gateway"
-BRIDGE_SOURCE_IDENTIFIER = "gateway"
 
 
 class VendorGatewayPunchBridgeAPIView(APIView):
@@ -45,7 +44,12 @@ class VendorGatewayPunchBridgeAPIView(APIView):
                 gateway_id = int(item["gateway_record_id"])
                 if gateway_id < 1:
                     raise ValueError("gateway_record_id must be positive.")
-                normalized.append((gateway_id, NormalizedBiometricPunch(system=BRIDGE_SYSTEM, source_identifier=BRIDGE_SOURCE_IDENTIFIER, external_event_id=f"vendor-flask-record:{gateway_id}", external_user_id=str(item["enroll_id"]), device_serial_number=str(item["device_serial_number"]), timestamp=timestamp, verification_type="unknown", raw_payload={"gateway_record_id": gateway_id, "mode": item.get("mode"), "inout": item.get("inout"), "event": item.get("event"), "temperature": item.get("temperature")})))
+                device_serial_number = str(item["device_serial_number"])
+                # source_identifier is the physical device's serial number, not a
+                # constant: enrollid is a small integer the terminal assigns
+                # locally, so the same number means different people on different
+                # terminals. Namespacing by device keeps that unambiguous.
+                normalized.append((gateway_id, NormalizedBiometricPunch(system=IDENTITY_SYSTEM, source_identifier=device_serial_number, external_event_id=f"vendor-flask-record:{gateway_id}", external_user_id=str(item["enroll_id"]), device_serial_number=device_serial_number, timestamp=timestamp, verification_type="unknown", raw_payload={"gateway_record_id": gateway_id, "mode": item.get("mode"), "inout": item.get("inout"), "event": item.get("event"), "temperature": item.get("temperature")})))
             except (KeyError, TypeError, ValueError) as error:
                 normalized.append((item.get("gateway_record_id"), {"invalid": str(error)}))
 

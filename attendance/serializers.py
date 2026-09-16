@@ -2,7 +2,7 @@ from django.utils import timezone
 from django.db.models import Q
 from rest_framework import serializers
 
-from .models import AttendanceEvent, AttendanceException, BiometricDevice, DailyAttendance, EmployeeRosterDay, OvertimeRecord, RosterDayStatus, Shift, ShiftAssignment
+from .models import AttendanceEvent, AttendanceException, BiometricDevice, DailyAttendance, DeviceCommand, EmployeeRosterDay, OvertimeRecord, RosterDayStatus, Shift, ShiftAssignment
 
 
 class BiometricDeviceSerializer(serializers.ModelSerializer):
@@ -13,6 +13,18 @@ class BiometricDeviceSerializer(serializers.ModelSerializer):
             "purpose", "ip_address", "is_online", "last_sync_at",
         ]
         read_only_fields = ["ip_address", "is_online", "last_sync_at"]
+
+
+class DeviceCommandSerializer(serializers.ModelSerializer):
+    requested_by_username = serializers.CharField(source="requested_by.username", read_only=True, default=None)
+
+    class Meta:
+        model = DeviceCommand
+        fields = [
+            "id", "device", "command_type", "payload", "status", "result",
+            "requested_by_username", "created_at", "sent_at", "completed_at",
+        ]
+        read_only_fields = fields
 
 
 class AttendanceEventSerializer(serializers.ModelSerializer):

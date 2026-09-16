@@ -22,13 +22,17 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
-from attendance.models import BiometricDevice
+from attendance.models import BiometricDevice, DeviceCommand
 from attendance.integrations.aiface_protocol import (
+    IDENTITY_SYSTEM,
+    build_device_command,
     build_reg_ack,
     build_sendlog_ack,
     build_senduser_ack,
     translate_sendlog_record,
 )
+
+COMMAND_POLL_INTERVAL_SECONDS = 2
 
 try:
     import websockets
@@ -74,6 +78,7 @@ class Command(BaseCommand):
     async def _handle_connection(self, ws, bridge_url, secret):
         sn = None
         peer = ws.remote_address
+        poller_task = None
         try:
             async for raw_message in ws:
                 try:
@@ -83,23 +88,53 @@ class Command(BaseCommand):
                     continue
 
                 cmd = message.get("cmd")
+                ret = message.get("ret")
                 if cmd == "reg":
                     sn = message.get("sn")
                     self.stdout.write(f"[{peer}] reg from device sn={sn}")
                     await asyncio.to_thread(self._mark_device_online, sn, peer[0] if peer else None)
                     await ws.send(json.dumps(build_reg_ack(datetime.now())))
+                    if poller_task is None:
+                        poller_task = asyncio.create_task(self._poll_commands(ws, sn))
                 elif cmd == "sendlog":
                     await self._handle_sendlog(ws, message, bridge_url, secret)
                 elif cmd == "senduser":
                     await ws.send(json.dumps(build_senduser_ack(datetime.now())))
+                elif ret:
+                    self.stdout.write(f"[{sn}] command response ret={ret}: {message}")
+                    await asyncio.to_thread(self._resolve_command, sn, message)
                 elif cmd:
                     self.stdout.write(f"[{peer}] unhandled cmd={cmd!r}")
         except websockets.exceptions.ConnectionClosed:
             pass
         finally:
+            if poller_task is not None:
+                poller_task.cancel()
             self.stdout.write(f"[{peer}] disconnected (sn={sn})")
             if sn:
                 await asyncio.to_thread(self._mark_device_offline, sn)
+
+    async def _poll_commands(self, ws, sn):
+        """Deliver queued admin commands (enroll/delete/refresh) one at a time.
+
+        The AiFace protocol requires the server send a device's commands
+        one-by-one, waiting for each response before the next (see the
+        vendor's own Notes.txt) - enforced here by only picking a new
+        "pending" command once no "sent" (in-flight) one remains for this
+        device.
+        """
+        try:
+            while True:
+                await asyncio.sleep(COMMAND_POLL_INTERVAL_SECONDS)
+                next_command = await asyncio.to_thread(self._next_command_to_send, sn)
+                if next_command is None:
+                    continue
+                command_id, wire_message = next_command
+                self.stdout.write(f"[{sn}] sending queued command: {wire_message}")
+                await ws.send(json.dumps(wire_message))
+                await asyncio.to_thread(self._mark_command_sent, command_id)
+        except asyncio.CancelledError:
+            pass
 
     async def _handle_sendlog(self, ws, message, bridge_url, secret):
         sn = message.get("sn")
@@ -130,6 +165,88 @@ class Command(BaseCommand):
     @staticmethod
     def _mark_device_offline(serial_number):
         BiometricDevice.objects.filter(serial_number=serial_number).update(is_online=False)
+
+    @staticmethod
+    def _next_command_to_send(serial_number):
+        """The next (id, wire message) to send for this device, or None if nothing's due.
+
+        Returns None while a previously-sent command is still awaiting a
+        response, so only one command is ever in flight per device.
+        """
+        if DeviceCommand.objects.filter(device__serial_number=serial_number, status="sent").exists():
+            return None
+        command = (
+            DeviceCommand.objects.filter(device__serial_number=serial_number, status="pending")
+            .order_by("created_at")
+            .first()
+        )
+        if command is None:
+            return None
+        return command.id, build_device_command(serial_number, command.command_type, command.payload)
+
+    @staticmethod
+    def _mark_command_sent(command_id):
+        DeviceCommand.objects.filter(pk=command_id).update(status="sent", sent_at=timezone.now())
+
+    @staticmethod
+    def _resolve_command(serial_number, message):
+        """Match an incoming `ret` response to this device's in-flight command and close it out.
+
+        Only one command is ever in flight per device (see `_next_command_to_send`),
+        so whichever "sent" row belongs to this device is the one this response is for.
+        A `ret` with no in-flight command to match (e.g. a stale/duplicate reply) is
+        logged by the caller and otherwise ignored here.
+        """
+        command = (
+            DeviceCommand.objects.filter(device__serial_number=serial_number, status="sent")
+            .order_by("sent_at")
+            .first()
+        )
+        if command is None:
+            return
+        status = "acked" if message.get("result") else "failed"
+        DeviceCommand.objects.filter(pk=command.id).update(status=status, result=message, completed_at=timezone.now())
+        if status != "acked":
+            return
+        if command.command_type == "enroll_user":
+            Command._link_biometric_identity(command)
+        elif command.command_type == "delete_user":
+            Command._unlink_biometric_identity(command)
+
+    @staticmethod
+    def _link_biometric_identity(command):
+        """On a successful on-device enrollment, map the employee to that enrollid so future punches resolve automatically."""
+        from employees.models import BiometricIdentity
+
+        employee_id = command.payload.get("employee_id")
+        enrollid = command.payload.get("enrollid")
+        if not employee_id or enrollid is None:
+            return
+        BiometricIdentity.objects.update_or_create(
+            employee_id=employee_id,
+            system=IDENTITY_SYSTEM,
+            source_identifier=command.device.serial_number,
+            defaults={"external_user_id": str(enrollid), "is_active": True},
+        )
+
+    @staticmethod
+    def _unlink_biometric_identity(command):
+        """On a successful on-device deletion, remove the mapping so this enrollid is free to be reassigned on this device.
+
+        Deletes rather than deactivates: (system, source_identifier,
+        external_user_id) is unique, so a soft-deactivated row would block
+        that same enrollid ever being linked to a new employee on this device.
+        """
+        from employees.models import BiometricIdentity
+
+        enrollid = command.payload.get("enrollid")
+        if enrollid is None:
+            return
+        BiometricIdentity.objects.filter(
+            system=IDENTITY_SYSTEM,
+            source_identifier=command.device.serial_number,
+            external_user_id=str(enrollid),
+        ).delete()
 
     @staticmethod
     def _post_to_bridge(bridge_url, secret, records):
