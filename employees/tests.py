@@ -445,14 +445,33 @@ class EmployeeStatusRevokesBiometricAccessTests(TestCase):
         self.identity.refresh_from_db()
         self.assertTrue(self.identity.is_active)
 
-    def test_returning_to_active_does_not_automatically_restore_access(self):
+    def test_returning_to_active_automatically_restores_access(self):
         self.employee.status = "inactive"
         self.employee.save()
         self.employee.status = "active"
         self.employee.save()
 
         self.identity.refresh_from_db()
-        self.assertFalse(self.identity.is_active)
+        self.assertTrue(self.identity.is_active)
+
+    def test_restore_covers_every_device_the_employee_was_revoked_on(self):
+        BiometricIdentity.objects.create(
+            employee=self.employee, system="vendor_flask_gateway", source_identifier="DEVICE-2", external_user_id="200",
+        )
+        self.employee.status = "terminated"
+        self.employee.save()
+
+        self.employee.status = "active"
+        self.employee.save()
+
+        self.assertEqual(
+            BiometricIdentity.objects.filter(employee=self.employee, is_active=False).count(), 0,
+        )
+
+    def test_new_employee_created_directly_as_active_is_unaffected(self):
+        # previous_status is None for a brand-new row - must not be treated as "returning to active".
+        employee = Employee.objects.create(employee_id="EMP-102", first_name="Brand", last_name="New", status="active")
+        self.assertEqual(employee.status, "active")
 
     def test_creating_an_already_inactive_employee_does_not_crash(self):
         employee = Employee.objects.create(employee_id="EMP-101", first_name="New", last_name="Hire", status="inactive")

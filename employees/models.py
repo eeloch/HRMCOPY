@@ -172,6 +172,11 @@ class Employee(models.Model):
             # employee - see BiometricIngestionService, which flags rather
             # than silently accepts a scan against a revoked identity.
             self.biometric_identities.filter(is_active=True).update(is_active=False)
+        elif previous_status is not None and previous_status != "active" and self.status == "active":
+            # Symmetric restore: nothing else in the system deactivates a
+            # BiometricIdentity today, so every inactive row for this employee
+            # is one this same status change revoked - safe to restore all of them.
+            self.biometric_identities.filter(is_active=False).update(is_active=True)
 
     def __str__(self):
         return f"{self.employee_id} - {self.full_name}"
