@@ -11,7 +11,9 @@ from .views import (
     EmployeeImportPreviewAPIView,
     EmployeeImportOrganizationAPIView,
     EmployeeImportOrganizationCreateAPIView,
-    EmployeeProfileAPIView
+    EmployeeProfileAPIView,
+    EmployeeSalaryImportPreviewAPIView,
+    EmployeeSalaryImportAPIView,
 )
 
 
@@ -64,6 +66,18 @@ urlpatterns = [
         "import/preview/",
         EmployeeImportPreviewAPIView.as_view(),
         name="employee-import-preview",
+    ),
+
+    path(
+        "salary-import/preview/",
+        EmployeeSalaryImportPreviewAPIView.as_view(),
+        name="employee-salary-import-preview",
+    ),
+
+    path(
+        "salary-import/",
+        EmployeeSalaryImportAPIView.as_view(),
+        name="employee-salary-import",
     ),
 
     path(

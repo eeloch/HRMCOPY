@@ -37,8 +37,10 @@ from .serializers import (
 
 from .importers import (
     read_employee_file,
+    read_salary_file,
     validate_employee_rows,
     normalize_value,
+    parse_salary,
 )
 from audit.models import AuditSeverity
 from audit.services import AuditService
@@ -1131,4 +1133,132 @@ class EmployeeHiresExitsAPIView(APIView):
             "week_end": week_end,
             "hires": serialize(hires, "employment_date"),
             "exits": serialize(exits, "exit_date"),
+        })
+
+
+def _build_salary_matches(rows):
+    """Match spreadsheet rows to employees by staff number, without saving anything."""
+    matched, unmatched, invalid = [], [], []
+    employees_by_id = {
+        employee.employee_id.strip(): employee
+        for employee in Employee.objects.only(
+            "id", "employee_id", "first_name", "middle_name", "last_name", "basic_salary"
+        )
+    }
+
+    for row in rows:
+        spreadsheet_row = row.get("_spreadsheet_row")
+        raw_id = str(row.get("employee_id") or "").strip()
+        raw_salary = row.get("basic_salary")
+
+        if not raw_id:
+            invalid.append({"row": spreadsheet_row, "employee_id": raw_id, "reason": "Missing employee ID."})
+            continue
+        if raw_salary is None or not str(raw_salary).strip():
+            invalid.append({"row": spreadsheet_row, "employee_id": raw_id, "reason": "Missing salary value."})
+            continue
+
+        try:
+            new_salary = parse_salary(raw_salary)
+        except ValueError as exc:
+            invalid.append({"row": spreadsheet_row, "employee_id": raw_id, "reason": str(exc)})
+            continue
+
+        employee = employees_by_id.get(raw_id)
+        if employee is None:
+            unmatched.append({"row": spreadsheet_row, "employee_id": raw_id})
+            continue
+
+        matched.append({"employee": employee, "old_salary": employee.basic_salary, "new_salary": new_salary})
+
+    return matched, unmatched, invalid
+
+
+class EmployeeSalaryImportPreviewAPIView(APIView):
+    """Read-only: match a staff-number + basic-salary spreadsheet against employees, without saving."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.has_perm("employees.view_salary"):
+            return Response({"detail": "You don't have permission to import salaries."}, status=status.HTTP_403_FORBIDDEN)
+
+        uploaded_file = request.FILES.get("file")
+        if not uploaded_file:
+            return Response({"detail": "Please upload a CSV or XLSX file."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            rows = read_salary_file(uploaded_file)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        matched, unmatched, invalid = _build_salary_matches(rows)
+
+        return Response({
+            "matched": [
+                {
+                    "id": item["employee"].pk,
+                    "employee_id": item["employee"].employee_id,
+                    "name": item["employee"].full_name,
+                    "old_salary": str(item["old_salary"]),
+                    "new_salary": str(item["new_salary"]),
+                    "changed": item["old_salary"] != item["new_salary"],
+                }
+                for item in matched
+            ],
+            "unmatched": unmatched,
+            "invalid": invalid,
+        })
+
+
+class EmployeeSalaryImportAPIView(APIView):
+    """Apply a staff-number + basic-salary spreadsheet, updating only matched, valid rows."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not request.user.has_perm("employees.view_salary"):
+            return Response({"detail": "You don't have permission to import salaries."}, status=status.HTTP_403_FORBIDDEN)
+
+        uploaded_file = request.FILES.get("file")
+        if not uploaded_file:
+            return Response({"detail": "Please upload a CSV or XLSX file."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            rows = read_salary_file(uploaded_file)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        matched, unmatched, invalid = _build_salary_matches(rows)
+
+        updated = []
+        with transaction.atomic():
+            for item in matched:
+                employee = item["employee"]
+                if employee.basic_salary == item["new_salary"]:
+                    continue
+                employee.basic_salary = item["new_salary"]
+                employee.save(update_fields=["basic_salary", "updated_at"])
+                updated.append({
+                    "employee_id": employee.employee_id,
+                    "name": employee.full_name,
+                    "old_salary": str(item["old_salary"]),
+                    "new_salary": str(item["new_salary"]),
+                })
+
+        AuditService.log(
+            event_type="employees.salary_bulk_imported",
+            module="employees",
+            actor=request.user,
+            severity=AuditSeverity.SUCCESS,
+            title="Bulk salary import",
+            description=f"Updated basic salary for {len(updated)} employee(s) via bulk import.",
+            metadata={"updated": len(updated), "unmatched": len(unmatched), "invalid": len(invalid)},
+        )
+
+        return Response({
+            "updated": len(updated),
+            "unmatched": unmatched,
+            "invalid": invalid,
+            "updated_employees": updated,
         })

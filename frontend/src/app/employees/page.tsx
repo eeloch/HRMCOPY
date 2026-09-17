@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
 import { AppCard, PageHeader, Section, StatusBadge } from "@/components/ui";
-import { apiFetch, getAccessToken } from "@/lib/api";
+import { apiFetch, getAccessToken, getCurrentUser, type CurrentUser } from "@/lib/api";
 
 type Employee = {
   id: number;
@@ -54,6 +54,7 @@ export default function EmployeesPage() {
   const [loadingHiresExits, setLoadingHiresExits] = useState(false);
   const [accommodation, setAccommodation] = useState<AccommodationReport | null>(null);
   const [loadingAccommodation, setLoadingAccommodation] = useState(false);
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -62,6 +63,7 @@ export default function EmployeesPage() {
     }
 
     void loadEmployees();
+    getCurrentUser().then(setCurrentUser).catch(() => {});
   }, [router]);
 
   useEffect(() => {
@@ -156,6 +158,15 @@ export default function EmployeesPage() {
               >
                 Bulk Import
               </button>
+              {currentUser?.permissions.view_salary && (
+                <button
+                  type="button"
+                  onClick={() => router.push("/employees/salary-import")}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-3 font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Import Salaries
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => router.push("/employees/new")}

@@ -606,6 +606,75 @@ def read_employee_file(
     )
 
 
+def row_has_employee_id(row):
+    """Salary-only rows have no name column, so they can't use row_is_meaningful."""
+    return bool(normalize_value(row.get("employee_id")))
+
+
+def read_salary_csv(uploaded_file):
+    content = uploaded_file.read()
+
+    if isinstance(content, bytes):
+        content = content.decode("utf-8-sig")
+
+    stream = io.StringIO(content)
+    reader = csv.DictReader(stream)
+
+    rows = []
+    for spreadsheet_row, raw_row in enumerate(reader, start=2):
+        row = clean_raw_row(raw_row)
+        if not row_has_employee_id(row):
+            continue
+        row["_spreadsheet_row"] = spreadsheet_row
+        rows.append(row)
+
+    return rows
+
+
+def read_salary_excel(uploaded_file):
+    workbook = load_workbook(uploaded_file, read_only=True, data_only=True)
+    sheet = workbook.active
+
+    header_row = find_excel_header_row(sheet)
+    header_values = next(sheet.iter_rows(min_row=header_row, max_row=header_row, values_only=True))
+    headers = [canonical_header(value) if value is not None else "" for value in header_values]
+
+    rows = []
+    for spreadsheet_row, values in enumerate(
+        sheet.iter_rows(min_row=header_row + 1, values_only=True), start=header_row + 1
+    ):
+        if not row_has_meaningful_cell(values):
+            continue
+
+        row = {}
+        for index, header in enumerate(headers):
+            if not header:
+                continue
+            row[header] = values[index] if index < len(values) else ""
+
+        if not row_has_employee_id(row):
+            continue
+
+        row["_spreadsheet_row"] = spreadsheet_row
+        rows.append(row)
+
+    workbook.close()
+    return rows
+
+
+def read_salary_file(uploaded_file):
+    """Like read_employee_file, but for a staff-number + basic-salary-only spreadsheet
+    (no name column, so the full employee-row validity checks don't apply)."""
+    filename = uploaded_file.name.lower()
+
+    if filename.endswith(".csv"):
+        return read_salary_csv(uploaded_file)
+    if filename.endswith(".xlsx"):
+        return read_salary_excel(uploaded_file)
+
+    raise ValueError("Only CSV and XLSX files are supported.")
+
+
 def validate_employee_rows(
     rows,
     update_existing=False,
