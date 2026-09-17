@@ -8,9 +8,14 @@ from rest_framework.views import APIView
 from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
 from attendance.models import BiometricDevice, DeviceCommand
 from attendance.serializers import BiometricDeviceSerializer, DeviceCommandSerializer
+from audit.models import AuditSeverity
+from audit.services import AuditService
 from employees.models import BiometricIdentity, Employee
 
 BIOMETRIC_TYPES = {"face", "fingerprint"}
+
+YUNATT_SYSTEM = "yunatt"
+YUNATT_SOURCE = "cloud"
 
 
 class CanManageDevices(BasePermission):
@@ -234,3 +239,145 @@ class DeviceReconcileEnrolledIdsAPIView(APIView):
         numeric_map = {key: matches[0] for key, matches in groups.items() if len(matches) == 1}
         ambiguous_ids = {key for key, matches in groups.items() if len(matches) > 1}
         return numeric_map, ambiguous_ids
+
+
+class PersonInformationImportAPIView(APIView):
+    """Bulk-link a Yunatt cloud "Person Information" export to employees.
+
+    For staff already enrolled directly at a terminal before this system
+    existed, this avoids re-enrolling everyone from scratch: it reads the
+    vendor's "Person Information" spreadsheet export and creates a
+    yunatt/cloud BiometricIdentity for every row that matches exactly one
+    employee - by staff number when the sheet's "ID No" column was filled
+    in at enrollment, otherwise by an unambiguous exact name match -
+    leaving anything uncertain for manual review rather than guessing.
+    """
+
+    permission_classes = [IsAuthenticated, CanManageDevices]
+
+    def post(self, request):
+        upload = request.FILES.get("file")
+        if not upload:
+            return Response(
+                {"detail": "A Person Information file is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            rows = self._read_person_information(upload)
+        except Exception as exc:
+            return Response(
+                {"detail": f"Unable to read this file: {exc}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        employees_by_staff_id = {}
+        name_groups = {}
+        for employee in Employee.objects.only("id", "employee_id", "first_name", "middle_name", "last_name"):
+            employees_by_staff_id[employee.employee_id.strip()] = employee
+            name_groups.setdefault(employee.full_name.strip().lower(), []).append(employee)
+
+        linked, conflicts, unmatched = [], [], []
+        already_linked = 0
+
+        for row in rows:
+            external_id = self._normalize_id(row.get("User ID"))
+            name = str(row.get("Name") or "").strip()
+            id_no = str(row.get("ID No") or "").strip()
+            department = str(row.get("Department") or "").strip()
+            if not external_id or not name:
+                continue
+
+            if BiometricIdentity.objects.filter(
+                system=YUNATT_SYSTEM, source_identifier=YUNATT_SOURCE, external_user_id=external_id,
+            ).exists():
+                already_linked += 1
+                continue
+
+            employee = employees_by_staff_id.get(id_no) if id_no else None
+            if employee is None:
+                candidates = name_groups.get(name.lower(), [])
+                employee = candidates[0] if len(candidates) == 1 else None
+
+            if employee is None:
+                unmatched.append({"user_id": external_id, "name": name, "department": department})
+                continue
+
+            existing = BiometricIdentity.objects.filter(
+                employee=employee, system=YUNATT_SYSTEM, source_identifier=YUNATT_SOURCE,
+            ).first()
+            if existing:
+                conflicts.append({
+                    "user_id": external_id,
+                    "employee_id": employee.employee_id,
+                    "employee_name": employee.full_name,
+                    "already_linked_to_user_id": existing.external_user_id,
+                })
+                continue
+
+            BiometricIdentity.objects.create(
+                employee=employee, system=YUNATT_SYSTEM, source_identifier=YUNATT_SOURCE,
+                external_user_id=external_id, is_active=True,
+            )
+            linked.append({"user_id": external_id, "employee_id": employee.employee_id, "employee_name": employee.full_name})
+
+        AuditService.log(
+            event_type="attendance.person_information_imported",
+            module="attendance",
+            actor=request.user,
+            severity=AuditSeverity.SUCCESS,
+            title="Person Information import",
+            description=f"Linked {len(linked)} employee(s) from an uploaded Person Information export.",
+            metadata={
+                "total_rows": len(rows),
+                "linked": len(linked),
+                "already_linked": already_linked,
+                "conflicts": len(conflicts),
+                "unmatched": len(unmatched),
+            },
+        )
+
+        return Response({
+            "total_rows": len(rows),
+            "linked": len(linked),
+            "already_linked": already_linked,
+            "conflicts": conflicts,
+            "unmatched": unmatched,
+            "linked_employees": linked,
+        })
+
+    @staticmethod
+    def _normalize_id(value):
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return str(int(value)) if value.is_integer() else str(value)
+        return str(value).strip()
+
+    @staticmethod
+    def _read_person_information(upload):
+        filename = (upload.name or "").lower()
+        rows = []
+
+        if filename.endswith(".xls"):
+            import xlrd
+
+            book = xlrd.open_workbook(file_contents=upload.read())
+            sheet = book.sheet_by_index(0)
+            headers = [str(sheet.cell_value(0, c)).strip() for c in range(sheet.ncols)]
+            for r in range(1, sheet.nrows):
+                values = [sheet.cell_value(r, c) for c in range(sheet.ncols)]
+                rows.append(dict(zip(headers, values)))
+        elif filename.endswith(".xlsx"):
+            import openpyxl
+
+            workbook = openpyxl.load_workbook(upload, read_only=True, data_only=True)
+            sheet = workbook.active
+            rows_iter = sheet.iter_rows(values_only=True)
+            headers = [str(h).strip() if h is not None else "" for h in next(rows_iter)]
+            for values in rows_iter:
+                rows.append(dict(zip(headers, values)))
+        else:
+            raise ValueError("Upload the .xls or .xlsx Person Information export from the terminal software.")
+
+        return rows

@@ -33,6 +33,15 @@ const PURPOSES: { value: BiometricDevice["purpose"]; label: string }[] = [
   { value: "meal_ticket", label: "Meal Ticket" },
 ];
 
+type PersonInformationResult = {
+  total_rows: number;
+  linked: number;
+  already_linked: number;
+  conflicts: { user_id: string; employee_id: string; employee_name: string; already_linked_to_user_id: string }[];
+  unmatched: { user_id: string; name: string; department: string }[];
+  linked_employees: { user_id: string; employee_id: string; employee_name: string }[];
+};
+
 function formatLastSeen(value: string | null) {
   if (!value) return "Never";
   return new Date(value).toLocaleString();
@@ -53,6 +62,10 @@ export default function BiometricDevicesPage() {
   const [location, setLocation] = useState("");
   const [deviceType, setDeviceType] = useState<BiometricDevice["device_type"]>("factory");
   const [purpose, setPurpose] = useState<BiometricDevice["purpose"]>("attendance");
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState("");
+  const [importResult, setImportResult] = useState<PersonInformationResult | null>(null);
 
   async function loadDevices() {
     setLoading(true);
@@ -116,6 +129,28 @@ export default function BiometricDevicesPage() {
     }
   }
 
+  async function importPersonInformation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!importFile) return;
+    setImportError("");
+    setImportResult(null);
+    setImporting(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", importFile);
+      const response = await apiFetch("/attendance/devices/import-person-information/", { method: "POST", body: formData });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "Unable to import this file.");
+      setImportResult(data as PersonInformationResult);
+      setImportFile(null);
+      await loadDevices();
+    } catch (importErr) {
+      setImportError(importErr instanceof Error ? importErr.message : "Unable to import this file.");
+    } finally {
+      setImporting(false);
+    }
+  }
+
   async function removeDevice(device: BiometricDevice) {
     if (!window.confirm(`Remove "${device.name}" (${device.serial_number})? This does not affect punches already recorded.`)) return;
     try {
@@ -150,6 +185,51 @@ export default function BiometricDevicesPage() {
             <button disabled={submitting} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50 md:col-span-3">{submitting ? "Registering..." : "Register Device"}</button>
           </form>
           {formError && <p className="border-t border-slate-200 px-5 py-4 text-sm text-red-700">{formError}</p>}
+        </Section>
+
+        <Section className="mb-6" title="Import Person Information" subtitle="Bulk-link staff already enrolled on a terminal, from the vendor's Person Information export (.xls or .xlsx) - no re-scanning needed.">
+          <form onSubmit={importPersonInformation} className="grid gap-4 p-5 md:grid-cols-3">
+            <label className="text-sm font-semibold md:col-span-2">
+              Person Information File
+              <input
+                required
+                type="file"
+                accept=".xls,.xlsx"
+                onChange={(event) => setImportFile(event.target.files?.[0] ?? null)}
+                className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal"
+              />
+            </label>
+            <button disabled={importing || !importFile} className="self-end rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">{importing ? "Importing..." : "Import"}</button>
+          </form>
+          {importError && <p className="border-t border-slate-200 px-5 py-4 text-sm text-red-700">{importError}</p>}
+          {importResult && (
+            <div className="border-t border-slate-200 p-5">
+              <div className="grid gap-3 sm:grid-cols-4">
+                <AppCard className="bg-slate-50 p-3"><p className="text-xs font-semibold uppercase text-slate-500">Rows Read</p><p className="mt-1 font-bold text-slate-900">{importResult.total_rows}</p></AppCard>
+                <AppCard className="bg-emerald-50 p-3"><p className="text-xs font-semibold uppercase text-emerald-700">Linked</p><p className="mt-1 font-bold text-emerald-900">{importResult.linked}</p></AppCard>
+                <AppCard className="bg-slate-50 p-3"><p className="text-xs font-semibold uppercase text-slate-500">Already Linked</p><p className="mt-1 font-bold text-slate-900">{importResult.already_linked}</p></AppCard>
+                <AppCard className="bg-amber-50 p-3"><p className="text-xs font-semibold uppercase text-amber-700">Needs Review</p><p className="mt-1 font-bold text-amber-900">{importResult.unmatched.length + importResult.conflicts.length}</p></AppCard>
+              </div>
+              {importResult.unmatched.length > 0 && (
+                <div className="mt-5">
+                  <h3 className="font-bold text-slate-900">Unmatched Rows ({importResult.unmatched.length})</h3>
+                  <p className="mt-1 text-xs text-slate-500">No employee matched by staff number or exact name - check spelling, or these may not be entered as employees yet.</p>
+                  <div className="mt-3 max-h-64 overflow-y-auto rounded-xl border border-slate-200">
+                    <table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500"><tr><th className="px-4 py-2">Device User ID</th><th className="px-4 py-2">Name</th><th className="px-4 py-2">Department</th></tr></thead><tbody className="divide-y divide-slate-100">{importResult.unmatched.map((row) => <tr key={row.user_id}><td className="px-4 py-2">{row.user_id}</td><td className="px-4 py-2">{row.name}</td><td className="px-4 py-2 text-slate-600">{row.department}</td></tr>)}</tbody></table>
+                  </div>
+                </div>
+              )}
+              {importResult.conflicts.length > 0 && (
+                <div className="mt-5">
+                  <h3 className="font-bold text-slate-900">Conflicts ({importResult.conflicts.length})</h3>
+                  <p className="mt-1 text-xs text-slate-500">This employee already has a different device user ID linked - review manually before relinking.</p>
+                  <div className="mt-3 max-h-64 overflow-y-auto rounded-xl border border-slate-200">
+                    <table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500"><tr><th className="px-4 py-2">Employee</th><th className="px-4 py-2">File User ID</th><th className="px-4 py-2">Already Linked To</th></tr></thead><tbody className="divide-y divide-slate-100">{importResult.conflicts.map((row) => <tr key={row.employee_id}><td className="px-4 py-2">{row.employee_name} ({row.employee_id})</td><td className="px-4 py-2">{row.user_id}</td><td className="px-4 py-2 text-slate-600">{row.already_linked_to_user_id}</td></tr>)}</tbody></table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </Section>
 
         {error ? (
