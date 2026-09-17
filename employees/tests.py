@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from rest_framework import status
@@ -488,3 +489,167 @@ class EmployeeStatusRevokesBiometricAccessTests(TestCase):
         self.assertEqual(
             BiometricIdentity.objects.filter(employee=self.employee, is_active=True).count(), 0,
         )
+
+
+class SalaryVisibilityPermissionTests(APITestCase):
+
+    def setUp(self):
+        self.privileged = get_user_model().objects.create_user(username="pay-admin", password="test-password")
+        self.privileged.user_permissions.add(Permission.objects.get(codename="view_salary", content_type__app_label="employees"))
+        self.restricted = get_user_model().objects.create_user(username="regular-staff", password="test-password")
+        self.department = Department.objects.create(name="Operations")
+        Position.objects.create(department=self.department, name="Operator")
+        self.employee = Employee.objects.create(
+            employee_id="SAL-001", first_name="Ada", last_name="Okafor", basic_salary="150000.00",
+        )
+
+    def test_restricted_user_does_not_see_salary_in_list(self):
+        self.client.force_authenticate(self.restricted)
+        response = self.client.get("/api/employees/")
+
+        row = next(item for item in response.data["results"] if item["employee_id"] == "SAL-001")
+        self.assertNotIn("basic_salary", row)
+
+    def test_privileged_user_sees_salary_in_list(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.get("/api/employees/")
+
+        row = next(item for item in response.data["results"] if item["employee_id"] == "SAL-001")
+        self.assertEqual(row["basic_salary"], "150000.00")
+
+    def test_restricted_user_does_not_see_salary_in_detail(self):
+        self.client.force_authenticate(self.restricted)
+        response = self.client.get(f"/api/employees/{self.employee.pk}/")
+
+        self.assertNotIn("basic_salary", response.data)
+
+    def test_restricted_user_does_not_see_salary_in_profile(self):
+        self.client.force_authenticate(self.restricted)
+        response = self.client.get(f"/api/employees/{self.employee.pk}/profile/")
+
+        self.assertNotIn("basic_salary", response.data)
+
+    def test_privileged_user_sees_salary_in_profile(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.get(f"/api/employees/{self.employee.pk}/profile/")
+
+        self.assertEqual(response.data["basic_salary"], "150000.00")
+
+    def test_restricted_user_cannot_set_salary_when_creating_an_employee(self):
+        self.client.force_authenticate(self.restricted)
+        response = self.client.post("/api/employees/", {
+            "employee_id": "SAL-002", "first_name": "New", "last_name": "Hire",
+            "department": self.department.id, "basic_salary": "200000.00",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("basic_salary", response.data)
+
+    def test_restricted_user_can_create_an_employee_without_touching_salary(self):
+        self.client.force_authenticate(self.restricted)
+        response = self.client.post("/api/employees/", {
+            "employee_id": "SAL-003", "first_name": "New", "last_name": "Hire",
+            "department": self.department.id,
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Employee.objects.get(employee_id="SAL-003").basic_salary, 0)
+
+    def test_privileged_user_can_set_salary_when_creating_an_employee(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.post("/api/employees/", {
+            "employee_id": "SAL-004", "first_name": "New", "last_name": "Hire",
+            "department": self.department.id, "basic_salary": "200000.00",
+        }, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(str(Employee.objects.get(employee_id="SAL-004").basic_salary), "200000.00")
+
+    def test_restricted_user_cannot_change_salary_on_update(self):
+        self.client.force_authenticate(self.restricted)
+        response = self.client.patch(f"/api/employees/{self.employee.pk}/", {"basic_salary": "999999.00"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.employee.refresh_from_db()
+        self.assertEqual(str(self.employee.basic_salary), "150000.00")
+
+    def test_restricted_user_can_update_other_fields_without_touching_salary(self):
+        self.client.force_authenticate(self.restricted)
+        response = self.client.patch(f"/api/employees/{self.employee.pk}/", {"phone": "08012345678"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.employee.refresh_from_db()
+        self.assertEqual(self.employee.phone, "08012345678")
+        self.assertEqual(str(self.employee.basic_salary), "150000.00")
+
+    def test_privileged_user_can_change_salary_on_update(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.patch(f"/api/employees/{self.employee.pk}/", {"basic_salary": "175000.00"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.employee.refresh_from_db()
+        self.assertEqual(str(self.employee.basic_salary), "175000.00")
+
+    def test_superuser_sees_and_can_set_salary_without_explicit_grant(self):
+        superuser = get_user_model().objects.create_superuser(username="root-admin", password="test-password")
+        self.client.force_authenticate(superuser)
+
+        response = self.client.get(f"/api/employees/{self.employee.pk}/")
+        self.assertEqual(response.data["basic_salary"], "150000.00")
+
+        response = self.client.patch(f"/api/employees/{self.employee.pk}/", {"basic_salary": "160000.00"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class SalaryVisibilityBulkImportTests(APITestCase):
+
+    def setUp(self):
+        self.privileged = get_user_model().objects.create_user(username="import-pay-admin", password="test-password")
+        self.privileged.user_permissions.add(Permission.objects.get(codename="view_salary", content_type__app_label="employees"))
+        self.restricted = get_user_model().objects.create_user(username="import-regular-staff", password="test-password")
+        self.department = Department.objects.create(name="Operations")
+        Position.objects.create(department=self.department, name="Operator")
+        self.existing = Employee.objects.create(
+            employee_id="BULK-SAL-001", first_name="Existing", last_name="Person", basic_salary="150000.00",
+        )
+
+    def upload(self, content):
+        return SimpleUploadedFile("employees.csv", content.encode("utf-8"), content_type="text/csv")
+
+    def test_restricted_importer_does_not_block_the_whole_row_on_salary(self):
+        self.client.force_authenticate(self.restricted)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position,basic_salary\n"
+                "BULK-SAL-002,New,Hire,Operations,Operator,300000\n"
+            ),
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Employee.objects.get(employee_id="BULK-SAL-002").basic_salary, 0)
+
+    def test_restricted_importer_does_not_overwrite_an_existing_employees_salary(self):
+        self.client.force_authenticate(self.restricted)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position,basic_salary\n"
+                "BULK-SAL-001,Existing,Person,Operations,Operator,999999\n"
+            ),
+            "update_existing": "true",
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.existing.refresh_from_db()
+        self.assertEqual(str(self.existing.basic_salary), "150000.00")
+
+    def test_privileged_importer_sets_salary_from_the_sheet(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position,basic_salary\n"
+                "BULK-SAL-003,New,Hire,Operations,Operator,300000\n"
+            ),
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(str(Employee.objects.get(employee_id="BULK-SAL-003").basic_salary), "300000.00")

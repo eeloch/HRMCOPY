@@ -27,7 +27,8 @@ type EmployeeResponse = {
   employment_date: string | null;
   employment_type: string;
   employment_category: string;
-  basic_salary: string;
+  // Absent (not just blank) when the current user lacks permission to view salary.
+  basic_salary?: string;
   lives_in_company_hostel: boolean;
   hostel_room_number: string;
   status: string;
@@ -65,6 +66,7 @@ export default function EditEmployeePage() {
   const [loadingPositions, setLoadingPositions] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [canEditSalary, setCanEditSalary] = useState(false);
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -98,6 +100,7 @@ export default function EditEmployeePage() {
 
       setDepartments(departmentData);
       setForm(toFormValues(employee));
+      setCanEditSalary(employee.basic_salary !== undefined);
 
       if (employee.department) {
         await loadPositions(String(employee.department));
@@ -166,28 +169,36 @@ export default function EditEmployeePage() {
     setSaving(true);
 
     try {
+      const payload: Record<string, unknown> = {
+        biometric_user_id: form.biometric_user_id || null,
+        first_name: form.first_name,
+        middle_name: form.middle_name,
+        last_name: form.last_name,
+        department: form.department ? Number(form.department) : null,
+        position: form.position ? Number(form.position) : null,
+        phone: form.phone,
+        email: form.email,
+        date_of_birth: form.date_of_birth || null,
+        employment_date: form.employment_date || null,
+        employment_type: form.employment_type,
+        employment_category: form.employment_category,
+        lives_in_company_hostel: form.lives_in_company_hostel,
+        hostel_room_number: form.lives_in_company_hostel
+          ? form.hostel_room_number.trim()
+          : "",
+        status: form.status,
+      };
+
+      // Never submitted for a user who can't see it in the first place -
+      // the field would only ever hold an empty-string fallback, and
+      // sending that would silently zero out the employee's real salary.
+      if (canEditSalary) {
+        payload.basic_salary = form.basic_salary || "0";
+      }
+
       const response = await apiFetch(`/employees/${id}/`, {
         method: "PATCH",
-        body: JSON.stringify({
-          biometric_user_id: form.biometric_user_id || null,
-          first_name: form.first_name,
-          middle_name: form.middle_name,
-          last_name: form.last_name,
-          department: form.department ? Number(form.department) : null,
-          position: form.position ? Number(form.position) : null,
-          phone: form.phone,
-          email: form.email,
-          date_of_birth: form.date_of_birth || null,
-          employment_date: form.employment_date || null,
-          employment_type: form.employment_type,
-          employment_category: form.employment_category,
-          basic_salary: form.basic_salary || "0",
-          lives_in_company_hostel: form.lives_in_company_hostel,
-          hostel_room_number: form.lives_in_company_hostel
-            ? form.hostel_room_number.trim()
-            : "",
-          status: form.status,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
@@ -246,6 +257,7 @@ export default function EditEmployeePage() {
         onDepartmentChange={handleDepartmentChange}
         onSubmit={saveEmployee}
         onCancel={() => router.push(`/employees/${id}`)}
+        salaryEditable={canEditSalary}
       />
     </PageFrame>
   );

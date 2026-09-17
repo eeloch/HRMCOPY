@@ -196,6 +196,13 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
         ]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        if not (request and request.user.has_perm("employees.view_salary")):
+            data.pop("basic_salary", None)
+        return data
+
     def get_current_shift(self, employee):
 
         assignment = (
@@ -253,6 +260,14 @@ class EmployeeCreateUpdateSerializer(
 
             "status",
         ]
+
+    def validate_basic_salary(self, value):
+        request = self.context.get("request")
+        if not (request and request.user.has_perm("employees.view_salary")):
+            raise serializers.ValidationError(
+                "You don't have permission to set the basic salary."
+            )
+        return value
 
     def validate(self, attrs):
 
@@ -364,6 +379,13 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
             "hostel",
             "biometric",
         ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        if not (request and request.user.has_perm("employees.view_salary")):
+            data.pop("basic_salary", None)
+        return data
 
     def get_full_name(self, obj):
         return " ".join(

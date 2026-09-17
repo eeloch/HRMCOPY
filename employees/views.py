@@ -193,6 +193,7 @@ class EmployeeListCreateAPIView(APIView):
         serializer = EmployeeSerializer(
             employees,
             many=True,
+            context={"request": request},
         )
 
         return Response({
@@ -205,7 +206,8 @@ class EmployeeListCreateAPIView(APIView):
 
         serializer = (
             EmployeeCreateUpdateSerializer(
-                data=request.data
+                data=request.data,
+                context={"request": request},
             )
         )
 
@@ -228,7 +230,8 @@ class EmployeeListCreateAPIView(APIView):
         )
 
         output = EmployeeSerializer(
-            employee
+            employee,
+            context={"request": request},
         )
 
         return Response(
@@ -290,7 +293,8 @@ class EmployeeDetailAPIView(APIView):
             )
 
         serializer = EmployeeSerializer(
-            employee
+            employee,
+            context={"request": request},
         )
 
         return Response(
@@ -324,6 +328,7 @@ class EmployeeDetailAPIView(APIView):
                 employee,
                 data=request.data,
                 partial=True,
+                context={"request": request},
             )
         )
 
@@ -351,7 +356,8 @@ class EmployeeDetailAPIView(APIView):
 
         return Response(
             EmployeeSerializer(
-                employee
+                employee,
+                context={"request": request},
             ).data
         )
 
@@ -543,14 +549,26 @@ class EmployeeImportAPIView(APIView):
             )
         }
 
+        can_set_salary = request.user.has_perm("employees.view_salary")
+
         serializers = []
         serialization_errors = []
 
         for item in rows_to_import:
             existing_id = item["data"].get("existing_employee_id")
+            row_data = item["data"]
+            if not can_set_salary:
+                # The importer always fills basic_salary (defaulting to 0
+                # when the sheet has no value), so treating its mere presence
+                # as "trying to set a salary" would fail every row for an
+                # importer without this permission, even on sheets that never
+                # mention pay. Drop it instead: creates get the model
+                # default, updates leave the employee's existing salary untouched.
+                row_data = {key: value for key, value in row_data.items() if key != "basic_salary"}
             serializer = EmployeeCreateUpdateSerializer(
                 instance=existing_employees.get(existing_id),
-                data=item["data"],
+                data=row_data,
+                context={"request": request},
             )
 
             if not serializer.is_valid():

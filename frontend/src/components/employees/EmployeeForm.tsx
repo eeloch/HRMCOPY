@@ -47,6 +47,8 @@ type EmployeeFormProps = {
   onDepartmentChange: (departmentId: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onCancel: () => void;
+  /** False when the current user lacks permission to view/set salary - shows the field as read-only instead of silently dropping edits on save. */
+  salaryEditable?: boolean;
 };
 
 export default function EmployeeForm({
@@ -60,6 +62,7 @@ export default function EmployeeForm({
   onDepartmentChange,
   onSubmit,
   onCancel,
+  salaryEditable = true,
 }: EmployeeFormProps) {
   return (
     <form
@@ -197,7 +200,9 @@ export default function EmployeeForm({
             value={values.basic_salary}
             min="0"
             step="0.01"
+            readOnly={!salaryEditable}
             onChange={(value) => onValueChange("basic_salary", value)}
+            helpText={salaryEditable ? undefined : "You don't have permission to view or change salary."}
           />
         </div>
       </FormSection>

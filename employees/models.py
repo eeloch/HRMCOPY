@@ -148,6 +148,9 @@ class Employee(models.Model):
         auto_now=True,
     )
 
+    class Meta:
+        permissions = [("view_salary", "Can view and set employee basic salary")]
+
     @property
     def full_name(self):
         names = [

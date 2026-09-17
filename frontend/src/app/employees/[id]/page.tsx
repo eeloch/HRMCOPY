@@ -42,7 +42,8 @@ type Employee = {
   years_of_service: number | null;
   service_award_level: string | null;
 
-  basic_salary: string;
+  // Absent (not just blank) when the current user lacks permission to view salary.
+  basic_salary?: string;
 
   lives_in_company_hostel: boolean;
   hostel_room_number: string;
@@ -363,9 +364,9 @@ export default function EmployeeProfilePage() {
               <SummaryCard
                 label="Monthly Basic Salary"
                 value={
-                  `₦${Number(
-                    employee.basic_salary
-                  ).toLocaleString()}`
+                  employee.basic_salary === undefined
+                    ? "Restricted"
+                    : `₦${Number(employee.basic_salary).toLocaleString()}`
                 }
               />
 

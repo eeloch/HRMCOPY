@@ -17,7 +17,8 @@ type Employee = {
   position_name: string | null;
   employment_type: string;
   phone: string;
-  basic_salary: string;
+  // Absent (not just blank) when the current user lacks permission to view salary.
+  basic_salary?: string;
   status: string;
   current_shift: {
     id: number;
@@ -186,7 +187,7 @@ export default function EmployeesPage() {
                         {employee.current_shift?.name || "Not assigned"}
                       </td>
                       <td className="px-5 py-5 font-medium text-slate-900">
-                        ₦{Number(employee.basic_salary).toLocaleString()}
+                        {employee.basic_salary === undefined ? <StatusBadge status="restricted" /> : `₦${Number(employee.basic_salary).toLocaleString()}`}
                       </td>
                       <td className="px-5 py-5">
                         <StatusBadge status={employee.status} />
