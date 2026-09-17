@@ -1,6 +1,9 @@
+from datetime import timedelta
+
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from attendance.management.commands.run_aiface_gateway import Command
@@ -164,6 +167,19 @@ class GatewayCommandQueueTests(TestCase):
         DeviceCommand.objects.create(device=self.device, command_type="delete_user", payload={"enrollid": 5})
 
         self.assertIsNone(Command._next_command_to_send("AYTK14145399"))
+
+    def test_a_stuck_sent_command_past_the_timeout_no_longer_blocks_the_next_one(self):
+        stuck = DeviceCommand.objects.create(device=self.device, command_type="refresh_enrolled_ids", payload={}, status="sent")
+        DeviceCommand.objects.filter(pk=stuck.pk).update(sent_at=timezone.now() - DeviceCommand.STALE_AFTER - timedelta(seconds=1))
+        waiting = DeviceCommand.objects.create(device=self.device, command_type="delete_user", payload={"enrollid": 5})
+
+        result = Command._next_command_to_send("AYTK14145399")
+
+        self.assertIsNotNone(result)
+        command_id, _wire_message = result
+        self.assertEqual(command_id, waiting.id)
+        stuck.refresh_from_db()
+        self.assertEqual(stuck.status, "failed")
 
     def test_mark_command_sent_records_timestamp(self):
         command = DeviceCommand.objects.create(device=self.device, command_type="refresh_enrolled_ids", payload={})
@@ -361,6 +377,15 @@ class DeviceCommandAPITests(TestCase):
         self.client.force_authenticate(self.manager)
         response = self.client.post(self.url(), {"command_type": "refresh_enrolled_ids"}, format="json")
         self.assertEqual(response.status_code, 409)
+
+    def test_a_sent_command_stuck_past_the_timeout_no_longer_blocks_the_queue(self):
+        stuck = DeviceCommand.objects.create(device=self.device, command_type="refresh_enrolled_ids", payload={}, status="sent")
+        DeviceCommand.objects.filter(pk=stuck.pk).update(sent_at=timezone.now() - DeviceCommand.STALE_AFTER - timedelta(seconds=1))
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "refresh_enrolled_ids"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        stuck.refresh_from_db()
+        self.assertEqual(stuck.status, "failed")
 
     def test_any_authenticated_user_can_view_command_history(self):
         DeviceCommand.objects.create(device=self.device, command_type="refresh_enrolled_ids", payload={}, status="acked")

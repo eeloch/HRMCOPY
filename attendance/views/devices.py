@@ -117,6 +117,7 @@ class DeviceCommandListCreateAPIView(APIView):
         except BiometricDevice.DoesNotExist:
             return Response({"detail": "Device not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        DeviceCommand.expire_stale(device=device)
         if DeviceCommand.objects.filter(device=device, status__in=("pending", "sent")).exists():
             return Response(
                 {"detail": "A command is already queued or in progress for this device. Wait for it to finish first."},

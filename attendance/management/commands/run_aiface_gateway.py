@@ -190,6 +190,7 @@ class Command(BaseCommand):
         Returns None while a previously-sent command is still awaiting a
         response, so only one command is ever in flight per device.
         """
+        DeviceCommand.expire_stale()
         if DeviceCommand.objects.filter(device__serial_number=serial_number, status="sent").exists():
             return None
         command = (

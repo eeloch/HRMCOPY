@@ -1,10 +1,13 @@
 
 
 # Create your models here.
+from datetime import timedelta
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
+from django.utils import timezone
 from employees.models import Employee
 
 
@@ -490,8 +493,27 @@ class DeviceCommand(models.Model):
     sent_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
+    STALE_AFTER = timedelta(minutes=3)
+
     class Meta:
         ordering = ["created_at"]
 
     def __str__(self):
         return f"{self.command_type} -> {self.device.serial_number} ({self.status})"
+
+    @classmethod
+    def expire_stale(cls, device=None):
+        """Fail any "sent" command whose device round-trip never came back.
+
+        A command reaches "sent" once the gateway has pushed it to the
+        device's live connection - if the device then disconnects (e.g. the
+        reconnect cycle some terminals do) before replying, nothing ever
+        marks it "acked"/"failed", and it blocks this device's one-command-
+        at-a-time queue forever. "pending" commands are left alone since
+        they're legitimately waiting for the device to come online.
+        """
+        cutoff = timezone.now() - cls.STALE_AFTER
+        stale = cls.objects.filter(status="sent", sent_at__lt=cutoff)
+        if device is not None:
+            stale = stale.filter(device=device)
+        stale.update(status="failed", result={"detail": "Timed out waiting for the device to respond."}, completed_at=timezone.now())
