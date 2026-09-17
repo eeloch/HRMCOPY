@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -55,6 +56,28 @@ def _add_months(start_date, months):
     month = month_index % 12 + 1
     day = min(start_date.day, [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
     return date(year, month, day)
+
+
+@dataclass(frozen=True)
+class MealIngestionResult:
+    status: str
+    reason: str = ""
+    collection_id: int | None = None
+
+
+@dataclass
+class MealIngestionSummary:
+    created: int = 0
+    duplicate: int = 0
+    unmapped_employee: int = 0
+    unknown_device: int = 0
+    revoked_access: int = 0
+    invalid: int = 0
+    results: list = field(default_factory=list)
+
+    def add(self, result):
+        setattr(self, result.status, getattr(self, result.status) + 1)
+        self.results.append(result)
 
 
 class MealService:
@@ -501,7 +524,12 @@ class MealService:
         device = MealDevice.objects.filter(serial_number=device_serial_number, active=True).first()
         if not device: raise ValueError("Unknown meal device.")
         identity = BiometricIdentity.objects.select_related("employee").filter(system=system, source_identifier=source_identifier, external_user_id=str(external_user_id), is_active=True).first()
-        if not identity: raise ValueError("Unmapped biometric identity.")
+        if not identity:
+            revoked_identity = BiometricIdentity.objects.select_related("employee").filter(system=system, source_identifier=source_identifier, external_user_id=str(external_user_id), is_active=False).first()
+            if revoked_identity:
+                cls._notify_revoked_meal_access_attempt(revoked_identity, device)
+                raise ValueError("Access has been revoked for this identity.")
+            raise ValueError("Unmapped biometric identity.")
         with transaction.atomic():
             event, created = MealEvent.objects.get_or_create(device=device, external_event_id=str(external_event_id), defaults={"employee": identity.employee, "timestamp": timestamp, "verification_type": verification_type, "source_system": system, "raw_payload": raw_payload or {}})
             if not created: return event.collection, False
@@ -528,6 +556,53 @@ class MealService:
             collection = MealCollection.objects.create(event=event, employee=identity.employee, work_date=work_date, shift=roster.shift if roster else None, sequence_number=sequence, entitlement_snapshot=entitlement, rate_snapshot=rate.amount, status=MealCollectionStatus.WITHIN if sequence <= entitlement else (MealCollectionStatus.REST_DAY if entitlement == 0 else MealCollectionStatus.EXCESS))
             if sequence > entitlement: cls._sync_excess(identity.employee, work_date, entitlement, sequence, rate.amount)
             return collection, True
+
+    @classmethod
+    def ingest_many(cls, records):
+        """Batch wrapper around ingest() for the meal-ticket gateway bridge, classifying
+        each failure the same way the attendance ingestion summary does."""
+        summary = MealIngestionSummary()
+        for record in records:
+            try:
+                collection, created = cls.ingest(**record)
+                summary.add(MealIngestionResult("created" if created else "duplicate", collection_id=collection.pk))
+            except ValueError as exc:
+                message = str(exc)
+                if message == "Unknown meal device.":
+                    summary.add(MealIngestionResult("unknown_device", message))
+                elif message == "Access has been revoked for this identity.":
+                    summary.add(MealIngestionResult("revoked_access", message))
+                elif message == "Unmapped biometric identity.":
+                    summary.add(MealIngestionResult("unmapped_employee", message))
+                else:
+                    summary.add(MealIngestionResult("invalid", message))
+        return summary
+
+    @staticmethod
+    def _notify_revoked_meal_access_attempt(revoked_identity, device):
+        """One notification per employee per day - mirrors the attendance
+        equivalent (attendance/integrations/ingestion.py)."""
+        from notifications.models import Notification, NotificationSeverity
+
+        employee = revoked_identity.employee
+        already_notified_today = Notification.objects.filter(
+            event_type="meals.revoked_access_attempt",
+            employee=employee,
+            created_at__date=timezone.now().date(),
+        ).exists()
+        if already_notified_today:
+            return
+
+        for user in get_user_model().objects.filter(is_superuser=True):
+            NotificationService.create(
+                recipient=user,
+                event_type="meals.revoked_access_attempt",
+                title="Revoked employee attempted to collect a meal ticket",
+                message=f"{employee.full_name} ({employee.employee_id}) scanned at {device.name}, but their access was revoked.",
+                severity=NotificationSeverity.WARNING,
+                employee=employee,
+                related_url="/meals",
+            )
 
     @staticmethod
     def _sync_excess(employee, work_date, entitlement, count, rate):

@@ -18,6 +18,28 @@ YUNATT_SYSTEM = "yunatt"
 YUNATT_SOURCE = "cloud"
 
 
+def sync_meal_device(biometric_device):
+    """Mirror a meal_ticket-purpose BiometricDevice into meals.MealDevice.
+
+    meals.MealEvent has its own FK to a separate MealDevice row (kept
+    distinct rather than migrated, to avoid touching existing meal
+    history), so registering a device once here is enough for both the
+    attendance gateway routing and meal-ticket ingestion to recognize it.
+    Deferred import: attendance and meals would otherwise import each
+    other at module load time (meals.models already imports from
+    attendance.models).
+    """
+    from meals.models import MealDevice
+
+    if biometric_device.purpose == "meal_ticket":
+        MealDevice.objects.update_or_create(
+            serial_number=biometric_device.serial_number,
+            defaults={"name": biometric_device.name, "active": True},
+        )
+    else:
+        MealDevice.objects.filter(serial_number=biometric_device.serial_number).update(active=False)
+
+
 class CanManageDevices(BasePermission):
     def has_permission(self, request, view):
         return request.user.has_perm("attendance.manage_devices")
@@ -40,7 +62,8 @@ class BiometricDeviceListCreateAPIView(APIView):
     def post(self, request):
         serializer = BiometricDeviceSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
+        device = serializer.save()
+        sync_meal_device(device)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -55,12 +78,17 @@ class BiometricDeviceDetailAPIView(APIView):
         serializer = BiometricDeviceSerializer(device, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        sync_meal_device(device)
         return Response(serializer.data)
 
     def delete(self, request, device_id):
+        serial_number = BiometricDevice.objects.filter(pk=device_id).values_list("serial_number", flat=True).first()
         deleted, _ = BiometricDevice.objects.filter(pk=device_id).delete()
         if not deleted:
             return Response({"detail": "Device not found."}, status=status.HTTP_404_NOT_FOUND)
+        if serial_number:
+            from meals.models import MealDevice
+            MealDevice.objects.filter(serial_number=serial_number).update(active=False)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

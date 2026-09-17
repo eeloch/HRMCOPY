@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .bridge import MealVendorGatewayPunchBridgeAPIView
 from .views import (
     EmployeeMealsProfileAPIView,
     MealDeviceDetailAPIView,
@@ -17,6 +18,11 @@ from .views import (
 )
 
 urlpatterns = [
+    path(
+        "integrations/vendor-gateway/punches/",
+        MealVendorGatewayPunchBridgeAPIView.as_view(),
+        name="meal-vendor-gateway-punches",
+    ),
     path(
         "entitlements/",
         MealEntitlementListCreateAPIView.as_view(),

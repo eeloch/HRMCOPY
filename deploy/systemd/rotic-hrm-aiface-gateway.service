@@ -14,7 +14,10 @@ Environment=PYTHONUNBUFFERED=1
 # https://127.0.0.1:8000 (nothing speaks TLS on that port), and every punch
 # silently times out. Devices do keep retrying until acked, so a fix here
 # recovers a stuck backlog once it's live - but every scan fails until then.
-ExecStart=/opt/rotic_hrm/venv/bin/python manage.py run_aiface_gateway --port 7788 --bridge-url https://<your-domain>/api/attendance/integrations/vendor-gateway/punches/
+# --meal-bridge-url needs the same fix for the same reason - it's a separate
+# endpoint (meals app) that devices registered with purpose=meal_ticket get
+# routed to automatically, based on their Devices-page registration.
+ExecStart=/opt/rotic_hrm/venv/bin/python manage.py run_aiface_gateway --port 7788 --bridge-url https://<your-domain>/api/attendance/integrations/vendor-gateway/punches/ --meal-bridge-url https://<your-domain>/api/meals/integrations/vendor-gateway/punches/
 Restart=on-failure
 RestartSec=5
 

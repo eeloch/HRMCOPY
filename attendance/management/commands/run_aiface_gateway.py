@@ -49,7 +49,13 @@ class Command(BaseCommand):
         parser.add_argument(
             "--bridge-url",
             default="http://127.0.0.1:8000/api/attendance/integrations/vendor-gateway/punches/",
-            help="URL of this Django app's vendor-gateway punch bridge endpoint.",
+            help="URL of this Django app's attendance vendor-gateway punch bridge endpoint.",
+        )
+        parser.add_argument(
+            "--meal-bridge-url",
+            default="http://127.0.0.1:8000/api/meals/integrations/vendor-gateway/punches/",
+            help="URL of this Django app's meal-ticket vendor-gateway punch bridge endpoint, "
+            "used instead of --bridge-url for devices registered with purpose=meal_ticket.",
         )
 
     def handle(self, *args, **options):
@@ -59,23 +65,24 @@ class Command(BaseCommand):
         if not secret:
             raise CommandError("BIOMETRIC_BRIDGE_SECRET is not configured.")
 
-        host, port, bridge_url = options["host"], options["port"], options["bridge_url"]
+        host, port, bridge_url, meal_bridge_url = options["host"], options["port"], options["bridge_url"], options["meal_bridge_url"]
         self.stdout.write(self.style.SUCCESS(
-            f"AiFace gateway listening on ws://{host}:{port}/pub/chat, relaying to {bridge_url}"
+            f"AiFace gateway listening on ws://{host}:{port}/pub/chat, relaying attendance to {bridge_url} "
+            f"and meal-ticket devices to {meal_bridge_url}"
         ))
         try:
-            asyncio.run(self._serve(host, port, bridge_url, secret))
+            asyncio.run(self._serve(host, port, bridge_url, meal_bridge_url, secret))
         except KeyboardInterrupt:
             self.stdout.write("\nStopped.")
 
-    async def _serve(self, host, port, bridge_url, secret):
+    async def _serve(self, host, port, bridge_url, meal_bridge_url, secret):
         async def handler(websocket):
-            await self._handle_connection(websocket, bridge_url, secret)
+            await self._handle_connection(websocket, bridge_url, meal_bridge_url, secret)
 
         async with websockets.serve(handler, host, port):
             await asyncio.Future()
 
-    async def _handle_connection(self, ws, bridge_url, secret):
+    async def _handle_connection(self, ws, bridge_url, meal_bridge_url, secret):
         sn = None
         peer = ws.remote_address
         poller_task = None
@@ -97,7 +104,7 @@ class Command(BaseCommand):
                     if poller_task is None:
                         poller_task = asyncio.create_task(self._poll_commands(ws, sn))
                 elif cmd == "sendlog":
-                    await self._handle_sendlog(ws, message, bridge_url, secret)
+                    await self._handle_sendlog(ws, message, bridge_url, meal_bridge_url, secret)
                 elif cmd == "senduser":
                     await ws.send(json.dumps(build_senduser_ack(datetime.now())))
                 elif ret:
@@ -136,19 +143,20 @@ class Command(BaseCommand):
         except asyncio.CancelledError:
             pass
 
-    async def _handle_sendlog(self, ws, message, bridge_url, secret):
+    async def _handle_sendlog(self, ws, message, bridge_url, meal_bridge_url, secret):
         sn = message.get("sn")
         records = message.get("record") or []
         logindex = message.get("logindex")
         count = message.get("count", len(records))
 
+        target_url = await asyncio.to_thread(self._bridge_url_for_device, sn, bridge_url, meal_bridge_url)
         gateway_records = [translate_sendlog_record(sn, record) for record in records]
         result = True
         if gateway_records:
             enroll_ids = [r["enroll_id"] for r in gateway_records]
             try:
-                response = await asyncio.to_thread(self._post_to_bridge, bridge_url, secret, gateway_records)
-                self.stdout.write(f"[{sn}] sendlog enroll_ids={enroll_ids}: {response}")
+                response = await asyncio.to_thread(self._post_to_bridge, target_url, secret, gateway_records)
+                self.stdout.write(f"[{sn}] sendlog enroll_ids={enroll_ids} -> {target_url}: {response}")
             except (urllib.error.URLError, ValueError) as error:
                 self.stderr.write(f"[{sn}] bridge post failed, asking device to retry: {error}")
                 result = False
@@ -165,6 +173,15 @@ class Command(BaseCommand):
     @staticmethod
     def _mark_device_offline(serial_number):
         BiometricDevice.objects.filter(serial_number=serial_number).update(is_online=False)
+
+    @staticmethod
+    def _bridge_url_for_device(serial_number, bridge_url, meal_bridge_url):
+        """Route by the registered device's purpose. An unregistered serial number
+        (never added on the Devices page) falls through to the attendance bridge,
+        which already reports "unknown device" back through its own response -
+        same behavior as before this device ever gets registered anywhere."""
+        purpose = BiometricDevice.objects.filter(serial_number=serial_number).values_list("purpose", flat=True).first()
+        return meal_bridge_url if purpose == "meal_ticket" else bridge_url
 
     @staticmethod
     def _next_command_to_send(serial_number):
