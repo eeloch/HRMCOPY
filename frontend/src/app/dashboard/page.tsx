@@ -36,6 +36,14 @@ type ExceptionData = {
 };
 
 
+type MealReviewReminder = {
+  id: number;
+  employee_id: string;
+  name: string;
+  position: string;
+};
+
+
 export default function DashboardPage() {
 
   const router =
@@ -55,6 +63,11 @@ export default function DashboardPage() {
     count: 0,
     total_proposed_deduction: "0",
   });
+
+  const [
+    mealReminders,
+    setMealReminders,
+  ] = useState<MealReviewReminder[]>([]);
 
   const [
     loading,
@@ -81,6 +94,7 @@ export default function DashboardPage() {
       const [
         attendanceResponse,
         exceptionResponse,
+        mealReminderResponse,
       ] = await Promise.all([
 
         apiFetch(
@@ -89,6 +103,10 @@ export default function DashboardPage() {
 
         apiFetch(
           "/attendance/exceptions/pending/"
+        ),
+
+        apiFetch(
+          "/meals/review-reminders/"
         ),
       ]);
 
@@ -122,6 +140,12 @@ export default function DashboardPage() {
           exceptionData.total_proposed_deduction ||
           "0",
       });
+
+      setMealReminders(
+        mealReminderResponse.ok
+          ? (await mealReminderResponse.json()).results || []
+          : []
+      );
 
     } catch (error) {
 
@@ -373,6 +397,87 @@ export default function DashboardPage() {
         </section>
 
       </div>
+
+
+      {mealReminders.length > 0 && (
+
+        <section className="mt-6 bg-white rounded-2xl shadow-sm border border-amber-200">
+
+          <div className="p-6 border-b border-amber-100">
+
+            <h2 className="font-bold text-lg text-slate-900">
+              Meal Ticket Review Due
+            </h2>
+
+            <p className="text-sm text-slate-500 mt-1">
+              These employees just crossed 6 months of service — review and update their meal entitlement.
+            </p>
+
+          </div>
+
+
+          <div className="overflow-x-auto">
+
+            <table className="w-full">
+
+              <thead className="bg-slate-50">
+
+                <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
+
+                  <th className="px-6 py-4">
+                    Employee
+                  </th>
+
+                  <th className="px-6 py-4">
+                    Position
+                  </th>
+
+                </tr>
+
+              </thead>
+
+
+              <tbody>
+
+                {mealReminders.map(
+                  (reminder) => (
+
+                    <tr
+                      key={reminder.id}
+                      className="border-t border-slate-100"
+                    >
+
+                      <td className="px-6 py-4">
+
+                        <div className="font-medium text-slate-900">
+                          {reminder.name}
+                        </div>
+
+                        <div className="text-sm text-slate-500">
+                          {reminder.employee_id}
+                        </div>
+
+                      </td>
+
+
+                      <td className="px-6 py-4 text-slate-700">
+                        {reminder.position || "-"}
+                      </td>
+
+                    </tr>
+
+                  )
+                )}
+
+              </tbody>
+
+            </table>
+
+          </div>
+
+        </section>
+
+      )}
 
     </main>
   );

@@ -5,6 +5,7 @@ from rest_framework import serializers
 from .models import (
     EmployeeMealEntitlement,
     MealDevice,
+    MealEntitlementRule,
     MealTicketRate,
 )
 
@@ -127,6 +128,25 @@ class MealTicketRateSerializer(serializers.ModelSerializer):
                         "Rate dates overlap an existing meal ticket rate."
                     )
         return attrs
+
+
+class MealEntitlementRuleSerializer(serializers.ModelSerializer):
+    position_name = serializers.CharField(source="position.name", read_only=True, default="")
+
+    class Meta:
+        model = MealEntitlementRule
+        fields = (
+            "id",
+            "employment_type",
+            "employment_category",
+            "position",
+            "position_name",
+            "minimum_months_of_service",
+            "tickets_per_work_day",
+            "priority",
+            "description",
+            "active",
+        )
 
 
 class MealDeviceSerializer(serializers.ModelSerializer):

@@ -5,9 +5,12 @@ from .views import (
     MealDeviceDetailAPIView,
     MealDeviceListCreateAPIView,
     MealEntitlementListCreateAPIView,
+    MealEntitlementRuleDetailAPIView,
+    MealEntitlementRuleListCreateAPIView,
     MealExcessApproveAPIView,
     MealExcessCancelAPIView,
     MealOperationsAPIView,
+    MealReviewRemindersAPIView,
     MealTicketRateListCreateAPIView,
 )
 
@@ -16,6 +19,21 @@ urlpatterns = [
         "entitlements/",
         MealEntitlementListCreateAPIView.as_view(),
         name="meal-entitlements",
+    ),
+    path(
+        "rules/",
+        MealEntitlementRuleListCreateAPIView.as_view(),
+        name="meal-entitlement-rules",
+    ),
+    path(
+        "rules/<int:pk>/",
+        MealEntitlementRuleDetailAPIView.as_view(),
+        name="meal-entitlement-rule-detail",
+    ),
+    path(
+        "review-reminders/",
+        MealReviewRemindersAPIView.as_view(),
+        name="meal-review-reminders",
     ),
     path(
         "rates/",

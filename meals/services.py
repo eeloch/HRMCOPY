@@ -14,7 +14,7 @@ from attendance.models import (
     RosterDayStatus,
     
 )
-from employees.models import BiometricIdentity
+from employees.models import BiometricIdentity, Employee
 from notifications.services import NotificationService
 from payroll.models import (
     EmployeePayrollStatus,
@@ -40,16 +40,48 @@ from .models import (
     MealTicketRate,
 )
 
+def months_of_service(employment_date, as_of):
+    if not employment_date:
+        return 0
+    months = (as_of.year - employment_date.year) * 12 + (as_of.month - employment_date.month)
+    if as_of.day < employment_date.day:
+        months -= 1
+    return max(months, 0)
+
+
+def _add_months(start_date, months):
+    month_index = start_date.month - 1 + months
+    year = start_date.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(start_date.day, [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
+    return date(year, month, day)
+
+
 class MealService:
     @staticmethod
     def suggested_entitlement(employee, work_date):
-        years = (work_date.year - employee.employment_date.year) if employee.employment_date else 0
+        months = months_of_service(employee.employment_date, work_date)
         for rule in MealEntitlementRule.objects.filter(active=True):
             if rule.employment_type and rule.employment_type != employee.employment_type: continue
             if rule.employment_category and rule.employment_category != employee.employment_category: continue
-            if rule.minimum_years_of_service is not None and years < rule.minimum_years_of_service: continue
+            if rule.position_id and rule.position_id != employee.position_id: continue
+            if rule.minimum_months_of_service is not None and months < rule.minimum_months_of_service: continue
             return rule.tickets_per_work_day, rule
         return 0, None
+
+    @staticmethod
+    def employees_due_for_meal_review(as_of, window_days=14):
+        cutoff_start = as_of - timedelta(days=window_days)
+        employees = Employee.objects.filter(status="active", employment_date__isnull=False)
+        due = []
+        for employee in employees:
+            months = months_of_service(employee.employment_date, as_of)
+            if months != 6:
+                continue
+            anniversary = _add_months(employee.employment_date, 6)
+            if cutoff_start <= anniversary <= as_of:
+                due.append(employee)
+        return due
 
     @staticmethod
     def approved_entitlement(employee, work_date):

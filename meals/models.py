@@ -4,7 +4,7 @@ from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.db import models
 
-from employees.models import Employee, EmploymentCategory, EmploymentType
+from employees.models import Employee, EmploymentCategory, EmploymentType, Position
 from attendance.models import Shift
 from payroll.models import EmployeePayroll, PayrollLineItem, PayrollPeriod
 
@@ -32,7 +32,9 @@ class MealTicketRate(models.Model):
 class MealEntitlementRule(models.Model):
     employment_type = models.CharField(max_length=20, choices=EmploymentType.choices, blank=True)
     employment_category = models.CharField(max_length=20, choices=EmploymentCategory.choices, blank=True)
+    position = models.ForeignKey(Position, on_delete=models.SET_NULL, null=True, blank=True, related_name="meal_entitlement_rules")
     minimum_years_of_service = models.PositiveIntegerField(null=True, blank=True)
+    minimum_months_of_service = models.PositiveIntegerField(null=True, blank=True)
     tickets_per_work_day = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     priority = models.PositiveIntegerField(default=100)
     description = models.CharField(max_length=255, blank=True)

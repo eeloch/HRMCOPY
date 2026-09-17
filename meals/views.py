@@ -12,12 +12,14 @@ from .models import (
     EmployeeMealEntitlement,
     MealCollection,
     MealDevice,
+    MealEntitlementRule,
     MealExcessException,
     MealTicketRate,
 )
 from .serializers import (
     EmployeeMealEntitlementSerializer,
     MealDeviceSerializer,
+    MealEntitlementRuleSerializer,
     MealTicketRateSerializer,
 )
 from .services import MealService
@@ -100,6 +102,61 @@ class MealTicketRateListCreateAPIView(APIView):
             MealTicketRateSerializer(serializer.save()).data,
             status=201,
         )
+
+
+class MealEntitlementRuleListCreateAPIView(APIView):
+    def get_permissions(self):
+        permission = (
+            CanManageMealConfiguration
+            if self.request.method == "POST"
+            else CanViewMealOperations
+        )
+        return [IsAuthenticated(), permission()]
+
+    def get(self, request):
+        rules = MealEntitlementRule.objects.select_related("position").order_by("priority", "id")
+        return Response({
+            "count": rules.count(),
+            "results": MealEntitlementRuleSerializer(rules, many=True).data,
+        })
+
+    def post(self, request):
+        serializer = MealEntitlementRuleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response(
+            MealEntitlementRuleSerializer(serializer.save()).data,
+            status=201,
+        )
+
+
+class MealEntitlementRuleDetailAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanManageMealConfiguration]
+
+    def patch(self, request, pk):
+        rule = get_object_or_404(MealEntitlementRule, pk=pk)
+        serializer = MealEntitlementRuleSerializer(rule, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        return Response(MealEntitlementRuleSerializer(serializer.save()).data)
+
+
+class MealReviewRemindersAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanManageMealConfiguration]
+
+    def get(self, request):
+        employees = MealService.employees_due_for_meal_review(timezone.localdate())
+        return Response({
+            "count": len(employees),
+            "results": [
+                {
+                    "id": employee.pk,
+                    "employee_id": employee.employee_id,
+                    "name": employee.full_name,
+                    "employment_date": employee.employment_date,
+                    "position": employee.position.name if employee.position_id else "",
+                }
+                for employee in employees
+            ],
+        })
 
 
 class MealDeviceListCreateAPIView(APIView):
