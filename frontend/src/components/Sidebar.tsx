@@ -47,6 +47,7 @@ const menu: MenuItem[] = [
   },
   {
     label: "Biometrics",
+    href: "/biometrics",
     children: [
       { label: "Biometric Punches", href: "/attendance/biometric" },
       { label: "Biometric Devices", href: "/devices" },

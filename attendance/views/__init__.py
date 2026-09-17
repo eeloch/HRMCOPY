@@ -15,7 +15,7 @@ from .roster import EmployeeRosterListAPIView, RosterGenerationAPIView, RosterOv
 from .overtime import OvertimeDecisionAPIView, OvertimeMarkPaidAPIView, OvertimeRecordListAPIView
 from .bridge import VendorGatewayPunchBridgeAPIView
 from .events import BiometricEventListAPIView
-from .devices import BiometricDeviceListCreateAPIView, BiometricDeviceDetailAPIView, DeviceCommandListCreateAPIView, DeviceReconcileEnrolledIdsAPIView, PersonInformationImportAPIView
+from .devices import BiometricDeviceListCreateAPIView, BiometricDeviceDetailAPIView, DeviceCommandListCreateAPIView, DeviceReconcileEnrolledIdsAPIView, PersonInformationImportAPIView, BiometricsOverviewAPIView
 
 __all__ = [
     "AttendanceDashboardAPIView",

@@ -381,3 +381,52 @@ class PersonInformationImportAPIView(APIView):
             raise ValueError("Upload the .xls or .xlsx Person Information export from the terminal software.")
 
         return rows
+
+
+class BiometricsOverviewAPIView(APIView):
+    """Active staff vs. who actually has a working biometric identity.
+
+    Enrollment happens outside this system (at a terminal, or via the
+    Person Information import) - this just compares the two lists so
+    nobody has to track it by memory or a stale one-off count.
+    """
+
+    permission_classes = [IsAuthenticated, CanManageDevices]
+
+    def get(self, request):
+        active_employees = (
+            Employee.objects
+            .filter(status="active")
+            .select_related("department", "position")
+            .order_by("department__name", "last_name", "first_name")
+        )
+
+        enrolled_employee_ids = set(
+            BiometricIdentity.objects
+            .filter(is_active=True, employee__status="active")
+            .values_list("employee_id", flat=True)
+            .distinct()
+        )
+
+        not_enrolled = []
+        for employee in active_employees:
+            if employee.id in enrolled_employee_ids:
+                continue
+            not_enrolled.append({
+                "id": employee.pk,
+                "employee_id": employee.employee_id,
+                "name": employee.full_name,
+                "department": employee.department.name if employee.department_id else "",
+                "position": employee.position.name if employee.position_id else "",
+                "employment_type": employee.employment_type,
+            })
+
+        total_active = active_employees.count()
+        total_enrolled = total_active - len(not_enrolled)
+
+        return Response({
+            "total_active": total_active,
+            "total_enrolled": total_enrolled,
+            "total_not_enrolled": len(not_enrolled),
+            "not_enrolled": not_enrolled,
+        })

@@ -24,6 +24,7 @@ from .views import (
     DeviceCommandListCreateAPIView,
     DeviceReconcileEnrolledIdsAPIView,
     PersonInformationImportAPIView,
+    BiometricsOverviewAPIView,
 )
 
 
@@ -35,6 +36,7 @@ urlpatterns = [
     path("devices/<int:device_id>/commands/", DeviceCommandListCreateAPIView.as_view(), name="device-command-list-create"),
     path("devices/<int:device_id>/reconcile/", DeviceReconcileEnrolledIdsAPIView.as_view(), name="device-reconcile-enrolled-ids"),
     path("devices/import-person-information/", PersonInformationImportAPIView.as_view(), name="person-information-import"),
+    path("biometrics-overview/", BiometricsOverviewAPIView.as_view(), name="biometrics-overview"),
     path(
         "today/",
         TodayAttendanceAPIView.as_view(),
