@@ -12,6 +12,19 @@ export type CurrentUser = {
     record_meal_operations: boolean;
     review_meal_excess: boolean;
     manage_meal_configuration: boolean;
+    view_salary: boolean;
+    manage_devices: boolean;
+    manage_shifts: boolean;
+    manage_roster: boolean;
+    review_attendanceexception: boolean;
+    review_overtime: boolean;
+    approve_leave: boolean;
+    view_payroll: boolean;
+    manage_payroll: boolean;
+    record_ppe_issue: boolean;
+    review_ppe_deduction: boolean;
+    view_documents: boolean;
+    manage_documents: boolean;
   };
 };
 

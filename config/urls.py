@@ -7,7 +7,13 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 
-from core.views import CurrentUserAPIView, LogoutAPIView, ThrottledTokenObtainPairView
+from core.views import (
+    CurrentUserAPIView,
+    LogoutAPIView,
+    ThrottledTokenObtainPairView,
+    UserAccountDetailAPIView,
+    UserAccountListCreateAPIView,
+)
 
 
 urlpatterns = [
@@ -39,6 +45,18 @@ urlpatterns = [
         "api/auth/me/",
         CurrentUserAPIView.as_view(),
         name="current_user",
+    ),
+
+    path(
+        "api/auth/users/",
+        UserAccountListCreateAPIView.as_view(),
+        name="user-account-list-create",
+    ),
+
+    path(
+        "api/auth/users/<int:user_id>/",
+        UserAccountDetailAPIView.as_view(),
+        name="user-account-detail",
     ),
 
     path(
