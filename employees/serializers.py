@@ -93,6 +93,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
     hostel = serializers.SerializerMethodField()
 
+    accommodation = serializers.SerializerMethodField()
+
     biometric = serializers.SerializerMethodField()
 
     years_of_service = serializers.SerializerMethodField()
@@ -150,6 +152,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
             "room": employee.hostel_room_number,
         }
 
+    def get_accommodation(self, employee):
+        return {
+            "external": employee.lives_in_external_accommodation,
+            "address": employee.external_accommodation_address,
+        }
+
     class Meta:
         model = Employee
 
@@ -174,6 +182,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
             "date_of_birth",
             "employment_date",
+            "exit_date",
             "employment_type",
             "employment_category",
 
@@ -181,11 +190,14 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
             "lives_in_company_hostel",
             "hostel_room_number",
+            "lives_in_external_accommodation",
+            "external_accommodation_address",
 
             "status",
 
             "current_shift",
             "hostel",
+            "accommodation",
             "biometric",
             "biometric_identities",
             "years_of_service",
@@ -250,6 +262,7 @@ class EmployeeCreateUpdateSerializer(
 
             "date_of_birth",
             "employment_date",
+            "exit_date",
             "employment_type",
             "employment_category",
 
@@ -257,6 +270,8 @@ class EmployeeCreateUpdateSerializer(
 
             "lives_in_company_hostel",
             "hostel_room_number",
+            "lives_in_external_accommodation",
+            "external_accommodation_address",
 
             "status",
         ]
@@ -307,6 +322,24 @@ class EmployeeCreateUpdateSerializer(
             ),
         )
 
+        lives_externally = attrs.get(
+            "lives_in_external_accommodation",
+            getattr(
+                self.instance,
+                "lives_in_external_accommodation",
+                False,
+            ),
+        )
+
+        external_accommodation_address = attrs.get(
+            "external_accommodation_address",
+            getattr(
+                self.instance,
+                "external_accommodation_address",
+                "",
+            ),
+        )
+
         if (
             position
             and department
@@ -325,6 +358,15 @@ class EmployeeCreateUpdateSerializer(
             raise serializers.ValidationError({
                 "hostel_room_number":
                     "Room number can only be entered for employees living in company accommodation."
+            })
+
+        if (
+            external_accommodation_address
+            and not lives_externally
+        ):
+            raise serializers.ValidationError({
+                "external_accommodation_address":
+                    "Address can only be entered for employees living in company-arranged external accommodation."
             })
 
         return attrs
@@ -349,6 +391,8 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
 
     hostel = serializers.SerializerMethodField()
 
+    accommodation = serializers.SerializerMethodField()
+
     full_name = serializers.SerializerMethodField()
 
     years_of_service = serializers.SerializerMethodField()
@@ -370,6 +414,7 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
             "phone",
             "email",
             "employment_date",
+            "exit_date",
             "employment_type",
             "employment_category",
             "years_of_service",
@@ -377,6 +422,7 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
             "basic_salary",
             "status",
             "hostel",
+            "accommodation",
             "biometric",
         ]
 
@@ -403,6 +449,12 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
         return {
             "resident": obj.lives_in_company_hostel,
             "room": obj.hostel_room_number,
+        }
+
+    def get_accommodation(self, obj):
+        return {
+            "external": obj.lives_in_external_accommodation,
+            "address": obj.external_accommodation_address,
         }
 
     def get_biometric(self, obj):

@@ -101,6 +101,11 @@ class Employee(models.Model):
         blank=True,
     )
 
+    exit_date = models.DateField(
+        null=True,
+        blank=True,
+    )
+
     employment_type = models.CharField(
         max_length=20,
         choices=EmploymentType.choices,
@@ -137,6 +142,15 @@ class Employee(models.Model):
 
     hostel_room_number = models.CharField(
         max_length=50,
+        blank=True,
+    )
+
+    lives_in_external_accommodation = models.BooleanField(
+        default=False,
+    )
+
+    external_accommodation_address = models.CharField(
+        max_length=255,
         blank=True,
     )
 

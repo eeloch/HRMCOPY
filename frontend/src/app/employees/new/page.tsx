@@ -124,6 +124,11 @@ export default function AddEmployeePage() {
 
     hostel_room_number: "",
 
+    lives_in_external_accommodation:
+      false,
+
+    external_accommodation_address: "",
+
     status: "active",
 
   });
@@ -387,6 +392,11 @@ export default function AddEmployeePage() {
         hostel_room_number:
           form.lives_in_company_hostel
             ? form.hostel_room_number.trim()
+            : "",
+
+        external_accommodation_address:
+          form.lives_in_external_accommodation
+            ? form.external_accommodation_address.trim()
             : "",
 
       };
@@ -977,6 +987,74 @@ export default function AddEmployeePage() {
                     onChange={(value) =>
                       updateField(
                         "hostel_room_number",
+                        value
+                      )
+                    }
+                  />
+
+                </div>
+
+              )}
+
+
+              <label className="mt-5 flex items-center gap-3 cursor-pointer">
+
+                <input
+                  type="checkbox"
+                  checked={
+                    form.lives_in_external_accommodation
+                  }
+                  onChange={(event) => {
+
+                    const checked =
+                      event.target.checked;
+
+                    updateField(
+                      "lives_in_external_accommodation",
+                      checked
+                    );
+
+                    if (!checked) {
+
+                      updateField(
+                        "external_accommodation_address",
+                        ""
+                      );
+                    }
+                  }}
+                  className="w-4 h-4"
+                />
+
+
+                <div>
+
+                  <div className="text-sm font-medium text-slate-800">
+                    Employee lives in company-arranged external accommodation
+                  </div>
+
+                  <div className="text-xs text-slate-500 mt-1">
+                    Enable this for a company-paid rental outside the factory premises (not the hostel).
+                  </div>
+
+                </div>
+
+              </label>
+
+
+              {form.lives_in_external_accommodation && (
+
+                <div className="mt-5 max-w-md">
+
+                  <Field
+                    label="External Accommodation Address"
+                    value={
+                      form.external_accommodation_address
+                    }
+                    required
+                    placeholder="Example: 12 Ikorodu Road, Lagos"
+                    onChange={(value) =>
+                      updateField(
+                        "external_accommodation_address",
                         value
                       )
                     }

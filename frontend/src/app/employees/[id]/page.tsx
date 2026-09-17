@@ -47,6 +47,9 @@ type Employee = {
 
   lives_in_company_hostel: boolean;
   hostel_room_number: string;
+  lives_in_external_accommodation: boolean;
+  external_accommodation_address: string;
+  exit_date: string | null;
 
   status: string;
 
@@ -394,7 +397,11 @@ export default function EmployeeProfilePage() {
                     ? employee.hostel_room_number
                       ? `Hostel - Room ${employee.hostel_room_number}`
                       : "Company Hostel"
-                    : "Not Resident"
+                    : employee.lives_in_external_accommodation
+                      ? employee.external_accommodation_address
+                        ? `External - ${employee.external_accommodation_address}`
+                        : "External (Company Arranged)"
+                      : "Not Resident"
                 }
               />
 

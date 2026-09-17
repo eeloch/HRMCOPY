@@ -1,4 +1,4 @@
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -15,12 +15,14 @@ from .models import (
     MealEntitlementRule,
     MealExcessException,
     MealTicketRate,
+    MealVendorPayment,
 )
 from .serializers import (
     EmployeeMealEntitlementSerializer,
     MealDeviceSerializer,
     MealEntitlementRuleSerializer,
     MealTicketRateSerializer,
+    MealVendorPaymentSerializer,
 )
 from .services import MealService
 from payroll.models import PayrollPeriod
@@ -157,6 +159,45 @@ class MealReviewRemindersAPIView(APIView):
                 for employee in employees
             ],
         })
+
+
+class MealVendorPeriodAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanViewMealOperations]
+
+    def get(self, request, payroll_period_id):
+        period = get_object_or_404(PayrollPeriod, pk=payroll_period_id)
+
+        collections = MealCollection.objects.filter(
+            work_date__gte=period.start_date,
+            work_date__lte=period.end_date,
+        )
+        tickets_issued = collections.count()
+        amount_owed = collections.aggregate(total=Sum("rate_snapshot"))["total"] or 0
+
+        payments = MealVendorPayment.objects.filter(payroll_period=period).select_related("recorded_by")
+        total_paid = payments.aggregate(total=Sum("amount"))["total"] or 0
+
+        return Response({
+            "payroll_period": period.pk,
+            "tickets_issued": tickets_issued,
+            "amount_owed": amount_owed,
+            "total_paid": total_paid,
+            "balance": amount_owed - total_paid,
+            "payments": MealVendorPaymentSerializer(payments, many=True).data,
+        })
+
+
+class MealVendorPaymentListCreateAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanManageMealConfiguration]
+
+    def post(self, request):
+        serializer = MealVendorPaymentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payment = serializer.save(recorded_by=request.user)
+        return Response(
+            MealVendorPaymentSerializer(payment).data,
+            status=201,
+        )
 
 
 class MealDeviceListCreateAPIView(APIView):

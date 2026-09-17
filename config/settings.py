@@ -75,6 +75,7 @@ INSTALLED_APPS = [
     "notifications",
     "ppe",
     "meals",
+    "offences",
 ]
 
 MIDDLEWARE = [

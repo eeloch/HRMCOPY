@@ -29,6 +29,7 @@ ROLES = {
         ("attendance", "review_attendanceexception"),
         ("attendance", "review_overtime"),
         ("leave", "approve_leave"),
+        ("offences", "record_employee_offences"),
     ],
     "HR Manager": [
         ("documents", "view_documents"),
@@ -37,10 +38,13 @@ ROLES = {
         ("attendance", "manage_roster"),
         ("attendance", "manage_shifts"),
         ("attendance", "review_attendanceexception"),
+        ("offences", "review_employee_offences"),
+        ("offences", "manage_offence_configuration"),
     ],
     "Payroll Officer": [
         ("payroll", "view_payroll"),
         ("payroll", "manage_payroll"),
+        ("offences", "review_employee_offences"),
     ],
     "PPE/Store Officer": [
         ("ppe", "record_ppe_issue"),

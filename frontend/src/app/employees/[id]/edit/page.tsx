@@ -25,12 +25,15 @@ type EmployeeResponse = {
   email: string;
   date_of_birth: string | null;
   employment_date: string | null;
+  exit_date: string | null;
   employment_type: string;
   employment_category: string;
   // Absent (not just blank) when the current user lacks permission to view salary.
   basic_salary?: string;
   lives_in_company_hostel: boolean;
   hostel_room_number: string;
+  lives_in_external_accommodation: boolean;
+  external_accommodation_address: string;
   status: string;
 };
 
@@ -46,11 +49,14 @@ const emptyForm: EmployeeFormValues = {
   email: "",
   date_of_birth: "",
   employment_date: "",
+  exit_date: "",
   employment_type: "permanent",
   employment_category: "staff",
   basic_salary: "",
   lives_in_company_hostel: false,
   hostel_room_number: "",
+  lives_in_external_accommodation: false,
+  external_accommodation_address: "",
   status: "active",
 };
 
@@ -180,11 +186,16 @@ export default function EditEmployeePage() {
         email: form.email,
         date_of_birth: form.date_of_birth || null,
         employment_date: form.employment_date || null,
+        exit_date: form.exit_date || null,
         employment_type: form.employment_type,
         employment_category: form.employment_category,
         lives_in_company_hostel: form.lives_in_company_hostel,
         hostel_room_number: form.lives_in_company_hostel
           ? form.hostel_room_number.trim()
+          : "",
+        lives_in_external_accommodation: form.lives_in_external_accommodation,
+        external_accommodation_address: form.lives_in_external_accommodation
+          ? form.external_accommodation_address.trim()
           : "",
         status: form.status,
       };
@@ -285,11 +296,14 @@ function toFormValues(employee: EmployeeResponse): EmployeeFormValues {
     email: employee.email || "",
     date_of_birth: dateValue(employee.date_of_birth),
     employment_date: dateValue(employee.employment_date),
+    exit_date: dateValue(employee.exit_date),
     employment_type: employee.employment_type || "permanent",
     employment_category: employee.employment_category || "staff",
     basic_salary: employee.basic_salary || "",
     lives_in_company_hostel: employee.lives_in_company_hostel,
     hostel_room_number: employee.hostel_room_number || "",
+    lives_in_external_accommodation: employee.lives_in_external_accommodation,
+    external_accommodation_address: employee.external_accommodation_address || "",
     status: employee.status || "active",
   };
 }

@@ -25,11 +25,14 @@ export type EmployeeFormValues = {
   email: string;
   date_of_birth: string;
   employment_date: string;
+  exit_date: string;
   employment_type: string;
   employment_category: string;
   basic_salary: string;
   lives_in_company_hostel: boolean;
   hostel_room_number: string;
+  lives_in_external_accommodation: boolean;
+  external_accommodation_address: string;
   status: string;
 };
 
@@ -156,6 +159,14 @@ export default function EmployeeForm({
             onChange={(value) => onValueChange("employment_date", value)}
           />
 
+          <Field
+            label="Exit Date"
+            type="date"
+            value={values.exit_date}
+            onChange={(value) => onValueChange("exit_date", value)}
+            helpText="Set when the employee leaves - used for weekly hire/exit reporting."
+          />
+
           <SelectField
             label="Employment Type"
             value={values.employment_type}
@@ -241,6 +252,42 @@ export default function EmployeeForm({
                 required
                 placeholder="Example: B12"
                 onChange={(value) => onValueChange("hostel_room_number", value)}
+              />
+            </div>
+          )}
+
+          <label className="mt-5 flex cursor-pointer items-center gap-3">
+            <input
+              type="checkbox"
+              checked={values.lives_in_external_accommodation}
+              onChange={(event) => {
+                const livesExternally = event.target.checked;
+                onValueChange("lives_in_external_accommodation", livesExternally);
+
+                if (!livesExternally) {
+                  onValueChange("external_accommodation_address", "");
+                }
+              }}
+              className="h-4 w-4"
+            />
+            <span>
+              <span className="block text-sm font-medium text-slate-800">
+                Employee lives in company-arranged external accommodation
+              </span>
+              <span className="mt-1 block text-xs text-slate-500">
+                Enable this for a company-paid rental outside the factory premises (not the hostel).
+              </span>
+            </span>
+          </label>
+
+          {values.lives_in_external_accommodation && (
+            <div className="mt-5 max-w-md">
+              <Field
+                label="External Accommodation Address"
+                value={values.external_accommodation_address}
+                required
+                placeholder="Example: 12 Ikorodu Road, Lagos"
+                onChange={(value) => onValueChange("external_accommodation_address", value)}
               />
             </div>
           )}

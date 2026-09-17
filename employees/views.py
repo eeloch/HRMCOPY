@@ -1,5 +1,8 @@
+from datetime import date, timedelta
+
 from django.contrib.auth import get_user_model
 from django.db.models import Q
+from django.utils import timezone
 
 from django.db import transaction
 
@@ -20,6 +23,8 @@ from .models import (
     Department,
     Position,
     Employee,
+    EmploymentType,
+    EmploymentCategory,
 )
 
 from .serializers import (
@@ -1036,3 +1041,94 @@ class EmployeeProfileAPIView(generics.RetrieveAPIView):
     )
 
     serializer_class = EmployeeProfileSerializer
+
+
+class AccommodationStatusReportAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        categories = ["casual", "expatriate", "administrative", "other"]
+        housing_types = ["in_house", "external"]
+        counts = {housing: {category: 0 for category in categories} for housing in housing_types}
+
+        def category_for(employment_type, employment_category):
+            if employment_type == EmploymentType.CASUAL:
+                return "casual"
+            if employment_type == EmploymentType.EXPATRIATE:
+                return "expatriate"
+            if employment_category in (EmploymentCategory.MANAGEMENT, EmploymentCategory.EXECUTIVE):
+                return "administrative"
+            return "other"
+
+        employees = Employee.objects.filter(status="active").only(
+            "employment_type",
+            "employment_category",
+            "lives_in_company_hostel",
+            "lives_in_external_accommodation",
+        )
+
+        for employee in employees:
+            category = category_for(employee.employment_type, employee.employment_category)
+            if employee.lives_in_company_hostel:
+                counts["in_house"][category] += 1
+            if employee.lives_in_external_accommodation:
+                counts["external"][category] += 1
+
+        return Response({
+            "categories": categories,
+            "housing_types": housing_types,
+            "counts": counts,
+            "totals": {housing: sum(counts[housing].values()) for housing in housing_types},
+        })
+
+
+class EmployeeHiresExitsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        week_start_param = request.query_params.get("week_start")
+        if week_start_param:
+            try:
+                week_start = date.fromisoformat(week_start_param)
+            except ValueError:
+                return Response(
+                    {"detail": "week_start must be an ISO date (YYYY-MM-DD)."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            week_start = timezone.localdate()
+
+        week_start = week_start - timedelta(days=week_start.weekday())
+        week_end = week_start + timedelta(days=6)
+
+        hires = (
+            Employee.objects
+            .filter(employment_date__gte=week_start, employment_date__lte=week_end)
+            .select_related("department")
+            .order_by("employment_date")
+        )
+        exits = (
+            Employee.objects
+            .filter(exit_date__gte=week_start, exit_date__lte=week_end)
+            .select_related("department")
+            .order_by("exit_date")
+        )
+
+        def serialize(queryset, date_field):
+            return [
+                {
+                    "id": employee.pk,
+                    "employee_id": employee.employee_id,
+                    "name": employee.full_name,
+                    "date": getattr(employee, date_field),
+                    "department": employee.department.name if employee.department_id else "",
+                }
+                for employee in queryset
+            ]
+
+        return Response({
+            "week_start": week_start,
+            "week_end": week_end,
+            "hires": serialize(hires, "employment_date"),
+            "exits": serialize(exits, "exit_date"),
+        })

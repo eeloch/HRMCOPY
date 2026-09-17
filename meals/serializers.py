@@ -7,6 +7,7 @@ from .models import (
     MealDevice,
     MealEntitlementRule,
     MealTicketRate,
+    MealVendorPayment,
 )
 
 
@@ -154,3 +155,27 @@ class MealDeviceSerializer(serializers.ModelSerializer):
         model = MealDevice
         fields = ("id", "name", "serial_number", "active", "created_at")
         read_only_fields = ("created_at",)
+
+
+class MealVendorPaymentSerializer(serializers.ModelSerializer):
+    recorded_by_name = serializers.CharField(source="recorded_by.get_full_name", read_only=True, default="")
+
+    class Meta:
+        model = MealVendorPayment
+        fields = (
+            "id",
+            "payroll_period",
+            "amount",
+            "payment_date",
+            "reference",
+            "notes",
+            "recorded_by",
+            "recorded_by_name",
+            "created_at",
+        )
+        read_only_fields = ("recorded_by", "created_at")
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("The payment amount must be greater than zero.")
+        return value

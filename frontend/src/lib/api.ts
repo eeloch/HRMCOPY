@@ -25,6 +25,9 @@ export type CurrentUser = {
     review_ppe_deduction: boolean;
     view_documents: boolean;
     manage_documents: boolean;
+    record_employee_offences: boolean;
+    review_employee_offences: boolean;
+    manage_offence_configuration: boolean;
   };
 };
 

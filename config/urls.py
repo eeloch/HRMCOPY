@@ -104,6 +104,7 @@ urlpatterns = [
         include("ppe.urls"),
     ),
     path("api/meals/", include("meals.urls")),
+    path("api/offences/", include("offences.urls")),
 
     
 ]

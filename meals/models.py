@@ -200,3 +200,19 @@ class MealAbsencePenalty(models.Model):
             f"{self.employee.employee_id} - "
             f"{self.get_penalty_type_display()}"
         )
+
+
+class MealVendorPayment(models.Model):
+    payroll_period = models.ForeignKey(PayrollPeriod, on_delete=models.PROTECT, related_name="meal_vendor_payments")
+    amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
+    payment_date = models.DateField()
+    reference = models.CharField(max_length=150, blank=True)
+    notes = models.TextField(blank=True)
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="meal_vendor_payments_recorded")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-payment_date", "-id"]
+
+    def __str__(self):
+        return f"{self.payroll_period} - {self.amount}"

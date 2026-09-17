@@ -12,6 +12,8 @@ from .views import (
     MealOperationsAPIView,
     MealReviewRemindersAPIView,
     MealTicketRateListCreateAPIView,
+    MealVendorPaymentListCreateAPIView,
+    MealVendorPeriodAPIView,
 )
 
 urlpatterns = [
@@ -69,5 +71,15 @@ urlpatterns = [
         "excess/<int:pk>/cancel/",
         MealExcessCancelAPIView.as_view(),
         name="meal-excess-cancel",
+    ),
+    path(
+        "vendor/payments/",
+        MealVendorPaymentListCreateAPIView.as_view(),
+        name="meal-vendor-payments",
+    ),
+    path(
+        "vendor/<int:payroll_period_id>/",
+        MealVendorPeriodAPIView.as_view(),
+        name="meal-vendor-period",
     ),
 ]

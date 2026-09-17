@@ -1,7 +1,9 @@
 from django.urls import path
 
 from .views import (
+    AccommodationStatusReportAPIView,
     DepartmentListAPIView,
+    EmployeeHiresExitsAPIView,
     PositionListAPIView,
     EmployeeListCreateAPIView,
     EmployeeDetailAPIView,
@@ -43,6 +45,18 @@ urlpatterns = [
         "",
         EmployeeListCreateAPIView.as_view(),
         name="employees",
+    ),
+
+    path(
+        "accommodation-report/",
+        AccommodationStatusReportAPIView.as_view(),
+        name="employee-accommodation-report",
+    ),
+
+    path(
+        "hires-exits/",
+        EmployeeHiresExitsAPIView.as_view(),
+        name="employee-hires-exits",
     ),
 
 
