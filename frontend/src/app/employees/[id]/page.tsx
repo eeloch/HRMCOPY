@@ -45,6 +45,11 @@ type Employee = {
   // Absent (not just blank) when the current user lacks permission to view salary.
   basic_salary?: string;
 
+  // Absent (not just blank) when the current user lacks permission to view bank details.
+  bank_name?: string;
+  account_number?: string;
+  bank_code?: string;
+
   lives_in_company_hostel: boolean;
   hostel_room_number: string;
   lives_in_external_accommodation: boolean;
@@ -370,6 +375,17 @@ export default function EmployeeProfilePage() {
                   employee.basic_salary === undefined
                     ? "Restricted"
                     : `₦${Number(employee.basic_salary).toLocaleString()}`
+                }
+              />
+
+              <SummaryCard
+                label="Bank Details"
+                value={
+                  employee.bank_name === undefined
+                    ? "Restricted"
+                    : employee.bank_name
+                      ? `${employee.bank_name}${employee.account_number ? ` - ${employee.account_number}` : ""}`
+                      : "Not on file"
                 }
               />
 

@@ -30,6 +30,10 @@ type EmployeeResponse = {
   employment_category: string;
   // Absent (not just blank) when the current user lacks permission to view salary.
   basic_salary?: string;
+  // Absent (not just blank) when the current user lacks permission to view bank details.
+  bank_name?: string;
+  account_number?: string;
+  bank_code?: string;
   lives_in_company_hostel: boolean;
   hostel_room_number: string;
   lives_in_external_accommodation: boolean;
@@ -53,6 +57,9 @@ const emptyForm: EmployeeFormValues = {
   employment_type: "permanent",
   employment_category: "staff",
   basic_salary: "",
+  bank_name: "",
+  account_number: "",
+  bank_code: "",
   lives_in_company_hostel: false,
   hostel_room_number: "",
   lives_in_external_accommodation: false,
@@ -73,6 +80,7 @@ export default function EditEmployeePage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [canEditSalary, setCanEditSalary] = useState(false);
+  const [canEditBankDetails, setCanEditBankDetails] = useState(false);
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -107,6 +115,7 @@ export default function EditEmployeePage() {
       setDepartments(departmentData);
       setForm(toFormValues(employee));
       setCanEditSalary(employee.basic_salary !== undefined);
+      setCanEditBankDetails(employee.bank_name !== undefined);
 
       if (employee.department) {
         await loadPositions(String(employee.department));
@@ -207,6 +216,12 @@ export default function EditEmployeePage() {
         payload.basic_salary = form.basic_salary || "0";
       }
 
+      if (canEditBankDetails) {
+        payload.bank_name = form.bank_name;
+        payload.account_number = form.account_number;
+        payload.bank_code = form.bank_code;
+      }
+
       const response = await apiFetch(`/employees/${id}/`, {
         method: "PATCH",
         body: JSON.stringify(payload),
@@ -269,6 +284,7 @@ export default function EditEmployeePage() {
         onSubmit={saveEmployee}
         onCancel={() => router.push(`/employees/${id}`)}
         salaryEditable={canEditSalary}
+        bankDetailsEditable={canEditBankDetails}
       />
     </PageFrame>
   );
@@ -300,6 +316,9 @@ function toFormValues(employee: EmployeeResponse): EmployeeFormValues {
     employment_type: employee.employment_type || "permanent",
     employment_category: employee.employment_category || "staff",
     basic_salary: employee.basic_salary || "",
+    bank_name: employee.bank_name || "",
+    account_number: employee.account_number || "",
+    bank_code: employee.bank_code || "",
     lives_in_company_hostel: employee.lives_in_company_hostel,
     hostel_room_number: employee.hostel_room_number || "",
     lives_in_external_accommodation: employee.lives_in_external_accommodation,

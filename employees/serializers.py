@@ -188,6 +188,10 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
             "basic_salary",
 
+            "bank_name",
+            "account_number",
+            "bank_code",
+
             "lives_in_company_hostel",
             "hostel_room_number",
             "lives_in_external_accommodation",
@@ -213,6 +217,10 @@ class EmployeeSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         if not (request and request.user.has_perm("employees.view_salary")):
             data.pop("basic_salary", None)
+        if not (request and request.user.has_perm("employees.view_bank_details")):
+            data.pop("bank_name", None)
+            data.pop("account_number", None)
+            data.pop("bank_code", None)
         return data
 
     def get_current_shift(self, employee):
@@ -268,6 +276,10 @@ class EmployeeCreateUpdateSerializer(
 
             "basic_salary",
 
+            "bank_name",
+            "account_number",
+            "bank_code",
+
             "lives_in_company_hostel",
             "hostel_room_number",
             "lives_in_external_accommodation",
@@ -283,6 +295,23 @@ class EmployeeCreateUpdateSerializer(
                 "You don't have permission to set the basic salary."
             )
         return value
+
+    def _require_bank_details_permission(self, value):
+        request = self.context.get("request")
+        if not (request and request.user.has_perm("employees.view_bank_details")):
+            raise serializers.ValidationError(
+                "You don't have permission to set employee bank details."
+            )
+        return value
+
+    def validate_bank_name(self, value):
+        return self._require_bank_details_permission(value)
+
+    def validate_account_number(self, value):
+        return self._require_bank_details_permission(value)
+
+    def validate_bank_code(self, value):
+        return self._require_bank_details_permission(value)
 
     def validate(self, attrs):
 
@@ -420,6 +449,9 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
             "years_of_service",
             "service_award_level",
             "basic_salary",
+            "bank_name",
+            "account_number",
+            "bank_code",
             "status",
             "hostel",
             "accommodation",
@@ -431,6 +463,10 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         if not (request and request.user.has_perm("employees.view_salary")):
             data.pop("basic_salary", None)
+        if not (request and request.user.has_perm("employees.view_bank_details")):
+            data.pop("bank_name", None)
+            data.pop("account_number", None)
+            data.pop("bank_code", None)
         return data
 
     def get_full_name(self, obj):

@@ -9,6 +9,7 @@ without a code change anywhere else.
 
 MANAGED_PERMISSIONS = [
     {"codename": "view_salary", "app_label": "employees", "label": "View & set employee salary", "group": "Employees"},
+    {"codename": "view_bank_details", "app_label": "employees", "label": "View & set employee bank details", "group": "Employees"},
     {"codename": "manage_devices", "app_label": "attendance", "label": "Manage biometric devices", "group": "Attendance"},
     {"codename": "manage_shifts", "app_label": "attendance", "label": "Assign & change shifts", "group": "Attendance"},
     {"codename": "manage_roster", "app_label": "attendance", "label": "Manage work rosters", "group": "Attendance"},

@@ -64,6 +64,7 @@ class TodayAttendanceAPIView(APIView):
         results.extend(
             {
                 "id": None,
+                "employee_pk": employee.pk,
                 "employee_id": employee.employee_id,
                 "employee_name": employee.full_name,
                 "date": today,

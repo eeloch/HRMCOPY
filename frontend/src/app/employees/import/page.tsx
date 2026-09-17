@@ -38,6 +38,8 @@ type ImportRow = {
     email: string;
 
     employment_date: string | null;
+    exit_date?: string | null;
+    employment_type?: string;
     basic_salary: string;
 
     lives_in_company_hostel: boolean;
@@ -49,8 +51,9 @@ type ImportRow = {
     biometric_source: string;
     biometric_user_id: string;
 
-    bank?: string;
+    bank_name?: string;
     account_number?: string;
+    bank_code?: string;
   };
 };
 
@@ -601,6 +604,21 @@ export default function EmployeeImportPage() {
       (row) => row.valid && (row.warnings?.length ?? 0) > 0
     ) ?? [];
 
+  const employmentTypeSetCount =
+    preview?.results.filter(
+      (row) => row.valid && row.data.employment_type
+    ).length ?? 0;
+
+  const bankDetailsSetCount =
+    preview?.results.filter(
+      (row) => row.valid && row.data.bank_name
+    ).length ?? 0;
+
+  const exitDateSetCount =
+    preview?.results.filter(
+      (row) => row.valid && row.data.exit_date
+    ).length ?? 0;
+
 
   const canImport =
     (preview?.can_import === true || (skipInvalid && (preview?.valid_rows ?? 0) > 0)) &&
@@ -835,6 +853,35 @@ export default function EmployeeImportPage() {
                   preview.can_import
                     ? "Yes"
                     : "No"
+                }
+              />
+
+            </div>
+
+          )}
+
+          {preview && (
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+
+              <SummaryCard
+                label="Employment Type Recognized"
+                value={
+                  employmentTypeSetCount
+                }
+              />
+
+              <SummaryCard
+                label="Bank Details Present"
+                value={
+                  bankDetailsSetCount
+                }
+              />
+
+              <SummaryCard
+                label="Exit Date Present"
+                value={
+                  exitDateSetCount
                 }
               />
 

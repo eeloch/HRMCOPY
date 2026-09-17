@@ -119,6 +119,12 @@ export default function AddEmployeePage() {
 
     basic_salary: "",
 
+    bank_name: "",
+
+    account_number: "",
+
+    bank_code: "",
+
     lives_in_company_hostel:
       false,
 
@@ -907,6 +913,45 @@ export default function AddEmployeePage() {
                 onChange={(value) =>
                   updateField(
                     "basic_salary",
+                    value
+                  )
+                }
+              />
+
+              <Field
+                label="Bank Name"
+                value={
+                  form.bank_name
+                }
+                onChange={(value) =>
+                  updateField(
+                    "bank_name",
+                    value
+                  )
+                }
+              />
+
+              <Field
+                label="Account Number"
+                value={
+                  form.account_number
+                }
+                onChange={(value) =>
+                  updateField(
+                    "account_number",
+                    value
+                  )
+                }
+              />
+
+              <Field
+                label="Bank Code"
+                value={
+                  form.bank_code
+                }
+                onChange={(value) =>
+                  updateField(
+                    "bank_code",
                     value
                   )
                 }

@@ -124,6 +124,21 @@ class Employee(models.Model):
         default=0,
     )
 
+    bank_name = models.CharField(
+        max_length=150,
+        blank=True,
+    )
+
+    account_number = models.CharField(
+        max_length=50,
+        blank=True,
+    )
+
+    bank_code = models.CharField(
+        max_length=20,
+        blank=True,
+    )
+
     biometric_user_id = models.CharField(
         max_length=100,
         blank=True,
@@ -163,7 +178,10 @@ class Employee(models.Model):
     )
 
     class Meta:
-        permissions = [("view_salary", "Can view and set employee basic salary")]
+        permissions = [
+            ("view_salary", "Can view and set employee basic salary"),
+            ("view_bank_details", "Can view and set employee bank details"),
+        ]
 
     @property
     def full_name(self):

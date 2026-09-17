@@ -82,6 +82,11 @@ class DailyAttendanceSerializer(serializers.ModelSerializer):
         read_only=True,
     )
 
+    employee_pk = serializers.IntegerField(
+        source="employee.id",
+        read_only=True,
+    )
+
     employee_name = serializers.CharField(
         source="employee.full_name",
         read_only=True,
@@ -97,6 +102,7 @@ class DailyAttendanceSerializer(serializers.ModelSerializer):
 
         fields = [
             "id",
+            "employee_pk",
             "employee_id",
             "employee_name",
             "date",

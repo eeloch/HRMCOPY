@@ -557,6 +557,7 @@ class EmployeeImportAPIView(APIView):
         }
 
         can_set_salary = request.user.has_perm("employees.view_salary")
+        can_set_bank_details = request.user.has_perm("employees.view_bank_details")
 
         serializers = []
         serialization_errors = []
@@ -572,6 +573,13 @@ class EmployeeImportAPIView(APIView):
                 # mention pay. Drop it instead: creates get the model
                 # default, updates leave the employee's existing salary untouched.
                 row_data = {key: value for key, value in row_data.items() if key != "basic_salary"}
+            if not can_set_bank_details:
+                # Same reasoning as basic_salary above - drop rather than fail the row.
+                row_data = {
+                    key: value
+                    for key, value in row_data.items()
+                    if key not in ("bank_name", "account_number", "bank_code")
+                }
             serializer = EmployeeCreateUpdateSerializer(
                 instance=existing_employees.get(existing_id),
                 data=row_data,

@@ -29,6 +29,9 @@ export type EmployeeFormValues = {
   employment_type: string;
   employment_category: string;
   basic_salary: string;
+  bank_name: string;
+  account_number: string;
+  bank_code: string;
   lives_in_company_hostel: boolean;
   hostel_room_number: string;
   lives_in_external_accommodation: boolean;
@@ -52,6 +55,8 @@ type EmployeeFormProps = {
   onCancel: () => void;
   /** False when the current user lacks permission to view/set salary - shows the field as read-only instead of silently dropping edits on save. */
   salaryEditable?: boolean;
+  /** False when the current user lacks permission to view/set bank details - shows the fields as read-only instead of silently dropping edits on save. */
+  bankDetailsEditable?: boolean;
 };
 
 export default function EmployeeForm({
@@ -66,6 +71,7 @@ export default function EmployeeForm({
   onSubmit,
   onCancel,
   salaryEditable = true,
+  bankDetailsEditable = true,
 }: EmployeeFormProps) {
   return (
     <form
@@ -214,6 +220,30 @@ export default function EmployeeForm({
             readOnly={!salaryEditable}
             onChange={(value) => onValueChange("basic_salary", value)}
             helpText={salaryEditable ? undefined : "You don't have permission to view or change salary."}
+          />
+        </div>
+      </FormSection>
+
+      <FormSection title="Bank Details">
+        <div className="grid gap-4 md:grid-cols-3">
+          <Field
+            label="Bank Name"
+            value={values.bank_name}
+            readOnly={!bankDetailsEditable}
+            onChange={(value) => onValueChange("bank_name", value)}
+            helpText={bankDetailsEditable ? undefined : "You don't have permission to view or change bank details."}
+          />
+          <Field
+            label="Account Number"
+            value={values.account_number}
+            readOnly={!bankDetailsEditable}
+            onChange={(value) => onValueChange("account_number", value)}
+          />
+          <Field
+            label="Bank Code"
+            value={values.bank_code}
+            readOnly={!bankDetailsEditable}
+            onChange={(value) => onValueChange("bank_code", value)}
           />
         </div>
       </FormSection>

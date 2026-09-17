@@ -63,6 +63,8 @@ HEADER_ALIASES = {
 
     # Employment
     "employment_date": "employment_date",
+    "employment_start_date": "employment_date",
+    "start_date": "employment_date",
     "date_employed": "employment_date",
     "date_of_employment": "employment_date",
     "hire_date": "employment_date",
@@ -103,17 +105,36 @@ HEADER_ALIASES = {
     "biometric_source": "biometric_source",
     "device": "biometric_system",
 
-    # Existing payroll spreadsheet fields.
-    # These are retained in raw data but are not currently imported
-    # into Employee because the Employee model has no bank fields yet.
+    # Payroll spreadsheet fields.
     "bank": "bank",
+    "bank_name": "bank",
     "account_number": "account_number",
     "account_no": "account_number",
     "bank_codes": "bank_codes",
     "bank_code": "bank_codes",
     "narration": "narration",
+
+    # Exit date
+    "exit": "exit_date",
+    "exit_date": "exit_date",
     "amount": "basic_salary",
     "team": "team",
+}
+
+
+EMPLOYMENT_TYPE_ALIASES = {
+    "permanent": "permanent",
+    "full time": "permanent",
+    "fulltime": "permanent",
+    "full-time": "permanent",
+    "casual": "casual",
+    "contract": "contract",
+    "contractor": "contract",
+    "intern": "intern",
+    "internship": "intern",
+    "nysc": "nysc",
+    "expatriate": "expatriate",
+    "expat": "expatriate",
 }
 
 
@@ -774,6 +795,16 @@ def validate_employee_rows(
         ).lower()
         status = status_value or "active"
 
+        employment_type_value = normalize_value(
+            row.get("employment_type")
+        ).lower()
+        employment_type = EMPLOYMENT_TYPE_ALIASES.get(employment_type_value)
+        if employment_type_value and not employment_type:
+            warnings.append(
+                f"Employment Type '{row.get('employment_type')}' was not recognized "
+                "and will be left unchanged."
+            )
+
         #
         # Employee ID
         #
@@ -916,6 +947,16 @@ def validate_employee_rows(
             )
 
         try:
+            exit_date = parse_date(
+                row.get("exit_date")
+            )
+        except ValueError as exc:
+            exit_date = None
+            warnings.append(
+                str(exc)
+            )
+
+        try:
             lives_in_hostel = parse_boolean(
                 row.get("lives_in_company_hostel")
             )
@@ -956,15 +997,22 @@ def validate_employee_rows(
         account_number = normalize_value(
             row.get("account_number")
         )
+        bank_code = normalize_value(
+            row.get("bank_codes")
+        )
 
         #
-        # Excel may turn account numbers into numbers.
-        # We keep this only for preview at this stage.
+        # Excel may turn account/bank-code numbers into floats.
         #
         if account_number.endswith(
             ".0"
         ):
             account_number = account_number[:-2]
+
+        if bank_code.endswith(
+            ".0"
+        ):
+            bank_code = bank_code[:-2]
 
         cleaned = {
             "employee_id": employee_id,
@@ -1004,6 +1052,11 @@ def validate_employee_rows(
                 if employment_date
                 else None
             ),
+            "exit_date": (
+                exit_date.isoformat()
+                if exit_date
+                else None
+            ),
             "basic_salary": str(
                 basic_salary
             ),
@@ -1026,12 +1079,13 @@ def validate_employee_rows(
                 row.get("biometric_user_id")
             ),
             "team": team_name,
-            #
-            # Preview only for now.
-            #
-            "bank": bank,
+            "bank_name": bank,
             "account_number": account_number,
+            "bank_code": bank_code,
         }
+
+        if employment_type:
+            cleaned["employment_type"] = employment_type
 
         results.append(
             {

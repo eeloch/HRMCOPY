@@ -19,7 +19,8 @@ import {
 
 
 type AttendanceRecord = {
-  id: number;
+  id: number | null;
+  employee_pk: number;
   employee_id: string;
   employee_name: string;
   date: string;
@@ -300,8 +301,9 @@ export default function DashboardPage() {
                   (record) => (
 
                     <tr
-                      key={record.id}
-                      className="border-t border-slate-100"
+                      key={record.employee_pk}
+                      onClick={() => router.push(`/employees/${record.employee_pk}`)}
+                      className="cursor-pointer border-t border-slate-100 hover:bg-slate-50"
                     >
 
                       <td className="px-6 py-4">
