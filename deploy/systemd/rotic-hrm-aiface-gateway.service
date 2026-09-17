@@ -1,0 +1,22 @@
+[Unit]
+Description=Rotic HRM - AiFace biometric gateway
+After=network.target rotic-hrm-backend.service
+
+[Service]
+User=rotic
+Group=rotic
+WorkingDirectory=/opt/rotic_hrm
+EnvironmentFile=/opt/rotic_hrm/.env
+Environment=PYTHONUNBUFFERED=1
+# --bridge-url MUST point at the public https:// domain (through nginx), not
+# the default http://127.0.0.1:8000 - with DJANGO_SECURE_SSL_REDIRECT=True,
+# posting plain HTTP straight to gunicorn gets redirected to
+# https://127.0.0.1:8000 (nothing speaks TLS on that port), and every punch
+# silently times out. Devices do keep retrying until acked, so a fix here
+# recovers a stuck backlog once it's live - but every scan fails until then.
+ExecStart=/opt/rotic_hrm/venv/bin/python manage.py run_aiface_gateway --port 7788 --bridge-url https://<your-domain>/api/attendance/integrations/vendor-gateway/punches/
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -88,7 +88,13 @@ sudo systemctl enable --now rotic-hrm-backend.service
 sudo systemctl enable --now rotic-hrm-frontend.service
 sudo systemctl enable --now rotic-hrm-process-attendance.timer
 sudo systemctl enable --now rotic-hrm-pg-backup.timer
+sudo systemctl enable --now rotic-hrm-aiface-gateway.service
 ```
+
+Before starting `rotic-hrm-aiface-gateway.service`, edit its `--bridge-url` in
+`/etc/systemd/system/rotic-hrm-aiface-gateway.service` to your real domain -
+see the comment in `deploy/systemd/rotic-hrm-aiface-gateway.service` for why
+this one can't use the default.
 
 Check they're actually up: `systemctl status rotic-hrm-backend.service` and
 `journalctl -u rotic-hrm-backend.service -f`.
@@ -105,6 +111,12 @@ sudo certbot --nginx -d <your-domain>
 
 After certbot succeeds, set `DJANGO_SECURE_SSL_REDIRECT=True` in `.env` (if
 you hadn't already) and `sudo systemctl restart rotic-hrm-backend.service`.
+**Also restart `rotic-hrm-aiface-gateway.service` at this point** - if it's
+still posting to the plain-HTTP default, every punch now gets redirected
+into a dead end (`https://127.0.0.1:8000`, which nothing serves) and times
+out. Devices keep retrying so nothing is lost, but nothing gets recorded
+either until this is fixed and restarted - this exact thing happened once
+in production, silently, for most of a day before anyone noticed the gap.
 
 Read the comments in `deploy/nginx/rotic-hrm.conf` before touching it - it
 deliberately does **not** serve `/media/` directly. Employee documents only
@@ -130,6 +142,7 @@ URL, no login required.
 | `systemd/rotic-hrm-frontend.service` | Runs `next start`. |
 | `systemd/rotic-hrm-process-attendance.{service,timer}` | Runs `manage.py process_attendance` for yesterday, daily at 01:00. There's no Celery in this project - this timer is the only thing that ever calls it. |
 | `systemd/rotic-hrm-pg-backup.{service,timer}` | Dumps Postgres + tars `media/`, daily at 02:30, keeps 14 days locally. |
+| `systemd/rotic-hrm-aiface-gateway.service` | Runs the biometric device gateway (`manage.py run_aiface_gateway`). Its `--bridge-url` must point at your real `https://` domain - see the comment in the file. |
 | `scripts/process_attendance.sh`, `scripts/pg_backup.sh` | The actual commands the two timers above run. |
 
 ## Things this folder deliberately doesn't cover
