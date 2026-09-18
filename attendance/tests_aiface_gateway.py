@@ -7,7 +7,9 @@ from attendance.integrations.aiface_protocol import (
     build_deleteuser_command,
     build_device_command,
     build_getuserids_command,
+    build_getuserinfo_command,
     build_reg_ack,
+    build_setuserinfo_command,
     build_sendlog_ack,
     build_senduser_ack,
     stable_record_id,
@@ -155,6 +157,33 @@ class BuildDeleteuserCommandTests(SimpleTestCase):
 class BuildGetuseridsCommandTests(SimpleTestCase):
     def test_requests_the_full_unpaginated_id_list(self):
         self.assertEqual(build_getuserids_command("LF00000001"), {"cmd": "getuserids", "sn": "LF00000001"})
+
+
+class BuildGetuserinfoCommandTests(SimpleTestCase):
+    def test_face_uses_backupnum_50(self):
+        command = build_getuserinfo_command("LF00000001", 42, "face")
+        self.assertEqual(command, {"cmd": "getuserinfo", "sn": "LF00000001", "enrollid": 42, "backupnum": 50})
+
+    def test_fingerprint_uses_backupnum_0(self):
+        command = build_getuserinfo_command("LF00000001", 42, "fingerprint")
+        self.assertEqual(command["backupnum"], 0)
+
+
+class BuildSetuserinfoCommandTests(SimpleTestCase):
+    def test_carries_the_captured_record_through_unmodified(self):
+        command = build_setuserinfo_command("LF00000002", 7, "Test Employee", "face", "base64-captured-template")
+
+        self.assertEqual(command["cmd"], "setuserinfo")
+        self.assertEqual(command["sn"], "LF00000002")
+        self.assertEqual(command["enrollid"], 7)
+        self.assertEqual(command["name"], "Test Employee")
+        self.assertEqual(command["backupnum"], 50)
+        self.assertEqual(command["admin"], 0)
+        self.assertEqual(command["record"], "base64-captured-template")
+
+    def test_fingerprint_uses_backupnum_0(self):
+        command = build_setuserinfo_command("LF00000002", 7, "Test Employee", "fingerprint", "template-data")
+        self.assertEqual(command["backupnum"], 0)
 
 
 class BuildDeviceCommandTests(SimpleTestCase):

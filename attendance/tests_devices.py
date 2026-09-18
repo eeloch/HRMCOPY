@@ -298,6 +298,129 @@ class GatewayIdentityLinkingTests(TestCase):
         identity = BiometricIdentity.objects.get(system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5")
         self.assertEqual(identity.employee, new_employee)
 
+    def test_successful_enrollment_queues_a_clone_to_every_other_device(self):
+        other_attendance = BiometricDevice.objects.create(
+            name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory", purpose="attendance",
+        )
+        meal_device = BiometricDevice.objects.create(
+            name="Canteen", serial_number="MEAL00001", location="Canteen", device_type="factory", purpose="meal_ticket",
+        )
+        DeviceCommand.objects.create(
+            device=self.device, command_type="enroll_user", status="sent",
+            payload={"enrollid": 5, "employee_id": self.employee.id, "name": "Ada Okafor", "biometric_type": "face"},
+        )
+
+        Command._resolve_command("AYTK14145399", {"ret": "adduser", "result": True})
+
+        clone = DeviceCommand.objects.get(device=self.device, command_type="clone_enrollment")
+        self.assertEqual(clone.status, "pending")
+        self.assertEqual(clone.payload["employee_id"], self.employee.id)
+        self.assertEqual(clone.payload["enrollid"], 5)
+        self.assertEqual(clone.payload["name"], "Ada Okafor")
+        self.assertEqual(clone.payload["biometric_type"], "face")
+        self.assertEqual(set(clone.payload["target_device_ids"]), {other_attendance.id, meal_device.id})
+
+    def test_no_clone_queued_when_every_other_device_already_has_this_employee(self):
+        other_device = BiometricDevice.objects.create(
+            name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory", purpose="attendance",
+        )
+        BiometricIdentity.objects.create(
+            employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK99999999", external_user_id="3", is_active=True,
+        )
+        DeviceCommand.objects.create(
+            device=self.device, command_type="enroll_user", status="sent",
+            payload={"enrollid": 5, "employee_id": self.employee.id, "name": "Ada Okafor", "biometric_type": "face"},
+        )
+
+        Command._resolve_command("AYTK14145399", {"ret": "adduser", "result": True})
+
+        self.assertFalse(DeviceCommand.objects.filter(device=self.device, command_type="clone_enrollment").exists())
+
+    def test_no_clone_queued_when_there_are_no_other_devices(self):
+        DeviceCommand.objects.create(
+            device=self.device, command_type="enroll_user", status="sent",
+            payload={"enrollid": 5, "employee_id": self.employee.id, "name": "Ada Okafor", "biometric_type": "face"},
+        )
+
+        Command._resolve_command("AYTK14145399", {"ret": "adduser", "result": True})
+
+        self.assertFalse(DeviceCommand.objects.filter(command_type="clone_enrollment").exists())
+
+
+class GatewayCloneEnrollmentHelperTests(TestCase):
+    """Sync helpers _run_clone_enrollment relies on - the async relay itself
+    needs a live websocket and is exercised manually against real hardware,
+    same as _handle_sendlog/_poll_commands aren't unit tested directly either."""
+
+    def setUp(self):
+        self.source = BiometricDevice.objects.create(
+            name="Main Entrance", serial_number="AYTK14145399", location="Factory gate", device_type="factory",
+        )
+        self.target = BiometricDevice.objects.create(
+            name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory",
+        )
+        self.employee = Employee.objects.create(employee_id="EMP-001", first_name="Ada", last_name="Okafor")
+
+    def test_next_command_to_send_signals_clone_enrollment_needs_custom_handling(self):
+        command = DeviceCommand.objects.create(
+            device=self.source, command_type="clone_enrollment",
+            payload={"employee_id": self.employee.id, "enrollid": 5, "name": "Ada Okafor", "biometric_type": "face", "target_device_ids": [self.target.id]},
+        )
+
+        result = Command._next_command_to_send("AYTK14145399")
+
+        self.assertEqual(result, (command.id, None))
+
+    def test_device_is_busy_true_when_a_command_is_in_flight(self):
+        DeviceCommand.objects.create(device=self.target, command_type="refresh_enrolled_ids", payload={}, status="sent")
+        self.assertTrue(Command._device_is_busy(self.target))
+
+    def test_device_is_busy_false_when_idle(self):
+        self.assertFalse(Command._device_is_busy(self.target))
+
+    def test_next_free_enrollid_on_a_fresh_device_starts_at_1(self):
+        self.assertEqual(Command._next_free_enrollid(self.target), 1)
+
+    def test_next_free_enrollid_is_scoped_to_that_devices_own_identities(self):
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="7")
+        self.assertEqual(Command._next_free_enrollid(self.target), 1)
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK99999999", external_user_id="3")
+        self.assertEqual(Command._next_free_enrollid(self.target), 4)
+
+    def test_link_cloned_identity_creates_the_identity_on_the_target_device(self):
+        Command._link_cloned_identity(self.employee.id, self.target, 12)
+
+        identity = BiometricIdentity.objects.get(employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK99999999")
+        self.assertEqual(identity.external_user_id, "12")
+        self.assertTrue(identity.is_active)
+
+    def test_finish_clone_command_records_outcome_without_ever_storing_a_template(self):
+        command = DeviceCommand.objects.create(
+            device=self.source, command_type="clone_enrollment", status="sent",
+            payload={"employee_id": self.employee.id, "enrollid": 5, "name": "Ada Okafor", "biometric_type": "face", "target_device_ids": [self.target.id]},
+        )
+        summary = {"cloned_to": [{"device_id": self.target.id, "device_name": self.target.name}], "skipped_offline": [], "skipped_busy": [], "failed": []}
+
+        Command._finish_clone_command(command.id, "acked", summary)
+
+        command.refresh_from_db()
+        self.assertEqual(command.status, "acked")
+        self.assertEqual(command.result, summary)
+        self.assertNotIn("record", str(command.result))
+        self.assertIsNotNone(command.completed_at)
+
+    def test_expire_stale_leaves_a_long_running_clone_enrollment_alone(self):
+        stuck = DeviceCommand.objects.create(
+            device=self.source, command_type="clone_enrollment", status="sent",
+            payload={"employee_id": self.employee.id, "enrollid": 5, "name": "Ada Okafor", "biometric_type": "face", "target_device_ids": [self.target.id]},
+        )
+        DeviceCommand.objects.filter(pk=stuck.pk).update(sent_at=timezone.now() - DeviceCommand.STALE_AFTER - timedelta(seconds=1))
+
+        DeviceCommand.expire_stale()
+
+        stuck.refresh_from_db()
+        self.assertEqual(stuck.status, "sent")
+
 
 class DeviceCommandAPITests(TestCase):
     def setUp(self):
@@ -394,7 +517,10 @@ class DeviceCommandAPITests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
 
-    def test_enrolling_on_one_device_auto_queues_it_on_every_other_device(self):
+    def test_enroll_response_lists_devices_that_will_be_cloned_to_once_it_succeeds(self):
+        """The clone itself only happens once the physical scan on this device
+        actually succeeds (see GatewayIdentityLinkingTests) - this response is
+        informational only, and creates no DeviceCommand rows for other devices."""
         other_attendance = BiometricDevice.objects.create(
             name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory", purpose="attendance",
         )
@@ -405,17 +531,11 @@ class DeviceCommandAPITests(TestCase):
         response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": self.employee.id, "biometric_type": "face"}, format="json")
 
         self.assertEqual(response.status_code, 201)
-        propagated_device_ids = {row["device_id"] for row in response.data["propagated_to"]}
-        self.assertEqual(propagated_device_ids, {other_attendance.id, meal_device.id})
+        will_clone_device_ids = {row["device_id"] for row in response.data["will_clone_to"]}
+        self.assertEqual(will_clone_device_ids, {other_attendance.id, meal_device.id})
+        self.assertFalse(DeviceCommand.objects.filter(device__in=[other_attendance, meal_device]).exists())
 
-        for device in (other_attendance, meal_device):
-            queued = DeviceCommand.objects.get(device=device, command_type="enroll_user")
-            self.assertEqual(queued.status, "pending")
-            self.assertEqual(queued.payload["employee_id"], self.employee.id)
-            self.assertEqual(queued.payload["name"], self.employee.full_name)
-            self.assertEqual(queued.payload["biometric_type"], "face")
-
-    def test_propagation_skips_a_device_the_employee_is_already_enrolled_on(self):
+    def test_will_clone_to_excludes_a_device_the_employee_is_already_enrolled_on(self):
         already_enrolled_device = BiometricDevice.objects.create(
             name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory", purpose="attendance",
         )
@@ -426,22 +546,9 @@ class DeviceCommandAPITests(TestCase):
         response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": self.employee.id, "biometric_type": "face"}, format="json")
 
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data["propagated_to"], [])
-        self.assertFalse(DeviceCommand.objects.filter(device=already_enrolled_device).exists())
+        self.assertEqual(response.data["will_clone_to"], [])
 
-    def test_propagation_skips_a_device_with_a_command_already_in_flight(self):
-        busy_device = BiometricDevice.objects.create(
-            name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory", purpose="attendance",
-        )
-        DeviceCommand.objects.create(device=busy_device, command_type="refresh_enrolled_ids", payload={}, status="sent")
-        self.client.force_authenticate(self.manager)
-        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": self.employee.id, "biometric_type": "face"}, format="json")
-
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data["propagated_to"], [])
-        self.assertEqual(DeviceCommand.objects.filter(device=busy_device).count(), 1)
-
-    def test_refresh_enrolled_ids_does_not_propagate(self):
+    def test_refresh_enrolled_ids_has_no_will_clone_to(self):
         BiometricDevice.objects.create(
             name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory", purpose="attendance",
         )
@@ -449,7 +556,7 @@ class DeviceCommandAPITests(TestCase):
         response = self.client.post(self.url(), {"command_type": "refresh_enrolled_ids"}, format="json")
 
         self.assertEqual(response.status_code, 201)
-        self.assertNotIn("propagated_to", response.data)
+        self.assertNotIn("will_clone_to", response.data)
 
 
 class DeviceReconcileEnrolledIdsAPITests(TestCase):

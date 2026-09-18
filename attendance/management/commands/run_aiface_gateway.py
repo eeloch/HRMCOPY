@@ -26,11 +26,15 @@ from attendance.models import BiometricDevice, DeviceCommand
 from attendance.integrations.aiface_protocol import (
     IDENTITY_SYSTEM,
     build_device_command,
+    build_getuserinfo_command,
     build_reg_ack,
     build_sendlog_ack,
     build_senduser_ack,
+    build_setuserinfo_command,
     translate_sendlog_record,
 )
+
+CLONE_REPLY_TIMEOUT_SECONDS = 20
 
 COMMAND_POLL_INTERVAL_SECONDS = 2
 
@@ -64,6 +68,16 @@ class Command(BaseCommand):
         secret = settings.BIOMETRIC_BRIDGE_SECRET
         if not secret:
             raise CommandError("BIOMETRIC_BRIDGE_SECRET is not configured.")
+
+        # Shared across every connection handler (all methods on this one Command
+        # instance): _connections lets a clone_enrollment relay reach a *different*
+        # device's live socket to push setuserinfo; _pending_replies lets
+        # _send_and_wait correlate a specific getuserinfo/setuserinfo ret back to
+        # the coroutine waiting on it, bypassing the generic per-DB-row resolution
+        # in _resolve_command (which clone_enrollment deliberately doesn't use,
+        # since the captured record must never be written to the database).
+        self._connections = {}
+        self._pending_replies = {}
 
         host, port, bridge_url, meal_bridge_url = options["host"], options["port"], options["bridge_url"], options["meal_bridge_url"]
         self.stdout.write(self.style.SUCCESS(
@@ -99,6 +113,7 @@ class Command(BaseCommand):
                 if cmd == "reg":
                     sn = message.get("sn")
                     self.stdout.write(f"[{peer}] reg from device sn={sn}")
+                    self._connections[sn] = ws
                     await asyncio.to_thread(self._mark_device_online, sn, peer[0] if peer else None)
                     await ws.send(json.dumps(build_reg_ack(datetime.now())))
                     if poller_task is None:
@@ -108,8 +123,15 @@ class Command(BaseCommand):
                 elif cmd == "senduser":
                     await ws.send(json.dumps(build_senduser_ack(datetime.now())))
                 elif ret:
-                    self.stdout.write(f"[{sn}] command response ret={ret}: {message}")
-                    await asyncio.to_thread(self._resolve_command, sn, message)
+                    pending = self._pending_replies.get(sn)
+                    if pending is not None and not pending.done():
+                        # Claimed by an in-progress clone_enrollment relay (see
+                        # _send_and_wait) - never logged, since a getuserinfo
+                        # reply carries the raw biometric record.
+                        pending.set_result(message)
+                    else:
+                        self.stdout.write(f"[{sn}] command response ret={ret}: {message}")
+                        await asyncio.to_thread(self._resolve_command, sn, message)
                 elif cmd:
                     self.stdout.write(f"[{peer}] unhandled cmd={cmd!r}")
         except websockets.exceptions.ConnectionClosed:
@@ -119,6 +141,7 @@ class Command(BaseCommand):
                 poller_task.cancel()
             self.stdout.write(f"[{peer}] disconnected (sn={sn})")
             if sn:
+                self._connections.pop(sn, None)
                 await asyncio.to_thread(self._mark_device_offline, sn)
 
     async def _poll_commands(self, ws, sn):
@@ -137,11 +160,86 @@ class Command(BaseCommand):
                 if next_command is None:
                     continue
                 command_id, wire_message = next_command
+                if wire_message is None:
+                    await self._run_clone_enrollment(ws, sn, command_id)
+                    continue
                 self.stdout.write(f"[{sn}] sending queued command: {wire_message}")
                 await ws.send(json.dumps(wire_message))
                 await asyncio.to_thread(self._mark_command_sent, command_id)
         except asyncio.CancelledError:
             pass
+
+    async def _send_and_wait(self, ws, sn, wire_message, timeout):
+        """Send one wire message on this device's own connection and return its
+        matching `ret` reply, bypassing the generic per-DB-row command resolution -
+        see the `elif ret:` branch in _handle_connection. Only one such wait may be
+        outstanding per serial at a time, which the one-command-at-a-time protocol
+        rule already guarantees for us."""
+        future = asyncio.get_running_loop().create_future()
+        self._pending_replies[sn] = future
+        try:
+            await ws.send(json.dumps(wire_message))
+            return await asyncio.wait_for(future, timeout=timeout)
+        finally:
+            self._pending_replies.pop(sn, None)
+
+    async def _run_clone_enrollment(self, ws, sn, command_id):
+        """Relay a successful enrollment to every other device that doesn't have
+        it yet, using getuserinfo (pull the captured template from the source)
+        and setuserinfo (push it to a target) - so the person only has to
+        physically scan once. The captured record is held only in a local
+        variable for the life of this one relay and is never written to the
+        database or logged; only device-level outcomes are.
+        """
+        await asyncio.to_thread(self._mark_command_sent, command_id)
+        command = await asyncio.to_thread(lambda: DeviceCommand.objects.select_related("device").get(pk=command_id))
+        payload = command.payload
+        enrollid, employee_id, employee_name = payload["enrollid"], payload["employee_id"], payload.get("name", "")
+        biometric_type = payload.get("biometric_type", "face")
+        target_ids = payload.get("target_device_ids", [])
+
+        try:
+            reply = await self._send_and_wait(ws, sn, build_getuserinfo_command(sn, enrollid, biometric_type), CLONE_REPLY_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            self.stdout.write(f"[{sn}] clone_enrollment: timed out waiting for the source device to return the template")
+            await asyncio.to_thread(self._finish_clone_command, command_id, "failed", {"detail": "Timed out waiting for the source device to return the enrolled template."})
+            return
+        if not reply.get("result"):
+            await asyncio.to_thread(self._finish_clone_command, command_id, "failed", {"detail": "Source device could not return the enrolled template."})
+            return
+        record = reply.get("record")
+        self.stdout.write(f"[{sn}] clone_enrollment: template captured for enrollid={enrollid}, relaying to {len(target_ids)} device(s)")
+
+        cloned_to, skipped_offline, skipped_busy, failed = [], [], [], []
+        targets = await asyncio.to_thread(lambda: list(BiometricDevice.objects.filter(pk__in=target_ids)))
+        for target in targets:
+            target_ws = self._connections.get(target.serial_number)
+            if target_ws is None:
+                skipped_offline.append({"device_id": target.id, "device_name": target.name})
+                continue
+            if await asyncio.to_thread(self._device_is_busy, target):
+                skipped_busy.append({"device_id": target.id, "device_name": target.name})
+                continue
+            target_enrollid = await asyncio.to_thread(self._next_free_enrollid, target)
+            push_message = build_setuserinfo_command(target.serial_number, target_enrollid, employee_name, biometric_type, record)
+            try:
+                push_reply = await self._send_and_wait(target_ws, target.serial_number, push_message, CLONE_REPLY_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                self.stdout.write(f"[{target.serial_number}] clone_enrollment: timed out waiting for setuserinfo ack")
+                failed.append({"device_id": target.id, "device_name": target.name, "reason": "timed out"})
+                continue
+            if not push_reply.get("result"):
+                failed.append({"device_id": target.id, "device_name": target.name, "reason": "device rejected the template"})
+                continue
+            await asyncio.to_thread(self._link_cloned_identity, employee_id, target, target_enrollid)
+            cloned_to.append({"device_id": target.id, "device_name": target.name})
+
+        record = None  # drop the only reference to the template as soon as we're done relaying it
+        self.stdout.write(f"[{sn}] clone_enrollment: done - cloned={len(cloned_to)} offline={len(skipped_offline)} busy={len(skipped_busy)} failed={len(failed)}")
+        await asyncio.to_thread(
+            self._finish_clone_command, command_id, "acked",
+            {"cloned_to": cloned_to, "skipped_offline": skipped_offline, "skipped_busy": skipped_busy, "failed": failed},
+        )
 
     async def _handle_sendlog(self, ws, message, bridge_url, meal_bridge_url, secret):
         sn = message.get("sn")
@@ -200,11 +298,43 @@ class Command(BaseCommand):
         )
         if command is None:
             return None
+        if command.command_type == "clone_enrollment":
+            # Needs custom multi-device async handling (_run_clone_enrollment),
+            # not a single wire message - signal that to the caller with None.
+            return command.id, None
         return command.id, build_device_command(serial_number, command.command_type, command.payload)
+
+    @staticmethod
+    def _device_is_busy(device):
+        DeviceCommand.expire_stale(device=device)
+        return DeviceCommand.objects.filter(device=device, status__in=("pending", "sent")).exists()
+
+    @staticmethod
+    def _next_free_enrollid(device):
+        from employees.models import BiometricIdentity
+
+        used_ids = BiometricIdentity.objects.filter(
+            system=IDENTITY_SYSTEM, source_identifier=device.serial_number,
+        ).values_list("external_user_id", flat=True)
+        numeric_ids = [int(value) for value in used_ids if value.isdigit()]
+        return max(numeric_ids, default=0) + 1
 
     @staticmethod
     def _mark_command_sent(command_id):
         DeviceCommand.objects.filter(pk=command_id).update(status="sent", sent_at=timezone.now())
+
+    @staticmethod
+    def _finish_clone_command(command_id, status, result):
+        DeviceCommand.objects.filter(pk=command_id).update(status=status, result=result, completed_at=timezone.now())
+
+    @staticmethod
+    def _link_cloned_identity(employee_id, device, enrollid):
+        from employees.models import BiometricIdentity
+
+        BiometricIdentity.objects.update_or_create(
+            employee_id=employee_id, system=IDENTITY_SYSTEM, source_identifier=device.serial_number,
+            defaults={"external_user_id": str(enrollid), "is_active": True},
+        )
 
     @staticmethod
     def _resolve_command(serial_number, message):
@@ -245,6 +375,38 @@ class Command(BaseCommand):
             system=IDENTITY_SYSTEM,
             source_identifier=command.device.serial_number,
             defaults={"external_user_id": str(enrollid), "is_active": True},
+        )
+        Command._queue_clone_to_other_devices(command, employee_id)
+
+    @staticmethod
+    def _queue_clone_to_other_devices(command, employee_id):
+        """Once a physical scan succeeds on one device, relay that enrollment
+        (via getuserinfo/setuserinfo - see _run_clone_enrollment) to every other
+        device that doesn't already have this employee, instead of requiring a
+        separate physical scan at each one. A no-op if every other device
+        already has them."""
+        from employees.models import BiometricIdentity
+
+        already_enrolled_serials = BiometricIdentity.objects.filter(
+            employee_id=employee_id, system=IDENTITY_SYSTEM, is_active=True,
+        ).values_list("source_identifier", flat=True)
+        target_ids = list(
+            BiometricDevice.objects.exclude(pk=command.device_id)
+            .exclude(serial_number__in=already_enrolled_serials)
+            .values_list("id", flat=True)
+        )
+        if not target_ids:
+            return
+        DeviceCommand.objects.create(
+            device=command.device, command_type="clone_enrollment",
+            payload={
+                "employee_id": employee_id,
+                "enrollid": command.payload.get("enrollid"),
+                "name": command.payload.get("name", ""),
+                "biometric_type": command.payload.get("biometric_type", "face"),
+                "target_device_ids": target_ids,
+            },
+            requested_by=command.requested_by,
         )
 
     @staticmethod

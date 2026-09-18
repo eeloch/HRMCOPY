@@ -104,6 +104,28 @@ def build_getuserids_command(sn: str) -> dict:
     return {"cmd": "getuserids", "sn": sn}
 
 
+def build_getuserinfo_command(sn: str, enrollid: int, biometric_type: str) -> dict:
+    """Server -> device: ask a device to send back one enrolled person's raw
+    biometric data (a base64 photo for face, a fingerprint template for
+    fingerprint) for the given slot - confirmed from the vendor's own Flask
+    reference server (Services/PersonService.py, app.py get_user_info_websocket).
+    Used only to relay an enrollment to another device (clone_enrollment);
+    the response is never persisted, only forwarded to build_setuserinfo_command.
+    """
+    return {"cmd": "getuserinfo", "sn": sn, "enrollid": enrollid, "backupnum": BIOMETRIC_TYPE_BACKUPNUM.get(biometric_type, 50)}
+
+
+def build_setuserinfo_command(sn: str, enrollid: int, name: str, biometric_type: str, record) -> dict:
+    """Server -> device: push a previously-captured record (from
+    build_getuserinfo_command's response) so a device enrolls this person
+    without a live scan - same vendor reference source as getuserinfo above.
+    """
+    return {
+        "cmd": "setuserinfo", "sn": sn, "enrollid": enrollid, "name": name,
+        "backupnum": BIOMETRIC_TYPE_BACKUPNUM.get(biometric_type, 50), "admin": 0, "record": record,
+    }
+
+
 def build_device_command(sn: str, command_type: str, payload: Mapping[str, Any]) -> dict:
     """Translate a DeviceCommand row's (command_type, payload) into the wire message to send."""
     if command_type == "enroll_user":

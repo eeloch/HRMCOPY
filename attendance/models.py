@@ -474,6 +474,7 @@ class DeviceCommand(models.Model):
         ("enroll_user", "Enroll User"),
         ("delete_user", "Delete User"),
         ("refresh_enrolled_ids", "Refresh Enrolled IDs"),
+        ("clone_enrollment", "Clone Enrollment To Other Devices"),
     ]
 
     STATUSES = [
@@ -516,9 +517,15 @@ class DeviceCommand(models.Model):
         marks it "acked"/"failed", and it blocks this device's one-command-
         at-a-time queue forever. "pending" commands are left alone since
         they're legitimately waiting for the device to come online.
+
+        "clone_enrollment" is excluded: it legitimately runs longer than
+        STALE_AFTER (a getuserinfo round trip plus one setuserinfo push per
+        target device, sequentially) and manages its own bounded per-step
+        timeouts in _run_clone_enrollment, so this generic sweep would
+        otherwise race with - and incorrectly override - its own outcome.
         """
         cutoff = timezone.now() - cls.STALE_AFTER
-        stale = cls.objects.filter(status="sent", sent_at__lt=cutoff)
+        stale = cls.objects.filter(status="sent", sent_at__lt=cutoff).exclude(command_type="clone_enrollment")
         if device is not None:
             stale = stale.filter(device=device)
         stale.update(status="failed", result={"detail": "Timed out waiting for the device to respond."}, completed_at=timezone.now())
