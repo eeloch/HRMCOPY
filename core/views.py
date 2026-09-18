@@ -2,7 +2,7 @@ import secrets
 import string
 
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Permission
+from django.contrib.auth.models import Group, Permission
 from rest_framework import status
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
@@ -81,6 +81,7 @@ def _generate_password():
 
 
 def _serialize_account(user):
+    direct = set(user.user_permissions.values_list("codename", flat=True))
     return {
         "id": user.pk,
         "username": user.get_username(),
@@ -88,8 +89,24 @@ def _serialize_account(user):
         "is_superuser": user.is_superuser,
         "date_joined": user.date_joined,
         "last_login": user.last_login,
+        # What the user can actually do (direct + inherited from role groups).
         "permissions": user_permission_map(user),
+        # Where it comes from, so the Settings page can tell "granted to this user"
+        # apart from "granted by a role group", which only removing the role revokes.
+        "direct_permissions": {code: code in direct for code in MANAGED_PERMISSION_CODENAMES},
+        "inherited_permissions": _inherited_permissions(user),
+        "groups": sorted(user.groups.values_list("name", flat=True)),
     }
+
+
+def _inherited_permissions(user):
+    """{managed codename: [role group names granting it]} - only those a group grants."""
+    inherited = {}
+    for group in user.groups.prefetch_related("permissions"):
+        for permission in group.permissions.all():
+            if permission.codename in MANAGED_PERMISSION_CODENAMES:
+                inherited.setdefault(permission.codename, []).append(group.name)
+    return {code: sorted(names) for code, names in inherited.items()}
 
 
 class UserAccountListCreateAPIView(APIView):
@@ -106,6 +123,7 @@ class UserAccountListCreateAPIView(APIView):
         users = get_user_model().objects.order_by("username")
         return Response({
             "permission_registry": MANAGED_PERMISSIONS,
+            "available_groups": sorted(Group.objects.values_list("name", flat=True)),
             "results": [_serialize_account(user) for user in users],
         })
 
@@ -156,6 +174,14 @@ class UserAccountDetailAPIView(APIView):
             if unknown:
                 return Response({"detail": f"Unknown permission(s): {', '.join(unknown)}."}, status=status.HTTP_400_BAD_REQUEST)
             _apply_permissions(user, requested)
+
+        if "groups" in request.data:
+            names = request.data.get("groups") or []
+            found = Group.objects.filter(name__in=names)
+            missing = set(names) - set(found.values_list("name", flat=True))
+            if missing:
+                return Response({"detail": f"Unknown role group(s): {', '.join(sorted(missing))}."}, status=status.HTTP_400_BAD_REQUEST)
+            user.groups.set(found)
 
         response_data = {"account": _serialize_account(user)}
 

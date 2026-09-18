@@ -1,5 +1,5 @@
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Permission
+from django.contrib.auth.models import Group, Permission
 from django.test import TestCase
 from rest_framework.test import APIClient
 
@@ -239,3 +239,67 @@ class UserAccountManagementAPITests(TestCase):
         self.client.force_authenticate(self.superuser)
         response = self.client.patch(self.detail_endpoint(999999), {"is_active": False}, format="json")
         self.assertEqual(response.status_code, 404)
+
+
+class RoleGroupPermissionTests(TestCase):
+    """testuser01 kept seeing payroll after it was unticked in Settings: payroll came
+    from the 'Payroll Officer' role group as well as a direct grant, and Settings could
+    only ever change the direct one."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = get_user_model().objects.create_superuser("root-admin", password="password")
+        self.client.force_authenticate(self.admin)
+        self.officer_group = Group.objects.create(name="Payroll Officer")
+        self.officer_group.permissions.add(Permission.objects.get(codename="view_payroll"), Permission.objects.get(codename="manage_payroll"))
+        self.user = get_user_model().objects.create_user("testuser01", password="password")
+        self.user.groups.add(self.officer_group)
+        self.user.user_permissions.add(Permission.objects.get(codename="view_payroll"))
+
+    def account(self):
+        rows = self.client.get("/api/auth/users/").json()["results"]
+        return next(row for row in rows if row["username"] == "testuser01")
+
+    def test_the_account_says_where_each_permission_comes_from(self):
+        account = self.account()
+
+        self.assertEqual(account["groups"], ["Payroll Officer"])
+        self.assertTrue(account["direct_permissions"]["view_payroll"])
+        self.assertFalse(account["direct_permissions"]["manage_payroll"])
+        self.assertEqual(account["inherited_permissions"]["view_payroll"], ["Payroll Officer"])
+        self.assertEqual(account["inherited_permissions"]["manage_payroll"], ["Payroll Officer"])
+        self.assertTrue(account["permissions"]["manage_payroll"])
+
+    def test_the_list_offers_the_available_role_groups(self):
+        self.assertIn("Payroll Officer", self.client.get("/api/auth/users/").json()["available_groups"])
+
+    def test_clearing_direct_permissions_alone_leaves_payroll_access_through_the_role(self):
+        response = self.client.patch(f"/api/auth/users/{self.user.pk}/", {"permissions": []}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        account = response.json()["account"]
+        self.assertFalse(account["direct_permissions"]["view_payroll"])
+        self.assertTrue(account["permissions"]["view_payroll"])
+        self.assertTrue(account["permissions"]["manage_payroll"])
+
+    def test_removing_the_role_and_the_direct_grant_takes_payroll_access_away(self):
+        response = self.client.patch(f"/api/auth/users/{self.user.pk}/", {"permissions": [], "groups": []}, format="json")
+
+        account = response.json()["account"]
+        self.assertEqual(account["groups"], [])
+        self.assertFalse(account["permissions"]["view_payroll"])
+        self.assertFalse(account["permissions"]["manage_payroll"])
+        self.client.force_authenticate(self.user)
+        self.assertEqual(self.client.get("/api/payroll/periods/").status_code, 403)
+
+    def test_unknown_role_groups_are_rejected_and_change_nothing(self):
+        response = self.client.patch(f"/api/auth/users/{self.user.pk}/", {"groups": ["Payroll Officer", "Nonexistent Role"]}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Nonexistent Role", response.json()["detail"])
+        self.assertEqual(list(self.user.groups.values_list("name", flat=True)), ["Payroll Officer"])
+
+    def test_omitting_groups_leaves_role_membership_untouched(self):
+        self.client.patch(f"/api/auth/users/{self.user.pk}/", {"permissions": []}, format="json")
+        self.assertEqual(list(self.user.groups.values_list("name", flat=True)), ["Payroll Officer"])
+

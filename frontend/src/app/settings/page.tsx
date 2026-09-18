@@ -17,6 +17,9 @@ type Account = {
   date_joined: string;
   last_login: string | null;
   permissions: Record<string, boolean>;
+  direct_permissions: Record<string, boolean>;
+  inherited_permissions: Record<string, string[]>;
+  groups: string[];
 };
 
 function groupPermissions(registry: PermissionEntry[]) {
@@ -32,6 +35,7 @@ export default function SettingsPage() {
   const [checkingAccess, setCheckingAccess] = useState(true);
   const [allowed, setAllowed] = useState(false);
   const [registry, setRegistry] = useState<PermissionEntry[]>([]);
+  const [availableGroups, setAvailableGroups] = useState<string[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -49,8 +53,9 @@ export default function SettingsPage() {
     try {
       const response = await apiFetch("/auth/users/");
       if (!response.ok) throw new Error(response.status === 403 ? "You don't have permission to manage users." : "Unable to load accounts.");
-      const data: { permission_registry: PermissionEntry[]; results: Account[] } = await response.json();
+      const data: { permission_registry: PermissionEntry[]; available_groups: string[]; results: Account[] } = await response.json();
       setRegistry(data.permission_registry);
+      setAvailableGroups(data.available_groups || []);
       setAccounts(data.results);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load accounts.");
@@ -108,7 +113,7 @@ export default function SettingsPage() {
         <Sidebar />
         <main className="ml-64 min-w-0 p-4 md:p-8">
           <PageHeader title="Settings" description="Manage user accounts and permissions." />
-          <AppCard><p className="p-8 text-center text-slate-600">You don't have permission to view this page. Only administrators can manage users and permissions.</p></AppCard>
+          <AppCard><p className="p-8 text-center text-slate-600">You don&apos;t have permission to view this page. Only administrators can manage users and permissions.</p></AppCard>
         </main>
       </div>
     );
@@ -202,7 +207,7 @@ export default function SettingsPage() {
                         {expandedId === account.id && (
                           <tr>
                             <td colSpan={4} className="p-0">
-                              <AccountPanel account={account} registry={registry} onChanged={load} />
+                              <AccountPanel key={JSON.stringify([account.groups, account.direct_permissions])} account={account} registry={registry} availableGroups={availableGroups} onChanged={load} />
                             </td>
                           </tr>
                         )}
@@ -219,10 +224,14 @@ export default function SettingsPage() {
   );
 }
 
-function AccountPanel({ account, registry, onChanged }: { account: Account; registry: PermissionEntry[]; onChanged: () => Promise<void> }) {
+function AccountPanel({ account, registry, availableGroups, onChanged }: { account: Account; registry: PermissionEntry[]; availableGroups: string[]; onChanged: () => Promise<void> }) {
+  // Only what's granted to this user directly. Permissions a role group grants are shown
+  // locked below and can only be removed by removing the role - sending them here would
+  // copy them into direct permissions.
   const [selected, setSelected] = useState<string[]>(
-    Object.entries(account.permissions).filter(([, granted]) => granted).map(([code]) => code)
+    Object.entries(account.direct_permissions).filter(([, granted]) => granted).map(([code]) => code)
   );
+  const [selectedGroups, setSelectedGroups] = useState<string[]>(account.groups);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -237,9 +246,9 @@ function AccountPanel({ account, registry, onChanged }: { account: Account; regi
     try {
       const response = await apiFetch(`/auth/users/${account.id}/`, {
         method: "PATCH",
-        body: JSON.stringify({ permissions: selected }),
+        body: JSON.stringify({ permissions: selected, groups: selectedGroups }),
       });
-      if (!response.ok) throw new Error("Unable to update permissions.");
+      if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(typeof data.detail === "string" ? data.detail : "Unable to update permissions."); }
       setMessage("Permissions updated.");
       await onChanged();
     } catch (saveError) {
@@ -303,26 +312,53 @@ function AccountPanel({ account, registry, onChanged }: { account: Account; regi
         </div>
       )}
 
+      {availableGroups.length > 0 && (
+        <div className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Roles</h4>
+          <p className="mt-1 text-xs text-slate-500">A role grants a bundle of permissions (marked &quot;via&quot; below). To take those away, untick the role and save. Ticks that come from a role can&apos;t be changed one by one.</p>
+          <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2">
+            {availableGroups.map((role) => (
+              <label key={role} className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-slate-300"
+                  checked={selectedGroups.includes(role)}
+                  onChange={(event) => setSelectedGroups((current) => (event.target.checked ? [...current, role] : current.filter((name) => name !== role)))}
+                />
+                {role}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
         {Object.entries(groups).map(([group, entries]) => (
           <div key={group}>
             <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">{group}</h4>
             <div className="space-y-2">
-              {entries.map((entry) => (
-                <label key={entry.codename} className="flex items-start gap-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5 h-4 w-4 rounded border-slate-300"
-                    checked={selected.includes(entry.codename)}
-                    onChange={(event) => {
-                      setSelected((current) =>
-                        event.target.checked ? [...current, entry.codename] : current.filter((code) => code !== entry.codename)
-                      );
-                    }}
-                  />
-                  {entry.label}
-                </label>
-              ))}
+              {entries.map((entry) => {
+                const viaRoles = (account.inherited_permissions[entry.codename] || []).filter((role) => selectedGroups.includes(role));
+                return (
+                  <label key={entry.codename} className="flex items-start gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 rounded border-slate-300"
+                      checked={selected.includes(entry.codename) || viaRoles.length > 0}
+                      disabled={viaRoles.length > 0}
+                      onChange={(event) => {
+                        setSelected((current) =>
+                          event.target.checked ? [...current, entry.codename] : current.filter((code) => code !== entry.codename)
+                        );
+                      }}
+                    />
+                    <span>
+                      {entry.label}
+                      {viaRoles.length > 0 && <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">via {viaRoles.join(", ")}</span>}
+                    </span>
+                  </label>
+                );
+              })}
             </div>
           </div>
         ))}
