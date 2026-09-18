@@ -493,7 +493,12 @@ class DeviceCommand(models.Model):
     sent_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
-    STALE_AFTER = timedelta(minutes=3)
+    # The device-commands UI itself gives up polling after 45s (see
+    # DeviceCommandPanel.tsx's POLL_TIMEOUT_MS) - keep this comfortably above
+    # that so a genuinely slow-but-working round trip isn't killed early, but
+    # close enough that a retry right after the UI times out isn't still
+    # blocked by the very row that just failed.
+    STALE_AFTER = timedelta(seconds=60)
 
     class Meta:
         ordering = ["created_at"]
