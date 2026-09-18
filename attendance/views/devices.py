@@ -290,6 +290,70 @@ class DeviceReconcileEnrolledIdsAPIView(APIView):
         return numeric_map, ambiguous_ids
 
 
+class DeviceSyncAllAPIView(APIView):
+    """Fill in enrollment gaps between devices that were built up
+    independently (e.g. one had more people pre-enrolled by the vendor than
+    another), instead of only cloning new enrollments going forward.
+
+    For every employee enrolled on at least one device, queues one
+    clone_enrollment command (per source device that already has them) to
+    every device they're missing from - reusing the exact same
+    getuserinfo/setuserinfo relay as a normal enroll_user propagation
+    (see run_aiface_gateway._run_clone_enrollment), so no new physical scan
+    is needed. Safe to call repeatedly: an employee already present
+    everywhere is simply skipped.
+    """
+
+    permission_classes = [IsAuthenticated, CanManageDevices]
+
+    def post(self, request):
+        devices = list(BiometricDevice.objects.all())
+        if len(devices) < 2:
+            return Response({"detail": "Need at least two registered devices to sync."}, status=status.HTTP_400_BAD_REQUEST)
+
+        device_by_serial = {device.serial_number: device for device in devices}
+        all_serials = set(device_by_serial)
+
+        identities_by_employee: dict[int, dict[str, BiometricIdentity]] = {}
+        for identity in BiometricIdentity.objects.filter(
+            system=IDENTITY_SYSTEM, source_identifier__in=all_serials, is_active=True,
+        ).select_related("employee"):
+            identities_by_employee.setdefault(identity.employee_id, {})[identity.source_identifier] = identity
+
+        queued = []
+        for employee_id, identities_by_serial in identities_by_employee.items():
+            missing_serials = all_serials - identities_by_serial.keys()
+            if not missing_serials:
+                continue
+            source_serial, source_identity = next(iter(identities_by_serial.items()))
+            source_device = device_by_serial[source_serial]
+            target_ids = [device_by_serial[serial].id for serial in missing_serials]
+
+            DeviceCommand.objects.create(
+                device=source_device, command_type="clone_enrollment",
+                payload={
+                    "employee_id": employee_id,
+                    "enrollid": int(source_identity.external_user_id),
+                    "name": source_identity.employee.full_name,
+                    "biometric_type": "face",
+                    "target_device_ids": target_ids,
+                },
+                requested_by=request.user if request.user.is_authenticated else None,
+            )
+            queued.append({
+                "employee_id": source_identity.employee.employee_id,
+                "employee_name": source_identity.employee.full_name,
+                "from_device": source_device.name,
+                "to_devices": [device_by_serial[serial].name for serial in missing_serials],
+            })
+
+        return Response({
+            "queued": len(queued),
+            "detail": f"Queued {len(queued)} sync operation(s). Each device processes its queue one relay at a time as it's online, so this runs in the background.",
+            "operations": queued,
+        })
+
+
 class PersonInformationImportAPIView(APIView):
     """Bulk-link a Yunatt cloud "Person Information" export to employees.
 

@@ -658,3 +658,84 @@ class DeviceReconcileEnrolledIdsAPITests(TestCase):
         self.assertEqual(response.data["linked"], 1)
         self.assertTrue(BiometricIdentity.objects.filter(external_user_id="2").exists())
         self.assertFalse(BiometricIdentity.objects.filter(external_user_id="1").exists())
+
+
+class DeviceSyncAllAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.manager = get_user_model().objects.create_user(username="sync-manager", password="test-password")
+        self.manager.user_permissions.add(Permission.objects.get(codename="manage_devices"))
+        self.viewer = get_user_model().objects.create_user(username="sync-viewer", password="test-password")
+        self.device_a = BiometricDevice.objects.create(
+            name="Terminal A", serial_number="AYTK14145399", location="Main entrance", device_type="factory", purpose="attendance",
+        )
+        self.device_b = BiometricDevice.objects.create(
+            name="Terminal B", serial_number="AYTK14145402", location="Side entrance", device_type="factory", purpose="attendance",
+        )
+
+    def url(self):
+        return "/api/attendance/devices/sync-all/"
+
+    def test_requires_manage_devices_permission(self):
+        self.client.force_authenticate(self.viewer)
+        response = self.client.post(self.url())
+        self.assertEqual(response.status_code, 403)
+
+    def test_requires_at_least_two_devices(self):
+        self.device_b.delete()
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url())
+        self.assertEqual(response.status_code, 400)
+
+    def test_queues_a_clone_for_an_employee_missing_from_one_device(self):
+        employee = Employee.objects.create(employee_id="EMP-001", first_name="Ada", last_name="Okafor")
+        BiometricIdentity.objects.create(
+            employee=employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5", is_active=True,
+        )
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["queued"], 1)
+        clone = DeviceCommand.objects.get(device=self.device_a, command_type="clone_enrollment")
+        self.assertEqual(clone.status, "pending")
+        self.assertEqual(clone.payload["employee_id"], employee.id)
+        self.assertEqual(clone.payload["enrollid"], 5)
+        self.assertEqual(clone.payload["target_device_ids"], [self.device_b.id])
+
+    def test_no_clone_queued_for_an_employee_already_on_every_device(self):
+        employee = Employee.objects.create(employee_id="EMP-001", first_name="Ada", last_name="Okafor")
+        BiometricIdentity.objects.create(employee=employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5", is_active=True)
+        BiometricIdentity.objects.create(employee=employee, system="vendor_flask_gateway", source_identifier="AYTK14145402", external_user_id="7", is_active=True)
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.data["queued"], 0)
+        self.assertFalse(DeviceCommand.objects.filter(command_type="clone_enrollment").exists())
+
+    def test_an_inactive_identity_does_not_count_as_already_enrolled(self):
+        employee = Employee.objects.create(employee_id="EMP-001", first_name="Ada", last_name="Okafor")
+        BiometricIdentity.objects.create(employee=employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5", is_active=True)
+        BiometricIdentity.objects.create(employee=employee, system="vendor_flask_gateway", source_identifier="AYTK14145402", external_user_id="7", is_active=False)
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.data["queued"], 1)
+        clone = DeviceCommand.objects.get(command_type="clone_enrollment")
+        self.assertEqual(clone.payload["target_device_ids"], [self.device_b.id])
+
+    def test_syncs_gaps_in_both_directions_at_once(self):
+        only_on_a = Employee.objects.create(employee_id="EMP-001", first_name="Ada", last_name="Okafor")
+        only_on_b = Employee.objects.create(employee_id="EMP-002", first_name="Bola", last_name="Ade")
+        BiometricIdentity.objects.create(employee=only_on_a, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5", is_active=True)
+        BiometricIdentity.objects.create(employee=only_on_b, system="vendor_flask_gateway", source_identifier="AYTK14145402", external_user_id="8", is_active=True)
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.data["queued"], 2)
+        self.assertEqual(DeviceCommand.objects.filter(device=self.device_a, command_type="clone_enrollment").count(), 1)
+        self.assertEqual(DeviceCommand.objects.filter(device=self.device_b, command_type="clone_enrollment").count(), 1)

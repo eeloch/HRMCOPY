@@ -66,6 +66,9 @@ export default function BiometricDevicesPage() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState("");
   const [importResult, setImportResult] = useState<PersonInformationResult | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState("");
+  const [syncResult, setSyncResult] = useState<{ queued: number; detail: string } | null>(null);
 
   async function loadDevices() {
     setLoading(true);
@@ -148,6 +151,24 @@ export default function BiometricDevicesPage() {
       setImportError(importErr instanceof Error ? importErr.message : "Unable to import this file.");
     } finally {
       setImporting(false);
+    }
+  }
+
+  async function syncAllDevices() {
+    setSyncError("");
+    setSyncResult(null);
+    setSyncing(true);
+    try {
+      const response = await apiFetch("/attendance/devices/sync-all/", { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(response.status === 403 ? "You don't have permission to sync devices." : data.detail || "Unable to sync devices.");
+      }
+      setSyncResult(data as { queued: number; detail: string });
+    } catch (syncErr) {
+      setSyncError(syncErr instanceof Error ? syncErr.message : "Unable to sync devices.");
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -235,7 +256,24 @@ export default function BiometricDevicesPage() {
         {error ? (
           <AppCard><div className="p-8 text-center text-red-700"><p>{error}</p><button type="button" onClick={() => void loadDevices()} className="mt-4 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white">Try Again</button></div></AppCard>
         ) : (
-          <Section title="Devices" subtitle={`${devices.length} device${devices.length === 1 ? "" : "s"}`}>
+          <Section
+            title="Devices"
+            subtitle={`${devices.length} device${devices.length === 1 ? "" : "s"}`}
+            actions={devices.length > 1 && (
+              <button type="button" disabled={syncing} onClick={() => void syncAllDevices()} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                {syncing ? "Syncing..." : "Sync All Devices"}
+              </button>
+            )}
+          >
+            {(syncResult || syncError) && (
+              <div className="border-b border-slate-200 p-4">
+                {syncError ? (
+                  <p className="text-sm text-red-700">{syncError}</p>
+                ) : syncResult && (
+                  <p className="text-sm text-emerald-700">{syncResult.detail}</p>
+                )}
+              </div>
+            )}
             {loading ? (
               <div className="space-y-3 p-6">{Array.from({ length: 3 }).map((_, index) => <div key={index} className="h-16 animate-pulse rounded-xl bg-slate-100" />)}</div>
             ) : devices.length ? (
