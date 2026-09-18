@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.db import transaction
+from django.http import HttpResponse
 from django.db.models import Count, DecimalField, Sum, Value
 from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
@@ -12,8 +13,9 @@ from rest_framework.views import APIView
 
 from audit.models import AuditSeverity
 from audit.services import AuditService
-from payroll.models import EmployeePayroll, PayrollLineItem, PayrollPeriod, PayrollPeriodStatus
+from payroll.models import EmployeePayroll, EmployeePayrollStatus, PayrollLineItem, PayrollPeriod, PayrollPeriodStatus
 from payroll.serializers import EmployeePayrollDetailSerializer, EmployeePayrollListSerializer, PayrollLineItemCreateSerializer, PayrollLineItemSerializer, PayrollPeriodCreateSerializer, PayrollPeriodSerializer, PayrollPeriodTransitionSerializer
+from payroll.services.bank_upload import BANK_UPLOAD_NARRATION, bank_upload_download, prepare_bank_upload
 from payroll.services import (
     generate_payroll_for_period,
     pending_exception_count,
@@ -83,6 +85,56 @@ class PayrollPeriodGenerateAPIView(APIView):
         return Response({"period": PayrollPeriodSerializer(period_queryset().get(pk=period.pk)).data, "summary": summary.__dict__})
 
 
+class PayrollBankUploadPreviewAPIView(APIView):
+    """What the bank upload file for an approved period would contain, and who's left out and why."""
+
+    permission_classes = [IsAuthenticated, CanManagePayroll]
+
+    def get(self, request, period_id):
+        period = get_object_or_404(PayrollPeriod, pk=period_id)
+        if not period_is_locked(period):
+            return Response({"detail": "Approve this payroll before creating the bank upload file."}, status=status.HTTP_400_BAD_REQUEST)
+        rows, issues = prepare_bank_upload(period)
+        return Response({
+            "period": period.display_name,
+            "narration": BANK_UPLOAD_NARRATION,
+            "ready_count": len(rows),
+            "ready_total": str(sum((row.amount for row in rows), Decimal("0.00"))),
+            "padded": [{"employee_id": r.employee_id, "employee_name": r.employee_name, "account_number": r.account_number} for r in rows if r.padded],
+            "issues": [{**issue.__dict__, "net_pay": str(issue.net_pay)} for issue in issues],
+        })
+
+
+class PayrollBankUploadDownloadAPIView(APIView):
+    """The bank upload spreadsheet itself. Optional ?batch_size=N splits it into a zip of "Batch N.xlsx" files."""
+
+    permission_classes = [IsAuthenticated, CanManagePayroll]
+
+    def get(self, request, period_id):
+        period = get_object_or_404(PayrollPeriod, pk=period_id)
+        if not period_is_locked(period):
+            return Response({"detail": "Approve this payroll before creating the bank upload file."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            batch_size = int(request.query_params["batch_size"]) if request.query_params.get("batch_size") else None
+        except ValueError:
+            return Response({"detail": "batch_size must be a whole number."}, status=status.HTTP_400_BAD_REQUEST)
+        if batch_size is not None and not 1 <= batch_size <= 5000:
+            return Response({"detail": "batch_size must be between 1 and 5000."}, status=status.HTTP_400_BAD_REQUEST)
+        rows, issues = prepare_bank_upload(period)
+        if not rows:
+            return Response({"detail": "Nobody in this payroll can be included in a bank upload file yet."}, status=status.HTTP_400_BAD_REQUEST)
+        filename, content_type, content = bank_upload_download(period, rows, batch_size)
+        total = sum((row.amount for row in rows), Decimal("0.00"))
+        AuditService.log(
+            event_type="payroll.bank_upload_exported", module="payroll", actor=request.user, object=period, severity=AuditSeverity.INFO,
+            title="Bank upload file created", description=f"Bank upload file for {period.display_name}: {len(rows)} payment(s), {total:,.2f} total; {len(issues)} left out.",
+            metadata={"period": period.display_name, "payments": len(rows), "total": str(total), "left_out": len(issues), "batch_size": batch_size},
+        )
+        response = HttpResponse(content, content_type=content_type)
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+
 class PayrollPeriodTransitionAPIView(APIView):
     permission_classes = [IsAuthenticated, CanManagePayroll]
     transitions = {PayrollPeriodStatus.DRAFT: PayrollPeriodStatus.PROCESSING, PayrollPeriodStatus.PROCESSING: PayrollPeriodStatus.REVIEW, PayrollPeriodStatus.REVIEW: PayrollPeriodStatus.APPROVED}
@@ -107,6 +159,10 @@ class PayrollPeriodTransitionAPIView(APIView):
                 period.approved_by = request.user
                 update_fields.extend(["approved_at", "approved_by"])
             period.save(update_fields=update_fields)
+            if target == PayrollPeriodStatus.APPROVED:
+                # The period is the gate, but each employee's record (and so their
+                # payslip) must read approved too, not stay "Draft".
+                period.employee_payrolls.filter(status__in=[EmployeePayrollStatus.DRAFT, EmployeePayrollStatus.REVIEW]).update(status=EmployeePayrollStatus.APPROVED)
             AuditService.log(event_type="payroll.period_status_changed", module="payroll", actor=request.user, object=period, severity=AuditSeverity.SUCCESS, title="Payroll period status updated", description=f"{period.display_name} moved from {old_status} to {target}.", metadata={"period": period.display_name, "from_status": old_status, "to_status": target})
         return Response(PayrollPeriodSerializer(period_queryset().get(pk=period.pk)).data)
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
@@ -43,11 +43,22 @@ export default function PayslipsPage() {
   const router = useRouter();
   const [employees, setEmployees] = useState<ShiftEmployee[]>([]);
   const [selectedEmployee, setSelectedEmployee] = useState("");
+  const [query, setQuery] = useState("");
   const [payslips, setPayslips] = useState<PayslipListItem[]>([]);
   const [detail, setDetail] = useState<PayslipDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [error, setError] = useState("");
+
+  // /payslips?employee=ID&payroll=ID (the Payslip button on the payroll period page) opens that payslip directly.
+  const openFromLink = useEffectEvent(() => {
+    const link = new URLSearchParams(window.location.search);
+    const employeeId = link.get("employee");
+    if (!employeeId) return;
+    void loadPayslips(employeeId);
+    const payrollId = Number(link.get("payroll"));
+    if (payrollId) void viewPayslip(payrollId);
+  });
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -59,6 +70,7 @@ export default function PayslipsPage() {
       if (response.ok) {
         const data = await response.json();
         setEmployees(data.results || []);
+        openFromLink();
       }
     }, 0);
     return () => window.clearTimeout(timer);
@@ -105,6 +117,12 @@ export default function PayslipsPage() {
           <PageHeader title="Payslips" description="Select an employee to view their payslip history." />
 
           <AppCard className="mb-6">
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search by name or staff number..."
+              className="mb-4 w-full max-w-md rounded-xl border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+            />
             <label className="text-sm font-semibold text-slate-700">
               Employee
               <select
@@ -113,9 +131,11 @@ export default function PayslipsPage() {
                 className="mt-2 w-full max-w-md rounded-xl border border-slate-300 bg-white px-3 py-2.5 font-normal"
               >
                 <option value="">Select an employee</option>
-                {employees.map((employee) => (
-                  <option key={employee.id} value={employee.id}>{employee.full_name} ({employee.employee_id})</option>
-                ))}
+                {employees
+                  .filter((employee) => String(employee.id) === selectedEmployee || `${employee.full_name} ${employee.employee_id}`.toLowerCase().includes(query.trim().toLowerCase()))
+                  .map((employee) => (
+                    <option key={employee.id} value={employee.id}>{employee.full_name} ({employee.employee_id})</option>
+                  ))}
               </select>
             </label>
           </AppCard>

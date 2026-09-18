@@ -3,6 +3,8 @@
 # Create your models here.
 from django.db import models
 
+from .banking import normalize_bank_code
+
 
 class Department(models.Model):
     name = models.CharField(max_length=120, unique=True)
@@ -196,6 +198,8 @@ class Employee(models.Model):
         )
 
     def save(self, *args, **kwargs):
+        # A bank code that lost its leading zeros in a spreadsheet ("14" for 000014).
+        self.bank_code = normalize_bank_code(self.bank_code)
         previous_status = (
             Employee.objects.filter(pk=self.pk).values_list("status", flat=True).first()
             if self.pk else None
