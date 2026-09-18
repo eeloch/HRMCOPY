@@ -11,6 +11,7 @@ from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
 from audit.models import AuditEvent
 from employees.models import Employee
+from payroll.services import generate_payroll_for_period
 from payroll.models import EmployeePayroll, EmployeePayrollStatus, PayrollLineItem, PayrollLineItemType, PayrollPeriod, PayrollPeriodStatus
 
 from .admin import EmployeePPEIssueAdmin
@@ -130,18 +131,97 @@ class PPEWorkflowTests(TestCase):
                 self.payroll.status = EmployeePayrollStatus.DRAFT
                 self.payroll.save(update_fields=["status"])
 
-    def test_missing_employee_payroll_leaves_issue_pending_without_a_line_item(self):
+    def test_approving_before_the_payroll_record_exists_waits_and_deducts_when_payroll_is_generated(self):
         self.payroll.delete()
         issue = self.issue()
 
-        with self.assertRaisesMessage(ValueError, "Generate this employee's payroll record"):
-            PPEDeductionService.approve(issue, payroll_period=self.period, actor=self.actor)
+        approved = PPEDeductionService.approve(issue, payroll_period=self.period, actor=self.actor)
+
+        self.assertEqual(approved.deduction_status, PPEDeductionStatus.APPROVED)
+        self.assertEqual(approved.target_payroll_period, self.period)
+        self.assertFalse(PayrollLineItem.objects.filter(source_type="ppe_issue").exists())
+
+        summary = generate_payroll_for_period(self.period)
+
+        self.assertEqual(summary.deductions_applied, 1)
+        issue.refresh_from_db()
+        payroll = EmployeePayroll.objects.get(payroll_period=self.period, employee=self.employee)
+        line = PayrollLineItem.objects.get(source_type="ppe_issue", source_reference=str(issue.pk))
+        self.assertEqual((issue.deduction_status, issue.payroll_line_item, issue.deducted_payroll), (PPEDeductionStatus.DEDUCTED, line, payroll))
+        self.assertEqual(line.amount, Decimal("20000.00"))
+        payroll.refresh_from_db()
+        self.assertEqual(payroll.total_deductions, Decimal("20000.00"))
+
+    def test_approving_needs_no_period_and_uses_the_month_the_ppe_was_issued(self):
+        issue = self.issue()  # issued 2026-09-01; the September payroll record exists
+
+        approved = PPEDeductionService.approve(issue, actor=self.actor)
+
+        self.assertEqual((approved.deduction_status, approved.target_payroll_period), (PPEDeductionStatus.DEDUCTED, self.period))
+
+    def test_approving_when_no_payroll_period_exists_yet_lands_in_the_issue_month_once_it_does(self):
+        self.payroll.delete()
+        self.period.delete()
+        issue = self.issue()
+
+        approved = PPEDeductionService.approve(issue, actor=self.actor)
+        self.assertEqual((approved.deduction_status, approved.target_payroll_period), (PPEDeductionStatus.APPROVED, None))
+
+        period = PayrollPeriod.objects.create(year=2026, month=9)
+        generate_payroll_for_period(period)
+
+        issue.refresh_from_db()
+        self.assertEqual((issue.deduction_status, issue.target_payroll_period), (PPEDeductionStatus.DEDUCTED, period))
+
+    def test_generating_again_does_not_deduct_the_same_ppe_twice(self):
+        self.payroll.delete()
+        issue = self.issue()
+        PPEDeductionService.approve(issue, actor=self.actor)
+        generate_payroll_for_period(self.period)
+
+        again = generate_payroll_for_period(self.period)
+
+        self.assertEqual(again.deductions_applied, 0)
+        self.assertEqual(PayrollLineItem.objects.filter(source_type="ppe_issue").count(), 1)
+
+    def test_a_deferred_issue_is_not_deducted_by_payroll_generation_until_it_is_approved(self):
+        self.payroll.delete()
+        issue = self.issue()
+        october = PayrollPeriod.objects.create(year=2026, month=10)
+        PPEDeductionService.defer(issue, payroll_period=october, actor=self.actor)
+
+        generate_payroll_for_period(october)
+
+        issue.refresh_from_db()
+        self.assertEqual(issue.deduction_status, PPEDeductionStatus.DEFERRED)
+        self.assertFalse(PayrollLineItem.objects.filter(source_type="ppe_issue").exists())
+
+        PPEDeductionService.approve(issue, actor=self.actor)  # uses the month it was deferred to
+        issue.refresh_from_db()
+        self.assertEqual((issue.deduction_status, issue.target_payroll_period), (PPEDeductionStatus.DEDUCTED, october))
+
+    def test_a_locked_payroll_period_still_refuses_and_leaves_the_issue_pending(self):
+        self.period.status = PayrollPeriodStatus.PAID
+        self.period.save(update_fields=["status"])
+        issue = self.issue()
+
+        with self.assertRaisesMessage(ValueError, "can no longer accept PPE deductions"):
+            PPEDeductionService.approve(issue, actor=self.actor)
 
         issue.refresh_from_db()
         self.assertEqual(issue.deduction_status, PPEDeductionStatus.PENDING)
-        self.assertIsNone(issue.target_payroll_period)
-        self.assertIsNone(issue.payroll_line_item)
-        self.assertFalse(PayrollLineItem.objects.filter(source_type="ppe_issue", source_reference=str(issue.pk)).exists())
+
+    def test_the_approve_endpoint_needs_no_period_but_defer_still_needs_one(self):
+        self.actor.user_permissions.add(Permission.objects.get(codename="review_ppe_deduction"))
+        self.actor = get_user_model().objects.get(pk=self.actor.pk)
+        client = APIClient(); client.force_authenticate(user=self.actor)
+        issue = self.issue()
+
+        defer_without_period = client.post(f"/api/ppe/issues/{issue.pk}/defer/", {}, format="json")
+        approve = client.post(f"/api/ppe/issues/{issue.pk}/approve/", {}, format="json")
+
+        self.assertEqual(defer_without_period.status_code, 400)
+        self.assertEqual((approve.status_code, approve.json()["deduction_status"]), (200, "deducted"))
 
     def test_existing_system_line_is_recovered_without_creating_a_duplicate(self):
         issue = self.issue()

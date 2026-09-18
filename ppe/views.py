@@ -69,7 +69,7 @@ class PPEDecisionAPIView(APIView):
         issue = get_object_or_404(EmployeePPEIssue.objects.select_related("employee", "ppe_type"), pk=issue_id)
         try:
             if self.action == "approve":
-                issue = PPEDeductionService.approve(issue, payroll_period=serializer.validated_data["payroll_period"], actor=request.user, comment=serializer.validated_data.get("comment", ""))
+                issue = PPEDeductionService.approve(issue, payroll_period=serializer.validated_data.get("payroll_period"), actor=request.user, comment=serializer.validated_data.get("comment", ""))
             elif self.action == "hold":
                 issue = PPEDeductionService.hold(issue, actor=request.user, comment=serializer.validated_data["comment"])
             else:

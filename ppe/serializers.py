@@ -42,8 +42,8 @@ class PPEDecisionSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         action = self.context["action"]
-        if action in {"approve", "defer"} and "payroll_period" not in attrs:
-            raise serializers.ValidationError({"payroll_period": "Select a target payroll period."})
+        if action == "defer" and "payroll_period" not in attrs:
+            raise serializers.ValidationError({"payroll_period": "Select the payroll month to defer this deduction to."})
         if action == "hold" and not attrs.get("comment", "").strip():
             raise serializers.ValidationError({"comment": "A reason is required to hold a PPE deduction."})
         return attrs
