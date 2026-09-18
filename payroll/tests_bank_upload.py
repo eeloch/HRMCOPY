@@ -183,3 +183,25 @@ class ApprovingAPeriodApprovesItsEmployeeRecordsTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         payroll.refresh_from_db()
         self.assertEqual(payroll.status, EmployeePayrollStatus.APPROVED)
+
+
+class BulkPayslipsTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        user = get_user_model().objects.create_user("payroll-viewer", password="pw")
+        user.user_permissions.add(Permission.objects.get(codename="view_payroll"))
+        self.client.force_authenticate(user)
+        self.period = PayrollPeriod.objects.create(year=2026, month=9, status="approved")
+
+    def record(self, staff_id, net):
+        employee = Employee.objects.create(employee_id=staff_id, first_name="Ada", last_name=staff_id, bank_name="Zenith Bank Plc", account_number="2252037955")
+        return EmployeePayroll.objects.create(payroll_period=self.period, employee=employee, basic_salary=net, gross_earnings=net, net_pay=net, status=EmployeePayrollStatus.APPROVED)
+
+    def test_returns_every_payslip_with_a_masked_account_and_skips_zero_pay(self):
+        self.record("000001", Decimal("100000.00"))
+        self.record("000002", Decimal("0.00"))
+        data = self.client.get(f"/api/payroll/periods/{self.period.pk}/payslips/").json()
+        self.assertEqual([r["employee_id"] for r in data["results"]], ["000001"])
+        self.assertEqual(data["results"][0]["account_number_masked"], "******7955")
+        with_zero = self.client.get(f"/api/payroll/periods/{self.period.pk}/payslips/?include_zero=1").json()
+        self.assertEqual(len(with_zero["results"]), 2)

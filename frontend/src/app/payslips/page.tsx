@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
 import type { ShiftEmployee } from "@/components/shifts/types";
+import { PayslipDocument, type PayslipData } from "@/components/payroll/PayslipDocument";
 import { AppCard, PageHeader, Section, StatusBadge } from "@/components/ui";
 import { apiFetch, getAccessToken } from "@/lib/api";
 
@@ -22,19 +23,6 @@ type PayslipListItem = {
   generated_at: string;
 };
 
-type LineItem = {
-  id: number;
-  item_type: string;
-  code: string;
-  description: string;
-  amount: string;
-};
-
-type PayslipDetail = PayslipListItem & {
-  payroll_period: { display_name: string; year: number; month: number };
-  line_items: LineItem[];
-};
-
 function money(value: string) {
   return `₦${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 }
@@ -45,7 +33,7 @@ export default function PayslipsPage() {
   const [selectedEmployee, setSelectedEmployee] = useState("");
   const [query, setQuery] = useState("");
   const [payslips, setPayslips] = useState<PayslipListItem[]>([]);
-  const [detail, setDetail] = useState<PayslipDetail | null>(null);
+  const [detail, setDetail] = useState<PayslipData | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [error, setError] = useState("");
@@ -189,44 +177,12 @@ export default function PayslipsPage() {
         {loadingDetail && <p className="print:hidden text-slate-500">Loading payslip...</p>}
 
         {detail && (
-          <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm print:border-none print:shadow-none">
-            <div className="flex items-start justify-between border-b border-slate-200 p-6 print:hidden">
-              <div>
-                <h2 className="text-lg font-bold text-slate-900">Payslip - {detail.payroll_period.display_name}</h2>
-                <p className="text-sm text-slate-500">{detail.employee_name} ({detail.employee_id})</p>
-              </div>
-              <button type="button" onClick={() => window.print()} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50">Print / Save PDF</button>
+          <div>
+            <div className="mb-4 flex items-center justify-between print:hidden">
+              <p className="text-sm text-slate-500">{detail.employee_name} ({detail.employee_id}) - {detail.payroll_period.display_name}</p>
+              <button type="button" onClick={() => window.print()} className="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-700">Print / Save PDF</button>
             </div>
-
-            <div className="p-6">
-              <div className="mb-6 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-                <div><p className="text-slate-500">Employee</p><p className="font-semibold text-slate-900">{detail.employee_name}</p></div>
-                <div><p className="text-slate-500">Department</p><p className="font-semibold text-slate-900">{detail.department_name || "-"}</p></div>
-                <div><p className="text-slate-500">Period</p><p className="font-semibold text-slate-900">{detail.payroll_period.display_name}</p></div>
-                <div><p className="text-slate-500">Status</p><p className="font-semibold text-slate-900">{detail.status}</p></div>
-              </div>
-
-              <table className="w-full text-left text-sm">
-                <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  <tr><th className="px-4 py-3">Type</th><th className="px-4 py-3">Description</th><th className="px-4 py-3 text-right">Amount</th></tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  <tr><td className="px-4 py-3 font-medium">Earning</td><td className="px-4 py-3">Basic Salary</td><td className="px-4 py-3 text-right">{money(detail.basic_salary)}</td></tr>
-                  {detail.line_items.map((item) => (
-                    <tr key={item.id}>
-                      <td className="px-4 py-3 font-medium capitalize">{item.item_type}</td>
-                      <td className="px-4 py-3">{item.description || item.code}</td>
-                      <td className="px-4 py-3 text-right">{money(item.amount)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot>
-                  <tr className="border-t border-slate-200 font-semibold"><td className="px-4 py-3" colSpan={2}>Gross Earnings</td><td className="px-4 py-3 text-right">{money(detail.gross_earnings)}</td></tr>
-                  <tr><td className="px-4 py-3" colSpan={2}>Total Deductions</td><td className="px-4 py-3 text-right">-{money(detail.total_deductions)}</td></tr>
-                  <tr className="text-base font-bold text-slate-900"><td className="px-4 py-3" colSpan={2}>Net Pay</td><td className="px-4 py-3 text-right">{money(detail.net_pay)}</td></tr>
-                </tfoot>
-              </table>
-            </div>
+            <PayslipDocument payslip={detail} />
           </div>
         )}
       </main>

@@ -195,11 +195,32 @@ class PayrollPeriodEmployeeListAPIView(APIView):
         return Response({"results": EmployeePayrollListSerializer(payrolls, many=True).data})
 
 
+class PayrollPeriodPayslipsAPIView(APIView):
+    """Every payslip of a period in one call, for bulk printing."""
+
+    permission_classes = [IsAuthenticated, CanViewPayroll]
+
+    def get(self, request, period_id):
+        period = get_object_or_404(PayrollPeriod, pk=period_id)
+        payrolls = (
+            EmployeePayroll.objects.filter(payroll_period=period)
+            .select_related("employee", "employee__department", "employee__position", "payroll_period")
+            .prefetch_related("line_items")
+            .order_by("employee__department__name", "employee__employee_id")
+        )
+        department = request.query_params.get("department", "").strip()
+        if department:
+            payrolls = payrolls.filter(employee__department_id=department)
+        if request.query_params.get("include_zero") != "1":
+            payrolls = payrolls.filter(net_pay__gt=0)
+        return Response({"period": period.display_name, "results": EmployeePayrollDetailSerializer(payrolls, many=True).data})
+
+
 class EmployeePayrollDetailAPIView(APIView):
     permission_classes = [IsAuthenticated, CanViewPayroll]
 
     def get(self, request, payroll_id):
-        payroll = get_object_or_404(EmployeePayroll.objects.select_related("employee", "employee__department", "payroll_period").prefetch_related("line_items"), pk=payroll_id)
+        payroll = get_object_or_404(EmployeePayroll.objects.select_related("employee", "employee__department", "employee__position", "payroll_period").prefetch_related("line_items"), pk=payroll_id)
         return Response(EmployeePayrollDetailSerializer(payroll).data)
 
 

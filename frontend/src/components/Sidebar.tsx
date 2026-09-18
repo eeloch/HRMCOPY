@@ -132,7 +132,7 @@ export default function Sidebar() {
 
 
   return (
-    <aside className="w-64 bg-slate-950 text-white h-screen fixed left-0 top-0 flex flex-col">
+    <aside className="w-64 bg-slate-950 text-white h-screen fixed left-0 top-0 flex flex-col print:hidden">
 
       <div className="flex items-start justify-between gap-3 p-6 border-b border-slate-800 shrink-0">
 

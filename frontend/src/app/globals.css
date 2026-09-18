@@ -24,3 +24,11 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Payslips: A4 pages, one payslip per sheet, keep the dark bands when printing. */
+@page { size: A4; margin: 10mm; }
+@media print {
+  .payslip-band { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .payslip-sheet { break-inside: avoid; }
+  .payslip-sheet + .payslip-sheet { break-before: page; }
+}

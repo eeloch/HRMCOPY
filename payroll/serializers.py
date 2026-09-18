@@ -55,9 +55,17 @@ class EmployeePayrollListSerializer(serializers.ModelSerializer):
 class EmployeePayrollDetailSerializer(EmployeePayrollListSerializer):
     payroll_period = PayrollPeriodSerializer(read_only=True)
     line_items = PayrollLineItemSerializer(many=True, read_only=True)
+    position_name = serializers.CharField(source="employee.position.name", read_only=True, default=None)
+    employment_date = serializers.DateField(source="employee.employment_date", read_only=True)
+    bank_name = serializers.CharField(source="employee.bank_name", read_only=True)
+    account_number_masked = serializers.SerializerMethodField()
 
     class Meta(EmployeePayrollListSerializer.Meta):
-        fields = EmployeePayrollListSerializer.Meta.fields + ("payroll_period", "line_items")
+        fields = EmployeePayrollListSerializer.Meta.fields + ("payroll_period", "line_items", "position_name", "employment_date", "bank_name", "account_number_masked")
+
+    def get_account_number_masked(self, obj):
+        digits = "".join(ch for ch in obj.employee.account_number if ch.isdigit())
+        return f"******{digits[-4:]}" if len(digits) >= 4 else ""
 
 
 class PayrollPeriodTransitionSerializer(serializers.Serializer):
