@@ -118,9 +118,7 @@ export function DeviceCommandPanel({ deviceId, employees }: Props) {
     if (active.status === "acked") {
       if (active.command_type === "refresh_enrolled_ids") {
         const ids = (active.result?.record as string[] | undefined) || [];
-        return ids.length
-          ? `Currently enrolled IDs on this device: ${ids.join(", ")}`
-          : "No one is currently enrolled on this device.";
+        return ids.length ? `Total enrolled on this device: ${ids.length}` : "No one is currently enrolled on this device.";
       }
       if (active.command_type === "enroll_user") {
         return active.will_clone_to && active.will_clone_to.length > 0
@@ -226,7 +224,18 @@ export function DeviceCommandPanel({ deviceId, employees }: Props) {
 
       {(active || error) && (
         <div className="rounded-xl border border-slate-200 bg-white p-4 md:col-span-3">
-          {error ? <p className="text-sm text-red-700">{error}</p> : <p className="text-sm text-slate-700">{statusMessage()}</p>}
+          {error ? (
+            <p className="text-sm text-red-700">{error}</p>
+          ) : (
+            <p className={active?.command_type === "refresh_enrolled_ids" && active.status === "acked" ? "text-sm font-semibold text-slate-900" : "text-sm text-slate-700"}>
+              {statusMessage()}
+            </p>
+          )}
+          {active?.command_type === "refresh_enrolled_ids" && active.status === "acked" && (active.result?.record as string[] | undefined)?.length ? (
+            <p className="mt-2 text-xs text-slate-500 break-words">
+              IDs: {(active.result.record as string[]).join(", ")}
+            </p>
+          ) : null}
           {active?.will_clone_to !== undefined && active.status !== "acked" && (
             active.will_clone_to.length > 0 ? (
               <p className="mt-2 text-xs text-slate-500">
