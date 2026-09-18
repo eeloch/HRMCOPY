@@ -324,7 +324,7 @@ class MealOperationsAPIView(APIView):
 
         collections = (
             MealCollection.objects
-            .select_related("employee", "event__device")
+            .select_related("employee", "event__device", "excess_exception")
             .order_by("-event__timestamp")
         )
 
@@ -339,10 +339,6 @@ class MealOperationsAPIView(APIView):
         )
 
         shown = list(collections[:100])
-        excess_by_day = {
-            (x.employee_id, x.work_date): x
-            for x in MealExcessException.objects.filter(employee_id__in={c.employee_id for c in shown}, work_date__in={c.work_date for c in shown})
-        }
 
         return Response(
             {
@@ -360,8 +356,8 @@ class MealOperationsAPIView(APIView):
                         "status": x.status,
                         "voided": x.voided_at is not None,
                         "void_reason": x.void_reason,
-                        "excess_id": excess_by_day[(x.employee_id, x.work_date)].pk if (x.employee_id, x.work_date) in excess_by_day else None,
-                        "excess_status": excess_by_day[(x.employee_id, x.work_date)].status if (x.employee_id, x.work_date) in excess_by_day else None,
+                        "excess_id": x.excess_exception_id,
+                        "excess_status": x.excess_exception.status if x.excess_exception_id else None,
                     }
                     for x in shown
                 ],

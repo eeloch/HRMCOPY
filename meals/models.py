@@ -88,6 +88,10 @@ class MealCollection(models.Model):
     # A voided ticket (test scan, accidental scan) stays on record for audit but no
     # longer counts: not toward the vendor's amount owed, the employee's daily
     # sequence, or their excess. See MealService.void_collection.
+    # The excess decision this ticket belongs to (null for an entitled ticket). Each
+    # ticket beyond the entitlement needs a decision of its own: it joins the day's
+    # still-open one, or opens a new one - it never inherits an earlier decision.
+    excess_exception = models.ForeignKey("MealExcessException", on_delete=models.SET_NULL, null=True, blank=True, related_name="tickets")
     voided_at = models.DateTimeField(null=True, blank=True)
     voided_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="meal_collections_voided")
     void_reason = models.TextField(blank=True)
@@ -120,7 +124,6 @@ class MealExcessException(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["employee", "work_date"], name="unique_meal_excess_per_work_date")]
         permissions = [("record_meal_operations", "Can record meal operations"), ("review_meal_excess", "Can review meal excess deductions"), ("manage_meal_configuration", "Can manage meal configuration")]
 
 

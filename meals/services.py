@@ -564,7 +564,7 @@ class MealService:
             rate = cls.rate_for(work_date)
             sequence = MealCollection.objects.select_for_update().filter(employee=identity.employee, work_date=work_date, voided_at__isnull=True).count() + 1
             collection = MealCollection.objects.create(event=event, employee=identity.employee, work_date=work_date, shift=roster.shift if roster else None, sequence_number=sequence, entitlement_snapshot=entitlement, rate_snapshot=rate.amount, status=MealCollectionStatus.WITHIN if sequence <= entitlement else (MealCollectionStatus.REST_DAY if entitlement == 0 else MealCollectionStatus.EXCESS))
-            if sequence > entitlement: cls._sync_excess(identity.employee, work_date, entitlement, sequence, rate.amount)
+            if sequence > entitlement: cls._cover_excess_ticket(collection, entitlement, rate.amount)
             return collection, True
 
     @classmethod
@@ -615,11 +615,25 @@ class MealService:
             )
 
     @staticmethod
-    def _sync_excess(employee, work_date, entitlement, count, rate):
-        exception, created = MealExcessException.objects.get_or_create(employee=employee, work_date=work_date, defaults={"entitlement_snapshot": entitlement, "collected_quantity": count, "excess_quantity": count-entitlement, "rate_snapshot": rate, "proposed_deduction": Decimal(count-entitlement)*rate})
-        if not created and exception.status == MealExcessStatus.PENDING:
-            exception.collected_quantity, exception.excess_quantity, exception.proposed_deduction = count, count-entitlement, Decimal(count-entitlement)*rate
+    def _cover_excess_ticket(collection, entitlement, rate):
+        """Every ticket beyond the entitlement needs a decision of its own.
+
+        It joins this employee's still-open (pending) decision for the day, or opens
+        a new one. It must never be folded into a decision already made for an
+        earlier ticket - that used to happen (one decision per employee per day), so
+        a further extra meal after HR had waived or accepted the first was neither
+        reviewed nor charged while the vendor was still billed for it.
+        """
+        collected_today = MealCollection.objects.filter(employee=collection.employee, work_date=collection.work_date, voided_at__isnull=True).count()
+        exception = MealExcessException.objects.select_for_update().filter(employee=collection.employee, work_date=collection.work_date, status=MealExcessStatus.PENDING).first()
+        if exception:
+            exception.collected_quantity, exception.excess_quantity = collected_today, exception.excess_quantity + 1
+            exception.proposed_deduction = Decimal(exception.excess_quantity) * exception.rate_snapshot
             exception.save(update_fields=["collected_quantity", "excess_quantity", "proposed_deduction", "updated_at"])
+        else:
+            exception = MealExcessException.objects.create(employee=collection.employee, work_date=collection.work_date, entitlement_snapshot=entitlement, collected_quantity=collected_today, excess_quantity=1, rate_snapshot=rate, proposed_deduction=rate)
+        collection.excess_exception = exception
+        collection.save(update_fields=["excess_exception"])
 
     @staticmethod
     @transaction.atomic
@@ -632,11 +646,7 @@ class MealService:
         if not reason: raise ValueError("A reason is required to decline a meal excess.")
         if exception.status != MealExcessStatus.PENDING: raise ValueError("This meal excess has already been decided.")
         now = timezone.now()
-        excess_tickets = list(
-            MealCollection.objects.select_for_update()
-            .filter(employee=exception.employee, work_date=exception.work_date, voided_at__isnull=True)
-            .order_by("-event__timestamp")[:exception.excess_quantity]
-        )
+        excess_tickets = list(MealCollection.objects.select_for_update().filter(excess_exception=exception, voided_at__isnull=True))
         for ticket in excess_tickets:
             ticket.voided_at, ticket.voided_by, ticket.void_reason = now, actor, f"Excess declined: {reason}"
             ticket.save(update_fields=["voided_at", "voided_by", "void_reason"])
@@ -652,23 +662,23 @@ class MealService:
         """Void a ticket that shouldn't count (a test or accidental scan).
 
         Kept on record, never deleted. It drops out of the vendor's amount owed and
-        of the employee's daily count, so the same day's excess is recalculated:
-        a pending excess that no longer applies is cancelled, one that still does
-        is reduced. Refused once that day's excess has been approved for a payroll
-        deduction, since voiding would silently leave the deduction standing.
+        of the employee's daily count. If it was an over-entitlement ticket, its
+        own pending decision shrinks by one (cancelled when nothing is left);
+        decisions already made for other tickets are untouched. Refused once its
+        excess has been approved for a payroll deduction, since voiding would
+        silently leave the deduction standing.
         """
         reason = reason.strip()
         if not reason: raise ValueError("A reason is required to void a ticket.")
         if collection.voided_at: raise ValueError("This ticket has already been voided.")
-        exception = MealExcessException.objects.select_for_update().filter(employee=collection.employee, work_date=collection.work_date).first()
+        exception = MealExcessException.objects.select_for_update().filter(pk=collection.excess_exception_id).first() if collection.excess_exception_id else None
         if exception and exception.status in (MealExcessStatus.APPROVED, MealExcessStatus.DEDUCTED):
-            raise ValueError("This day's excess was already approved for a payroll deduction, so the ticket can't be voided. Reverse that deduction first.")
+            raise ValueError("This ticket's excess was already approved for a payroll deduction, so it can't be voided. Reverse that deduction first.")
         collection.voided_at, collection.voided_by, collection.void_reason = timezone.now(), actor, reason
         collection.save(update_fields=["voided_at", "voided_by", "void_reason"])
         if exception and exception.status == MealExcessStatus.PENDING:
-            remaining = MealCollection.objects.filter(employee=collection.employee, work_date=collection.work_date, voided_at__isnull=True).count()
-            if remaining > exception.entitlement_snapshot:
-                exception.collected_quantity, exception.excess_quantity = remaining, remaining - exception.entitlement_snapshot
+            exception.excess_quantity, exception.collected_quantity = exception.excess_quantity - 1, max(exception.collected_quantity - 1, 0)
+            if exception.excess_quantity > 0:
                 exception.proposed_deduction = Decimal(exception.excess_quantity) * exception.rate_snapshot
                 exception.save(update_fields=["collected_quantity", "excess_quantity", "proposed_deduction", "updated_at"])
             else:

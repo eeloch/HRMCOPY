@@ -1702,3 +1702,130 @@ class MealExcessDeclineTests(TestCase):
         self.assertEqual(rows[self.extra.pk]["status"], "excess")
         self.assertEqual(rows[self.entitled.pk]["status"], "within_entitlement")
 
+
+class MealSeparateExcessDecisionTests(TestCase):
+    """A further extra ticket must never inherit a decision made for an earlier
+    one (production: after one waive, every later scan that day was silently
+    "waived", unreviewed, while the vendor was still billed)."""
+
+    def setUp(self):
+        self.day = date(2026, 9, 7)
+        self.employee = Employee.objects.create(employee_id="000010", first_name="Test", last_name="Worker")
+        EmployeeMealEntitlement.objects.create(employee=self.employee, tickets_per_work_day=1, effective_from=self.day, reason="test")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=self.day)
+        MealDevice.objects.create(name="Canteen", serial_number="MEAL001", active=True)
+        BiometricIdentity.objects.create(employee=self.employee, system="device", source_identifier="MEAL001", external_user_id="10")
+        shift = Shift.objects.create(name="Separate Test Day", start_time="07:00", end_time="19:00", is_overnight=False)
+        EmployeeRosterDay.objects.create(employee=self.employee, date=self.day, status=RosterDayStatus.WORK, shift=shift)
+        self.reviewer = get_user_model().objects.create_user(username="separate-reviewer", password="pw")
+        self.reviewer.user_permissions.add(Permission.objects.get(codename="review_meal_excess"), Permission.objects.get(codename="record_meal_operations"))
+        self.period = PayrollPeriod.objects.create(year=2026, month=9)
+        self.client = APIClient()
+        self.client.force_authenticate(self.reviewer)
+
+    def scan(self, event_id, hour):
+        collection, _ = MealService.ingest(
+            system="device", source_identifier="MEAL001", device_serial_number="MEAL001", external_user_id="10",
+            external_event_id=event_id, timestamp=timezone.make_aware(datetime(2026, 9, 7, hour, 0)),
+        )
+        collection.refresh_from_db()
+        return collection
+
+    def test_an_extra_ticket_after_an_earlier_one_was_waived_needs_its_own_decision(self):
+        self.scan("e1", 12)
+        second = self.scan("e2", 13)
+        first_decision = second.excess_exception
+        MealService.cancel(first_decision, self.reviewer, "Authorised overtime meal")
+
+        third = self.scan("e3", 14)
+
+        self.assertNotEqual(third.excess_exception_id, first_decision.pk)
+        self.assertEqual(third.excess_exception.status, MealExcessStatus.PENDING)
+        first_decision.refresh_from_db()
+        self.assertEqual((first_decision.status, first_decision.excess_quantity), (MealExcessStatus.CANCELLED, 1))
+
+    def test_two_extra_tickets_before_any_decision_share_one_open_decision(self):
+        self.scan("e1", 12)
+        second, third = self.scan("e2", 13), self.scan("e3", 14)
+
+        self.assertEqual(second.excess_exception_id, third.excess_exception_id)
+        decision = MealExcessException.objects.get(pk=second.excess_exception_id)
+        self.assertEqual((decision.status, decision.collected_quantity, decision.excess_quantity, decision.proposed_deduction), (MealExcessStatus.PENDING, 3, 2, Decimal("1400.00")))
+
+    def test_a_decision_already_accepted_is_left_alone_when_another_extra_arrives(self):
+        self.scan("e1", 12)
+        decision = self.scan("e2", 13).excess_exception
+        MealExcessException.objects.filter(pk=decision.pk).update(status=MealExcessStatus.APPROVED)
+
+        third = self.scan("e3", 14)
+
+        decision.refresh_from_db()
+        self.assertEqual((decision.status, decision.excess_quantity, decision.proposed_deduction), (MealExcessStatus.APPROVED, 1, Decimal("700.00")))
+        self.assertEqual(third.excess_exception.status, MealExcessStatus.PENDING)
+
+    def test_declining_the_new_decision_leaves_the_earlier_waived_ticket_standing(self):
+        self.scan("e1", 12)
+        second = self.scan("e2", 13)
+        MealService.cancel(second.excess_exception, self.reviewer, "Authorised overtime meal")
+        third = self.scan("e3", 14)
+
+        MealService.decline(third.excess_exception, self.reviewer, "Not authorised")
+
+        second.refresh_from_db(); third.refresh_from_db()
+        self.assertIsNone(second.voided_at)
+        self.assertIsNotNone(third.voided_at)
+        data = self.client.get(f"/api/meals/vendor/{self.period.pk}/").json()
+        self.assertEqual((data["tickets_issued"], float(data["amount_owed"])), (2, 1400.0))
+
+    def test_operations_rows_point_each_ticket_at_its_own_decision(self):
+        first = self.scan("e1", 12)
+        second = self.scan("e2", 13)
+        MealService.cancel(second.excess_exception, self.reviewer, "Authorised overtime meal")
+        third = self.scan("e3", 14)
+
+        rows = {row["id"]: row for row in self.client.get("/api/meals/operations/").json()["collections"]}
+
+        self.assertIsNone(rows[first.pk]["excess_id"])
+        self.assertEqual((rows[second.pk]["excess_status"], rows[third.pk]["excess_status"]), ("cancelled", "pending"))
+        self.assertNotEqual(rows[second.pk]["excess_id"], rows[third.pk]["excess_id"])
+
+
+class TicketDecisionBackfillTests(TestCase):
+    """The data migration must repair tickets that were silently folded into an
+    earlier decision, shaped like the production data that exposed the bug."""
+
+    def test_undecided_live_tickets_get_a_pending_decision_and_decided_ones_keep_theirs(self):
+        import importlib
+
+        from django.apps import apps
+
+        migration = importlib.import_module("meals.migrations.0010_link_tickets_to_excess_decisions")
+        day = date(2026, 9, 7)
+        employee = Employee.objects.create(employee_id="000010", first_name="Test", last_name="Worker")
+        MealDevice.objects.create(name="Canteen", serial_number="MEAL001", active=True)
+        BiometricIdentity.objects.create(employee=employee, system="device", source_identifier="MEAL001", external_user_id="10")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=day)
+        tickets = []
+        for index, hour in enumerate((12, 13, 14)):
+            collection, _ = MealService.ingest(
+                system="device", source_identifier="MEAL001", device_serial_number="MEAL001", external_user_id="10",
+                external_event_id=f"e{index}", timestamp=timezone.make_aware(datetime(2026, 9, 7, hour, 0)),
+            )
+            tickets.append(collection)
+        # the old world: one decision for the day, covering only the first ticket, later ones folded in
+        MealExcessException.objects.all().delete()
+        old = MealExcessException.objects.create(employee=employee, work_date=day, entitlement_snapshot=0, collected_quantity=1, excess_quantity=1, rate_snapshot=Decimal("700.00"), proposed_deduction=Decimal("700.00"), status=MealExcessStatus.CANCELLED)
+        MealCollection.objects.update(excess_exception=None)
+        MealCollection.objects.filter(pk=tickets[2].pk).update(voided_at=None)
+
+        migration.link_tickets_and_reopen_undecided(apps, None)
+
+        first, second, third = (MealCollection.objects.get(pk=t.pk) for t in tickets)
+        self.assertEqual(first.excess_exception_id, old.pk)
+        self.assertNotEqual(second.excess_exception_id, old.pk)
+        self.assertEqual(second.excess_exception_id, third.excess_exception_id)
+        reopened = MealExcessException.objects.get(pk=second.excess_exception_id)
+        self.assertEqual((reopened.status, reopened.excess_quantity, reopened.proposed_deduction), (MealExcessStatus.PENDING, 2, Decimal("1400.00")))
+        old.refresh_from_db()
+        self.assertEqual(old.status, MealExcessStatus.CANCELLED)
+
