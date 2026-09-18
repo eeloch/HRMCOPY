@@ -130,7 +130,7 @@ def build_device_command(sn: str, command_type: str, payload: Mapping[str, Any])
     """Translate a DeviceCommand row's (command_type, payload) into the wire message to send."""
     if command_type == "enroll_user":
         return build_adduser_command(sn, payload["enrollid"], payload.get("name", ""), payload.get("biometric_type", "face"))
-    if command_type == "delete_user":
+    if command_type in ("delete_user", "purge_user"):
         return build_deleteuser_command(sn, payload["enrollid"])
     if command_type == "refresh_enrolled_ids":
         return build_getuserids_command(sn)

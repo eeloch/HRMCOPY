@@ -332,7 +332,7 @@ class Command(BaseCommand):
             return None
         command = (
             DeviceCommand.objects.filter(device__serial_number=serial_number, status="pending")
-            .order_by(Case(When(command_type="clone_enrollment", then=1), default=0), "created_at")
+            .order_by(Case(When(command_type__in=DeviceCommand.BACKGROUND_TYPES, then=1), default=0), "created_at")
             .first()
         )
         if command is None:
@@ -417,7 +417,7 @@ class Command(BaseCommand):
             return
         if command.command_type == "enroll_user":
             Command._link_biometric_identity(command)
-        elif command.command_type == "delete_user":
+        elif command.command_type in ("delete_user", "purge_user"):
             Command._unlink_biometric_identity(command)
 
     @staticmethod

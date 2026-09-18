@@ -24,6 +24,7 @@ from .views import (
     DeviceCommandListCreateAPIView,
     DeviceReconcileEnrolledIdsAPIView,
     DeviceSyncAllAPIView,
+    DevicePurgeInactiveAPIView,
     PersonInformationImportAPIView,
     BiometricsOverviewAPIView,
 )
@@ -38,6 +39,7 @@ urlpatterns = [
     path("devices/<int:device_id>/reconcile/", DeviceReconcileEnrolledIdsAPIView.as_view(), name="device-reconcile-enrolled-ids"),
     path("devices/import-person-information/", PersonInformationImportAPIView.as_view(), name="person-information-import"),
     path("devices/sync-all/", DeviceSyncAllAPIView.as_view(), name="device-sync-all"),
+    path("devices/purge-inactive/", DevicePurgeInactiveAPIView.as_view(), name="device-purge-inactive"),
     path("biometrics-overview/", BiometricsOverviewAPIView.as_view(), name="biometrics-overview"),
     path(
         "today/",

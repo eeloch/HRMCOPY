@@ -187,6 +187,9 @@ class BuildSetuserinfoCommandTests(SimpleTestCase):
 
 
 class BuildDeviceCommandTests(SimpleTestCase):
+    def test_purge_user_is_a_plain_deleteuser_on_the_wire(self):
+        self.assertEqual(build_device_command("LF1", "purge_user", {"enrollid": 9}), build_deleteuser_command("LF1", 9))
+
     def test_dispatches_enroll_user_to_adduser(self):
         command = build_device_command("LF00000001", "enroll_user", {"enrollid": 5, "name": "A", "biometric_type": "face"})
 

@@ -67,6 +67,7 @@ export default function BiometricDevicesPage() {
   const [importError, setImportError] = useState("");
   const [importResult, setImportResult] = useState<PersonInformationResult | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [purging, setPurging] = useState(false);
   const [syncError, setSyncError] = useState("");
   const [syncResult, setSyncResult] = useState<{ queued: number; detail: string } | null>(null);
 
@@ -172,6 +173,36 @@ export default function BiometricDevicesPage() {
     }
   }
 
+  async function removeInactiveStaff() {
+    setSyncError("");
+    setSyncResult(null);
+    setPurging(true);
+    try {
+      const previewResponse = await apiFetch("/attendance/devices/purge-inactive/", { method: "POST", body: JSON.stringify({}) });
+      const preview = await previewResponse.json().catch(() => ({}));
+      if (!previewResponse.ok) {
+        throw new Error(previewResponse.status === 403 ? "You don't have permission to manage devices." : preview.detail || "Unable to check for inactive staff.");
+      }
+      if (!preview.total) {
+        setSyncResult({ queued: 0, detail: "No inactive or terminated staff are enrolled on any device." });
+        return;
+      }
+      const breakdown = (preview.devices as { device_name: string; count: number }[]).map((device) => `${device.device_name}: ${device.count}`).join("\n");
+      const proceed = window.confirm(
+        `Remove ${preview.total} inactive/terminated staff from the devices?\n\n${breakdown}\n\nTheir face/fingerprint data is deleted from the terminals. Suspended staff are not affected. If any of them is rehired they will need to enrol again.`
+      );
+      if (!proceed) return;
+      const response = await apiFetch("/attendance/devices/purge-inactive/", { method: "POST", body: JSON.stringify({ confirm: true }) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || "Unable to queue the removals.");
+      setSyncResult({ queued: data.total, detail: data.detail });
+    } catch (purgeErr) {
+      setSyncError(purgeErr instanceof Error ? purgeErr.message : "Unable to remove inactive staff.");
+    } finally {
+      setPurging(false);
+    }
+  }
+
   async function removeDevice(device: BiometricDevice) {
     if (!window.confirm(`Remove "${device.name}" (${device.serial_number})? This does not affect punches already recorded.`)) return;
     try {
@@ -259,10 +290,17 @@ export default function BiometricDevicesPage() {
           <Section
             title="Devices"
             subtitle={`${devices.length} device${devices.length === 1 ? "" : "s"}`}
-            actions={devices.length > 1 && (
-              <button type="button" disabled={syncing} onClick={() => void syncAllDevices()} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
-                {syncing ? "Syncing..." : "Sync All Devices"}
-              </button>
+            actions={devices.length > 0 && (
+              <>
+                <button type="button" disabled={purging || syncing} onClick={() => void removeInactiveStaff()} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                  {purging ? "Checking..." : "Remove Inactive Staff"}
+                </button>
+                {devices.length > 1 && (
+                  <button type="button" disabled={syncing || purging} onClick={() => void syncAllDevices()} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                    {syncing ? "Syncing..." : "Sync All Devices"}
+                  </button>
+                )}
+              </>
             )}
           >
             {(syncResult || syncError) && (

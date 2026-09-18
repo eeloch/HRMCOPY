@@ -501,7 +501,12 @@ class DeviceCommand(models.Model):
         ("delete_user", "Delete User"),
         ("refresh_enrolled_ids", "Refresh Enrolled IDs"),
         ("clone_enrollment", "Clone Enrollment To Other Devices"),
+        ("purge_user", "Remove Inactive User From Device"),
     ]
+
+    # Bulk background jobs: they must neither lock a device's admin panel while a
+    # big backlog drains nor be served ahead of an admin's own command.
+    BACKGROUND_TYPES = ("clone_enrollment", "purge_user")
 
     STATUSES = [
         ("pending", "Pending"),

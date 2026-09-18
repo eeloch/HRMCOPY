@@ -118,10 +118,10 @@ class DeviceCommandListCreateAPIView(APIView):
             return Response({"detail": "Device not found."}, status=status.HTTP_404_NOT_FOUND)
 
         DeviceCommand.expire_stale(device=device)
-        # Background clone_enrollment jobs (a Sync All can queue dozens per device)
+        # Background jobs (a Sync All or purge can queue dozens per device)
         # don't count: the gateway serves admin commands ahead of them, so they
         # shouldn't lock the panel until the whole backlog drains.
-        if DeviceCommand.objects.filter(device=device, status__in=("pending", "sent")).exclude(command_type="clone_enrollment").exists():
+        if DeviceCommand.objects.filter(device=device, status__in=("pending", "sent")).exclude(command_type__in=DeviceCommand.BACKGROUND_TYPES).exists():
             return Response(
                 {"detail": "A command is already queued or in progress for this device. Wait for it to finish first."},
                 status=status.HTTP_409_CONFLICT,
@@ -173,6 +173,9 @@ class DeviceCommandListCreateAPIView(APIView):
             employee = Employee.objects.get(pk=employee_id)
         except Employee.DoesNotExist:
             return Response({"detail": "Employee not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if command_type == "enroll_user" and employee.status != "active":
+            return Response({"detail": f"{employee.full_name} is not an active employee, so they can't be enrolled on a device."}, status=status.HTTP_400_BAD_REQUEST)
 
         existing_identity = BiometricIdentity.objects.filter(
             employee=employee, system=IDENTITY_SYSTEM, source_identifier=device.serial_number,
@@ -325,7 +328,7 @@ class DeviceSyncAllAPIView(APIView):
 
         identities_by_employee: dict[int, dict[str, BiometricIdentity]] = {}
         for identity in BiometricIdentity.objects.filter(
-            system=IDENTITY_SYSTEM, source_identifier__in=all_serials, is_active=True,
+            system=IDENTITY_SYSTEM, source_identifier__in=all_serials, is_active=True, employee__status="active",
         ).select_related("employee"):
             identities_by_employee.setdefault(identity.employee_id, {})[identity.source_identifier] = identity
 
@@ -367,6 +370,61 @@ class DeviceSyncAllAPIView(APIView):
         if offline_names:
             detail += f" Skipped offline device(s): {', '.join(offline_names)} - run Sync All again once they're back."
         return Response({"queued": len(queued), "detail": detail, "operations": queued})
+
+
+class DevicePurgeInactiveAPIView(APIView):
+    """Remove staff who have left from the terminals themselves.
+
+    A terminal keeps a person's face/fingerprint until told otherwise, so people
+    marked inactive or terminated stay enrolled (inflating each terminal's
+    count) even though HRM already ignores their scans. This queues a
+    deleteuser for each of them on each terminal that still has them.
+
+    Two steps: POST without `confirm` returns a preview and changes nothing;
+    POST with `confirm: true` queues the removals. It is deliberately not
+    reversible on the terminal - the template is deleted - so a rehire needs
+    enrolling again. "suspended" staff are left alone since that's temporary.
+    The removals run as background jobs, one at a time per terminal.
+    """
+
+    permission_classes = [IsAuthenticated, CanManageDevices]
+    REMOVABLE_STATUSES = ("inactive", "terminated")
+
+    def post(self, request):
+        confirm = request.data.get("confirm") is True
+        device_by_serial = {device.serial_number: device for device in BiometricDevice.objects.all()}
+        already_queued = {
+            (command.device_id, command.payload.get("enrollid"))
+            for command in DeviceCommand.objects.filter(command_type__in=("purge_user", "delete_user"), status__in=("pending", "sent"))
+        }
+
+        removals = []
+        for identity in BiometricIdentity.objects.filter(
+            system=IDENTITY_SYSTEM, source_identifier__in=device_by_serial, employee__status__in=self.REMOVABLE_STATUSES,
+        ).select_related("employee"):
+            if not identity.external_user_id.isdigit():
+                continue
+            device = device_by_serial[identity.source_identifier]
+            enrollid = int(identity.external_user_id)
+            if (device.id, enrollid) in already_queued:
+                continue
+            removals.append((device, enrollid, identity.employee))
+
+        per_device = {}
+        for device, _enrollid, _employee in removals:
+            per_device[device.name] = per_device.get(device.name, 0) + 1
+        summary = {"total": len(removals), "devices": [{"device_name": name, "count": count} for name, count in sorted(per_device.items())]}
+
+        if not confirm:
+            return Response({**summary, "confirmed": False})
+
+        for device, enrollid, employee in removals:
+            DeviceCommand.objects.create(
+                device=device, command_type="purge_user",
+                payload={"enrollid": enrollid, "employee_id": employee.id},
+                requested_by=request.user if request.user.is_authenticated else None,
+            )
+        return Response({**summary, "confirmed": True, "detail": f"Queued {len(removals)} removal(s). Each terminal works through them one at a time in the background."})
 
 
 class PersonInformationImportAPIView(APIView):

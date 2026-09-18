@@ -1022,3 +1022,123 @@ class CloneEnrollmentRelayTests(TransactionTestCase):
         self.assertEqual(BiometricIdentity.objects.get(source_identifier="AYTK14145402", external_user_id="1133").employee, other)
         self.assertEqual(BiometricIdentity.objects.get(employee=self.employee, source_identifier="AYTK14145402").external_user_id, "1134")
 
+
+class InactiveStaffTests(TestCase):
+    """People who've left must never be synced between terminals or accepted on
+    a scan, and can be removed from the terminals with a preview-then-confirm step."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.manager = get_user_model().objects.create_user(username="inactive-manager", password="test-password")
+        self.manager.user_permissions.add(Permission.objects.get(codename="manage_devices"))
+        self.viewer = get_user_model().objects.create_user(username="inactive-viewer", password="test-password")
+        self.a = BiometricDevice.objects.create(name="Terminal A", serial_number="AYTK14145399", location="x", device_type="factory", is_online=True)
+        self.b = BiometricDevice.objects.create(name="Terminal B", serial_number="AYTK14145402", location="x", device_type="factory", is_online=True)
+        self.active = Employee.objects.create(employee_id="000001", first_name="Ada", last_name="Okafor")
+        self.left = Employee.objects.create(employee_id="000002", first_name="Bola", last_name="Ade", status="inactive")
+        self.terminated = Employee.objects.create(employee_id="000003", first_name="Chi", last_name="Eze", status="terminated")
+        self.suspended = Employee.objects.create(employee_id="000004", first_name="Dan", last_name="Obi", status="suspended")
+
+    def link(self, employee, device, enrollid="1"):
+        return BiometricIdentity.objects.create(employee=employee, system="vendor_flask_gateway", source_identifier=device.serial_number, external_user_id=enrollid)
+
+    def test_an_identity_for_a_non_active_employee_is_created_on_hold(self):
+        self.assertFalse(self.link(self.left, self.a, "2").is_active)
+        self.assertFalse(self.link(self.suspended, self.a, "4").is_active)
+        self.assertTrue(self.link(self.active, self.a, "1").is_active)
+
+    def test_reactivating_the_employee_restores_their_held_identities(self):
+        identity = self.link(self.left, self.a, "2")
+        self.left.status = "active"
+        self.left.save()
+        identity.refresh_from_db()
+        self.assertTrue(identity.is_active)
+
+    def test_reconcile_links_a_departed_staff_member_but_on_hold(self):
+        DeviceCommand.objects.create(device=self.a, command_type="refresh_enrolled_ids", status="acked", payload={}, result={"record": ["2"]})
+        self.client.force_authenticate(self.manager)
+
+        self.client.post(f"/api/attendance/devices/{self.a.id}/reconcile/")
+
+        self.assertFalse(BiometricIdentity.objects.get(employee=self.left).is_active)
+
+    def test_sync_all_never_spreads_a_departed_staff_member(self):
+        self.link(self.active, self.a, "1")
+        self.link(self.left, self.a, "2")
+        BiometricIdentity.objects.filter(employee=self.left).update(is_active=True)  # as the old reconcile bug left them
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post("/api/attendance/devices/sync-all/")
+
+        self.assertEqual(response.data["queued"], 1)
+        self.assertEqual(DeviceCommand.objects.get(command_type="clone_enrollment").payload["employee_id"], self.active.id)
+
+    def test_cannot_enroll_an_employee_who_is_not_active(self):
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(f"/api/attendance/devices/{self.a.id}/commands/", {"command_type": "enroll_user", "employee": self.left.id, "biometric_type": "face"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("not an active employee", response.data["detail"])
+
+    def test_purge_preview_changes_nothing_and_counts_per_device(self):
+        self.link(self.active, self.a, "1")
+        self.link(self.left, self.a, "2")
+        self.link(self.left, self.b, "2")
+        self.link(self.terminated, self.a, "3")
+        self.link(self.suspended, self.a, "4")
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post("/api/attendance/devices/purge-inactive/", {}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data["confirmed"])
+        self.assertEqual(response.data["total"], 3)
+        self.assertEqual(response.data["devices"], [{"device_name": "Terminal A", "count": 2}, {"device_name": "Terminal B", "count": 1}])
+        self.assertFalse(DeviceCommand.objects.exists())
+
+    def test_confirmed_purge_queues_a_removal_for_each_departed_person_but_not_active_or_suspended(self):
+        self.link(self.active, self.a, "1")
+        self.link(self.left, self.a, "2")
+        self.link(self.suspended, self.a, "4")
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post("/api/attendance/devices/purge-inactive/", {"confirm": True}, format="json")
+
+        self.assertTrue(response.data["confirmed"])
+        removals = DeviceCommand.objects.filter(command_type="purge_user")
+        self.assertEqual(removals.count(), 1)
+        self.assertEqual((removals[0].device, removals[0].payload["enrollid"], removals[0].payload["employee_id"]), (self.a, 2, self.left.id))
+        self.assertEqual(removals[0].status, "pending")
+
+    def test_running_the_purge_twice_does_not_queue_the_same_removal_twice(self):
+        self.link(self.left, self.a, "2")
+        self.client.force_authenticate(self.manager)
+        self.client.post("/api/attendance/devices/purge-inactive/", {"confirm": True}, format="json")
+        second = self.client.post("/api/attendance/devices/purge-inactive/", {"confirm": True}, format="json")
+        self.assertEqual(second.data["total"], 0)
+        self.assertEqual(DeviceCommand.objects.filter(command_type="purge_user").count(), 1)
+
+    def test_purge_requires_manage_devices_permission(self):
+        self.client.force_authenticate(self.viewer)
+        self.assertEqual(self.client.post("/api/attendance/devices/purge-inactive/", {"confirm": True}, format="json").status_code, 403)
+
+    def test_a_successful_removal_sends_deleteuser_and_unlinks_the_identity(self):
+        self.link(self.left, self.a, "2")
+        DeviceCommand.objects.create(device=self.a, command_type="purge_user", payload={"enrollid": 2, "employee_id": self.left.id})
+
+        command_id, wire = Command._next_command_to_send("AYTK14145399")
+        self.assertEqual((wire["cmd"], wire["enrollid"], wire["backupnum"]), ("deleteuser", 2, 12))
+        Command._mark_command_sent(command_id)
+        Command._resolve_command("AYTK14145399", {"ret": "deleteuser", "result": True})
+
+        self.assertFalse(BiometricIdentity.objects.filter(employee=self.left).exists())
+
+    def test_a_removal_backlog_neither_blocks_nor_outranks_an_admin_command(self):
+        for enrollid in (2, 3, 5):
+            DeviceCommand.objects.create(device=self.a, command_type="purge_user", payload={"enrollid": enrollid, "employee_id": self.left.id})
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(f"/api/attendance/devices/{self.a.id}/commands/", {"command_type": "refresh_enrolled_ids"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        _, wire = Command._next_command_to_send("AYTK14145399")
+        self.assertEqual(wire["cmd"], "getuserids")
+

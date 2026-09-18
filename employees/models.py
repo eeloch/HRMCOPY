@@ -274,6 +274,17 @@ class BiometricIdentity(models.Model):
             )
         ]
 
+    def save(self, *args, **kwargs):
+        # An identity for someone who isn't active is created on hold. Reconcile,
+        # the person-information import and clone/sync all link whatever is
+        # physically on a terminal, including staff who have since left; without
+        # this they came out active, so their scans were accepted (attendance and
+        # meal tickets) and Sync All spread them to other terminals. Employee.save
+        # already restores every held identity if they become active again.
+        if self.employee.status != "active":
+            self.is_active = False
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return (
             f"{self.employee.employee_id} - "
