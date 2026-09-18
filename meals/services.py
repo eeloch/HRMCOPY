@@ -664,11 +664,15 @@ class MealService:
         reason = (reason or "").strip()
         if collection.voided_at: raise ValueError("This ticket has already been voided.")
         exception = MealExcessException.objects.select_for_update().filter(pk=collection.excess_exception_id).first() if collection.excess_exception_id else None
-        if exception and exception.status in (MealExcessStatus.APPROVED, MealExcessStatus.DEDUCTED):
-            raise ValueError("This ticket's excess was already approved for a payroll deduction, so it can't be voided. Reverse that deduction first.")
+        if exception and exception.status == MealExcessStatus.DEDUCTED:
+            raise ValueError("This ticket's excess was already deducted in payroll, so it can't be voided. Reverse that deduction first.")
         collection.voided_at, collection.voided_by, collection.void_reason = timezone.now(), actor, reason
         collection.save(update_fields=["voided_at", "voided_by", "void_reason"])
-        if exception and exception.status == MealExcessStatus.PENDING:
+        if exception and exception.status == MealExcessStatus.APPROVED:
+            # accepted but not yet in any payroll: voiding the ticket withdraws the acceptance
+            exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.CANCELLED, actor, timezone.now(), f"Ticket voided: {reason}" if reason else "Ticket voided"
+            exception.save()
+        elif exception and exception.status == MealExcessStatus.PENDING:
             exception.excess_quantity, exception.collected_quantity = exception.excess_quantity - 1, max(exception.collected_quantity - 1, 0)
             if exception.excess_quantity > 0:
                 exception.proposed_deduction = Decimal(exception.excess_quantity) * exception.rate_snapshot
@@ -682,46 +686,48 @@ class MealService:
     @staticmethod
     @transaction.atomic
     def approve(exception, period, actor, comment=""):
+        """Accept a non-entitled meal: the employee is charged, in that month's payroll.
+
+        Works at any time. If the month's payroll record for the employee already
+        exists it is deducted immediately; otherwise the excess is held as accepted
+        and deducted automatically when that month's payroll is generated (see
+        apply_accepted_excess_for_period), so HR needn't wait for payroll to decide.
+        A payroll period or record that is already approved/paid is never altered.
+        """
         if exception.status != MealExcessStatus.PENDING:
             raise ValueError(
                 "This meal excess has already been decided."
             )
 
-        if (
-            period.year != exception.work_date.year
-            or period.month != exception.work_date.month
-        ):
-            raise ValueError(
-                "Meal excess must be deducted in the payroll period "
-                "for its work date."
-            )
+        period = period or PayrollPeriod.objects.filter(year=exception.work_date.year, month=exception.work_date.month).first()
+        payroll = None
+        if period is not None:
+            if (
+                period.year != exception.work_date.year
+                or period.month != exception.work_date.month
+            ):
+                raise ValueError(
+                    "Meal excess must be deducted in the payroll period "
+                    "for its work date."
+                )
 
-        if period.status in {
-            PayrollPeriodStatus.APPROVED,
-            PayrollPeriodStatus.PAID,
-            PayrollPeriodStatus.CLOSED,
-        }:
-            raise ValueError(
-                "This payroll period cannot accept meal deductions."
-            )
+            if period.status in {
+                PayrollPeriodStatus.APPROVED,
+                PayrollPeriodStatus.PAID,
+                PayrollPeriodStatus.CLOSED,
+            }:
+                raise ValueError(
+                    "This payroll period cannot accept meal deductions."
+                )
 
-        payroll = (
-            period.employee_payrolls
-            .filter(employee=exception.employee)
-            .first()
-        )
-        if payroll is None:
-            raise ValueError(
-                "Generate this employee's payroll record before approving the meal excess."
-            )
-
-        if payroll.status in {
-            EmployeePayrollStatus.APPROVED,
-            EmployeePayrollStatus.PAID,
-        }:
-            raise ValueError(
-                "This employee payroll record cannot accept meal deductions."
-            )
+            payroll = period.employee_payrolls.filter(employee=exception.employee).first()
+            if payroll is not None and payroll.status in {
+                EmployeePayrollStatus.APPROVED,
+                EmployeePayrollStatus.PAID,
+            }:
+                raise ValueError(
+                    "This employee payroll record cannot accept meal deductions."
+                )
 
         exception.status = MealExcessStatus.APPROVED
         exception.reviewer = actor
@@ -730,41 +736,8 @@ class MealService:
         exception.payroll_period = period
         exception.save()
 
-        line, _ = PayrollLineItem.objects.get_or_create(
-            payroll=payroll,
-            source_type="meal_excess",
-            source_reference=str(exception.pk),
-            is_system_generated=True,
-            defaults={
-                "item_type": PayrollLineItemType.DEDUCTION,
-                "code": "MEAL_EXCESS",
-                "description": (
-                    f"Excess meal tickets for "
-                    f"{exception.work_date}"
-                ),
-                "amount": exception.proposed_deduction,
-                "metadata": {
-                    "meal_excess_id": exception.pk,
-                    "work_date": (
-                        exception.work_date.isoformat()
-                    ),
-                    "entitlement": (
-                        exception.entitlement_snapshot
-                    ),
-                    "excess_quantity": (
-                        exception.excess_quantity
-                    ),
-                    "rate": str(exception.rate_snapshot),
-                },
-            },
-        )
-
-        recalculate_employee_payroll(payroll)
-
-        exception.payroll = payroll
-        exception.payroll_line_item = line
-        exception.status = MealExcessStatus.DEDUCTED
-        exception.save()
+        if payroll is not None:
+            MealService.apply_to_payroll(exception, payroll)
 
         AuditService.log(
             event_type="meals.excess_approved",
@@ -773,15 +746,60 @@ class MealService:
             actor=actor,
             object=exception,
             severity=AuditSeverity.SUCCESS,
-            title="Meal excess approved",
-            description="Full meal excess deduction approved.",
+            title="Meal excess accepted",
+            description=(
+                "Meal excess accepted and deducted from payroll."
+                if payroll is not None
+                else "Meal excess accepted; it will be deducted when that month's payroll is generated."
+            ),
             metadata={
                 "exception": exception.pk,
                 "amount": str(exception.proposed_deduction),
+                "deducted_now": payroll is not None,
             },
         )
 
         return exception
+
+    @staticmethod
+    def apply_to_payroll(exception, payroll):
+        """Add an accepted excess to an employee's payroll as a deduction (idempotent)."""
+        line, _ = PayrollLineItem.objects.get_or_create(
+            payroll=payroll,
+            source_type="meal_excess",
+            source_reference=str(exception.pk),
+            is_system_generated=True,
+            defaults={
+                "item_type": PayrollLineItemType.DEDUCTION,
+                "code": "MEAL_EXCESS",
+                "description": f"Excess meal tickets for {exception.work_date}",
+                "amount": exception.proposed_deduction,
+                "metadata": {
+                    "meal_excess_id": exception.pk,
+                    "work_date": exception.work_date.isoformat(),
+                    "entitlement": exception.entitlement_snapshot,
+                    "excess_quantity": exception.excess_quantity,
+                    "rate": str(exception.rate_snapshot),
+                },
+            },
+        )
+        recalculate_employee_payroll(payroll)
+        exception.payroll, exception.payroll_line_item, exception.payroll_period = payroll, line, payroll.payroll_period
+        exception.status = MealExcessStatus.DEDUCTED
+        exception.save()
+        return line
+
+    @staticmethod
+    def apply_accepted_excess_for_period(period):
+        """Deduct every accepted-but-not-yet-deducted excess for this period's month
+        from the matching employee payroll records. Called when payroll is generated."""
+        applied = 0
+        for exception in MealExcessException.objects.filter(status=MealExcessStatus.APPROVED, work_date__year=period.year, work_date__month=period.month).select_related("employee"):
+            payroll = period.employee_payrolls.filter(employee=exception.employee).exclude(status__in=[EmployeePayrollStatus.APPROVED, EmployeePayrollStatus.PAID]).first()
+            if payroll is not None:
+                MealService.apply_to_payroll(exception, payroll)
+                applied += 1
+        return applied
 
     @staticmethod
     def cancel(exception, actor, comment):

@@ -14,6 +14,7 @@ class PayrollGenerationSummary:
     created: int = 0
     existing: int = 0
     skipped: int = 0
+    deductions_applied: int = 0
 
 
 def generate_payroll_for_period(period, *, actor=None):
@@ -38,6 +39,17 @@ def generate_payroll_for_period(period, *, actor=None):
             else:
                 summary.existing += 1
 
+        # Deductions accepted/approved before this month's payroll existed (meal
+        # excess, offence punishments) land here, in that month's salary. Deferred
+        # imports: meals and offences import payroll at module load.
+        from meals.services import MealService
+        from offences.services import OffenceService
+
+        summary.deductions_applied = (
+            MealService.apply_accepted_excess_for_period(period)
+            + OffenceService.apply_approved_offences_for_period(period)
+        )
+
         if summary.created:
             AuditService.log(
                 event_type="payroll.generated",
@@ -52,6 +64,7 @@ def generate_payroll_for_period(period, *, actor=None):
                     "created": summary.created,
                     "existing": summary.existing,
                     "skipped": summary.skipped,
+                    "deductions_applied": summary.deductions_applied,
                 },
             )
 

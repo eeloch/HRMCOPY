@@ -101,7 +101,7 @@ export default function OffencesPage() {
     if (await request("/offences/", "POST", body, "Offence logged and sent for review.")) setOffenceForm(offenceFormInitial());
   }
   async function approve(offence: Offence) {
-    await request(`/offences/${offence.id}/approve/`, "POST", {}, "Offence approved and deducted from the open payroll period.");
+    await request(`/offences/${offence.id}/approve/`, "POST", {}, "Offence approved - it is deducted from the salary in payroll (immediately if the record exists, otherwise when payroll is generated).");
   }
   async function reject() {
     if (rejectId === null || !reason.trim()) return;

@@ -38,6 +38,7 @@ from payroll.models import (
     PayrollPeriod,
 )
 from meals.services import MealService
+from payroll.services import generate_payroll_for_period
 
 
 class MealAbsencePenaltyTests(TestCase):
@@ -1133,17 +1134,82 @@ class MealWorkflowTests(TestCase):
         self.assertEqual(payroll.net_pay, Decimal("-200.00"))
         self.assertEqual(PayrollLineItem.objects.filter(payroll=payroll).count(), 1)
 
-    def test_approve_requires_employee_payroll_and_leaves_exception_pending(self):
+    def test_accepting_before_the_payroll_record_exists_waits_and_deducts_when_payroll_is_generated(self):
+        """Accept works any time; the deduction lands in that month's payroll once it exists."""
         period = PayrollPeriod.objects.create(year=2026, month=9)
         exception = self.create_excess()
 
-        with self.assertRaisesMessage(ValueError, "Generate this employee's payroll record"):
-            MealService.approve(exception, period, self.actor)
+        accepted = MealService.approve(exception, period, self.actor)
+
+        self.assertEqual(accepted.status, MealExcessStatus.APPROVED)
+        self.assertFalse(PayrollLineItem.objects.exists())
+
+        summary = generate_payroll_for_period(period)
+
+        self.assertEqual(summary.deductions_applied, 1)
+        exception.refresh_from_db()
+        payroll = EmployeePayroll.objects.get(payroll_period=period, employee=self.employee)
+        line = PayrollLineItem.objects.get(payroll=payroll)
+        self.assertEqual((exception.status, exception.payroll, exception.payroll_line_item), (MealExcessStatus.DEDUCTED, payroll, line))
+        self.assertEqual((line.code, line.amount, line.source_reference), ("MEAL_EXCESS", exception.proposed_deduction, str(exception.pk)))
+        payroll.refresh_from_db()
+        self.assertEqual(payroll.total_deductions, exception.proposed_deduction)
+
+    def test_accepting_before_the_months_payroll_period_even_exists(self):
+        exception = self.create_excess()
+
+        accepted = MealService.approve(exception, None, self.actor)
+
+        self.assertEqual((accepted.status, accepted.payroll_period), (MealExcessStatus.APPROVED, None))
+        period = PayrollPeriod.objects.create(year=2026, month=9)
+        generate_payroll_for_period(period)
+        exception.refresh_from_db()
+        self.assertEqual(exception.status, MealExcessStatus.DEDUCTED)
+        self.assertEqual(exception.payroll_period, period)
+
+    def test_generating_again_does_not_deduct_the_same_excess_twice(self):
+        period = PayrollPeriod.objects.create(year=2026, month=9)
+        exception = self.create_excess()
+        MealService.approve(exception, period, self.actor)
+
+        generate_payroll_for_period(period)
+        again = generate_payroll_for_period(period)
+
+        self.assertEqual(again.deductions_applied, 0)
+        self.assertEqual(PayrollLineItem.objects.filter(source_type="meal_excess").count(), 1)
+
+    def test_an_excess_is_only_deducted_from_its_own_months_payroll(self):
+        october = PayrollPeriod.objects.create(year=2026, month=10)
+        exception = self.create_excess()  # a September work date
+        MealService.approve(exception, None, self.actor)
+
+        generate_payroll_for_period(october)
 
         exception.refresh_from_db()
-        self.assertEqual(exception.status, MealExcessStatus.PENDING)
-        self.assertIsNone(exception.reviewer)
+        self.assertEqual(exception.status, MealExcessStatus.APPROVED)
         self.assertFalse(PayrollLineItem.objects.exists())
+
+    def test_generation_leaves_an_already_approved_employee_payroll_untouched(self):
+        period = PayrollPeriod.objects.create(year=2026, month=9)
+        exception = self.create_excess()
+        MealService.approve(exception, period, self.actor)
+        EmployeePayroll.objects.create(payroll_period=period, employee=self.employee, basic_salary=Decimal("50000.00"), gross_earnings=Decimal("50000.00"), net_pay=Decimal("50000.00"), status=EmployeePayrollStatus.APPROVED)
+
+        generate_payroll_for_period(period)
+
+        exception.refresh_from_db()
+        self.assertEqual(exception.status, MealExcessStatus.APPROVED)
+        self.assertFalse(PayrollLineItem.objects.exists())
+
+    def test_the_accept_endpoint_needs_no_payroll_period(self):
+        exception = self.create_excess()
+        self.actor.user_permissions.add(Permission.objects.get(codename="review_meal_excess"))
+        client = APIClient()
+        client.force_authenticate(self.actor)
+
+        response = client.post(f"/api/meals/excess/{exception.pk}/approve/", {}, format="json")
+
+        self.assertEqual((response.status_code, response.json()["status"]), (200, "approved"))
 
     def test_approve_rejects_immutable_payroll_period(self):
         period = PayrollPeriod.objects.create(year=2026, month=9, status="paid")
@@ -1569,15 +1635,26 @@ class MealTicketVoidTests(TestCase):
 
         self.assertEqual((real.sequence_number, real.status), (1, MealCollectionStatus.WITHIN))
 
-    def test_cannot_void_once_the_excess_was_approved_for_a_payroll_deduction(self):
+    def test_cannot_void_once_the_excess_was_deducted_in_payroll(self):
+        self.scan("e1")
+        second = self.scan("e2", hour=13)
+        MealExcessException.objects.filter(employee=self.employee).update(status=MealExcessStatus.DEDUCTED)
+
+        with self.assertRaisesMessage(ValueError, "already deducted"):
+            MealService.void_collection(second, self.reviewer, "Oops")
+        second.refresh_from_db()
+        self.assertIsNone(second.voided_at)
+
+    def test_voiding_a_ticket_accepted_but_not_yet_in_payroll_withdraws_the_acceptance(self):
         self.scan("e1")
         second = self.scan("e2", hour=13)
         MealExcessException.objects.filter(employee=self.employee).update(status=MealExcessStatus.APPROVED)
 
-        with self.assertRaisesMessage(ValueError, "already approved"):
-            MealService.void_collection(second, self.reviewer, "Oops")
+        MealService.void_collection(second, self.reviewer, "Accepted by mistake")
+
         second.refresh_from_db()
-        self.assertIsNone(second.voided_at)
+        self.assertIsNotNone(second.voided_at)
+        self.assertEqual(second.excess_exception.status, MealExcessStatus.CANCELLED)
 
     def test_a_ticket_can_be_voided_without_a_reason_but_not_twice(self):
         collection = self.scan("e1")

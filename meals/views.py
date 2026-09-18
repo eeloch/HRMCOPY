@@ -263,17 +263,7 @@ class MealExcessApproveAPIView(APIView):
         )
 
         payroll_period_id = request.data.get("payroll_period")
-
-        if not payroll_period_id:
-            return Response(
-                {"detail": "Payroll period is required."},
-                status=400,
-            )
-
-        period = get_object_or_404(
-            PayrollPeriod,
-            pk=payroll_period_id,
-        )
+        period = get_object_or_404(PayrollPeriod, pk=payroll_period_id) if payroll_period_id else None
 
         comment = str(
             request.data.get("comment", "")
