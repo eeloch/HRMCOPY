@@ -230,12 +230,6 @@ class MealExcessCancelAPIView(APIView):
 
         reason = str(request.data.get("reason", "")).strip()
 
-        if not reason:
-            return Response(
-                {"detail": "A cancellation reason is required."},
-                status=400,
-            )
-
         try:
             MealService.cancel(
                 exception,

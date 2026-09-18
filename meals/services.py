@@ -616,22 +616,16 @@ class MealService:
 
     @staticmethod
     def _cover_excess_ticket(collection, entitlement, rate):
-        """Every ticket beyond the entitlement needs a decision of its own.
+        """Every ticket beyond the entitlement is decided on its own.
 
-        It joins this employee's still-open (pending) decision for the day, or opens
-        a new one. It must never be folded into a decision already made for an
-        earlier ticket - that used to happen (one decision per employee per day), so
-        a further extra meal after HR had waived or accepted the first was neither
-        reviewed nor charged while the vendor was still billed for it.
+        It opens its own pending decision (Accept / Waive / Decline apply to that one
+        ticket) and is never folded into another - neither an earlier decision (that
+        used to make a further extra meal go unreviewed and uncharged while the vendor
+        was still billed) nor another ticket's still-open one (declining one of three
+        extra scans used to decline all three).
         """
         collected_today = MealCollection.objects.filter(employee=collection.employee, work_date=collection.work_date, voided_at__isnull=True).count()
-        exception = MealExcessException.objects.select_for_update().filter(employee=collection.employee, work_date=collection.work_date, status=MealExcessStatus.PENDING).first()
-        if exception:
-            exception.collected_quantity, exception.excess_quantity = collected_today, exception.excess_quantity + 1
-            exception.proposed_deduction = Decimal(exception.excess_quantity) * exception.rate_snapshot
-            exception.save(update_fields=["collected_quantity", "excess_quantity", "proposed_deduction", "updated_at"])
-        else:
-            exception = MealExcessException.objects.create(employee=collection.employee, work_date=collection.work_date, entitlement_snapshot=entitlement, collected_quantity=collected_today, excess_quantity=1, rate_snapshot=rate, proposed_deduction=rate)
+        exception = MealExcessException.objects.create(employee=collection.employee, work_date=collection.work_date, entitlement_snapshot=entitlement, collected_quantity=collected_today, excess_quantity=1, rate_snapshot=rate, proposed_deduction=rate)
         collection.excess_exception = exception
         collection.save(update_fields=["excess_exception"])
 
@@ -642,18 +636,17 @@ class MealService:
         are voided (so the vendor isn't billed for them) and nothing is deducted
         from the employee. Contrast cancel(), which waives the deduction but leaves
         the tickets standing, i.e. the company still pays the vendor."""
-        reason = reason.strip()
-        if not reason: raise ValueError("A reason is required to decline a meal excess.")
+        reason = (reason or "").strip()
         if exception.status != MealExcessStatus.PENDING: raise ValueError("This meal excess has already been decided.")
         now = timezone.now()
         excess_tickets = list(MealCollection.objects.select_for_update().filter(excess_exception=exception, voided_at__isnull=True))
         for ticket in excess_tickets:
-            ticket.voided_at, ticket.voided_by, ticket.void_reason = now, actor, f"Excess declined: {reason}"
+            ticket.voided_at, ticket.voided_by, ticket.void_reason = now, actor, f"Excess declined: {reason}" if reason else "Excess declined"
             ticket.save(update_fields=["voided_at", "voided_by", "void_reason"])
         exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.DECLINED, actor, now, reason
         exception.save()
         AuditService.log(event_type="meals.excess_declined", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.WARNING, title="Meal excess declined", description=f"{len(excess_tickets)} ticket(s) beyond entitlement declined; vendor not billed, no deduction.", metadata={"exception": exception.pk, "reason": reason, "tickets_voided": [t.pk for t in excess_tickets]})
-        for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_declined", title="Meal excess declined", message=f"{exception.employee.full_name}: {reason}", severity="warning", employee=exception.employee, related_url="/meals")
+        for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_declined", title="Meal excess declined", message=f"{exception.employee.full_name}: {reason or 'No reason given'}", severity="warning", employee=exception.employee, related_url="/meals")
         return exception
 
     @staticmethod
@@ -668,8 +661,7 @@ class MealService:
         excess has been approved for a payroll deduction, since voiding would
         silently leave the deduction standing.
         """
-        reason = reason.strip()
-        if not reason: raise ValueError("A reason is required to void a ticket.")
+        reason = (reason or "").strip()
         if collection.voided_at: raise ValueError("This ticket has already been voided.")
         exception = MealExcessException.objects.select_for_update().filter(pk=collection.excess_exception_id).first() if collection.excess_exception_id else None
         if exception and exception.status in (MealExcessStatus.APPROVED, MealExcessStatus.DEDUCTED):
@@ -682,7 +674,7 @@ class MealService:
                 exception.proposed_deduction = Decimal(exception.excess_quantity) * exception.rate_snapshot
                 exception.save(update_fields=["collected_quantity", "excess_quantity", "proposed_deduction", "updated_at"])
             else:
-                exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.CANCELLED, actor, timezone.now(), f"Ticket voided: {reason}"
+                exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.CANCELLED, actor, timezone.now(), f"Ticket voided: {reason}" if reason else "Ticket voided"
                 exception.save()
         AuditService.log(event_type="meals.ticket_voided", module="meals", employee=collection.employee, actor=actor, object=collection, severity=AuditSeverity.WARNING, title="Meal ticket voided", description=f"Meal ticket for {collection.work_date} voided.", metadata={"collection": collection.pk, "reason": reason, "rate": str(collection.rate_snapshot)})
         return collection
@@ -794,8 +786,8 @@ class MealService:
     @staticmethod
     def cancel(exception, actor, comment):
         if exception.status != MealExcessStatus.PENDING: raise ValueError("This meal excess has already been decided.")
-        if not comment.strip(): raise ValueError("A cancellation reason is required.")
-        exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.CANCELLED, actor, timezone.now(), comment.strip(); exception.save()
-        AuditService.log(event_type="meals.excess_cancelled", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.WARNING, title="Meal excess cancelled", description="Meal excess deduction cancelled.", metadata={"exception":exception.pk,"reason":comment})
-        for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_cancelled", title="Meal excess cancelled", message=f"{exception.employee.full_name}: {comment.strip()}", severity="warning", employee=exception.employee, related_url="/meals")
+        comment = (comment or "").strip()
+        exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.CANCELLED, actor, timezone.now(), comment; exception.save()
+        AuditService.log(event_type="meals.excess_cancelled", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.WARNING, title="Meal excess waived", description="Meal excess deduction waived.", metadata={"exception":exception.pk,"reason":comment})
+        for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_cancelled", title="Meal excess waived", message=f"{exception.employee.full_name}: {comment or 'No reason given'}", severity="warning", employee=exception.employee, related_url="/meals")
         return exception

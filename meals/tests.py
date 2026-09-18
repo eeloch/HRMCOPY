@@ -619,7 +619,7 @@ class MealAbsencePenaltyTests(TestCase):
         self.assertEqual(excess.rate_snapshot, Decimal("700.00"))
         self.assertEqual(excess.proposed_deduction, Decimal("700.00"))
 
-    def test_pending_excess_updates_after_third_scan(self):
+    def test_each_extra_scan_gets_its_own_pending_excess(self):
         work_date = date(2026, 9, 7)
         device_serial_number = "MEALDEVICE003"
 
@@ -668,21 +668,15 @@ class MealAbsencePenaltyTests(TestCase):
             self.assertTrue(created)
             self.assertEqual(collection.entitlement_snapshot, 1)
 
-        excess = MealExcessException.objects.get(
-            employee=self.employee,
-            work_date=work_date,
-        )
-        self.assertEqual(excess.status, MealExcessStatus.PENDING)
-        self.assertEqual(excess.collected_quantity, 3)
-        self.assertEqual(excess.excess_quantity, 2)
-        self.assertEqual(excess.proposed_deduction, Decimal("1400.00"))
-        self.assertEqual(
-            MealExcessException.objects.filter(
-                employee=self.employee,
-                work_date=work_date,
-            ).count(),
-            1,
-        )
+        # The 1 entitled ticket goes straight through; each of the 2 extra scans is
+        # its own pending decision (so they can be accepted/declined individually).
+        decisions = MealExcessException.objects.filter(employee=self.employee, work_date=work_date).order_by("id")
+        self.assertEqual(decisions.count(), 2)
+        for decision in decisions:
+            self.assertEqual(decision.status, MealExcessStatus.PENDING)
+            self.assertEqual(decision.excess_quantity, 1)
+            self.assertEqual(decision.proposed_deduction, Decimal("700.00"))
+        self.assertEqual([d.collected_quantity for d in decisions], [2, 3])
 
     def test_cumulative_absence_penalties_floor_ingested_entitlement_at_zero(self):
         work_date = date(2026, 9, 7)
@@ -1193,11 +1187,8 @@ class MealWorkflowTests(TestCase):
                     PayrollLineItem.objects.filter(payroll=payroll).exists()
                 )
 
-    def test_cancel_requires_reason_and_records_audit_and_notification(self):
+    def test_cancel_records_audit_and_notification(self):
         exception = self.create_excess()
-
-        with self.assertRaisesMessage(ValueError, "cancellation reason is required"):
-            MealService.cancel(exception, self.actor, "  ")
 
         result = MealService.cancel(exception, self.actor, "Duplicate meal scan reviewed.")
 
@@ -1212,6 +1203,14 @@ class MealWorkflowTests(TestCase):
                 event_type="meals.excess_cancelled",
             ).exists()
         )
+
+    def test_a_reason_is_optional_when_waiving(self):
+        exception = self.create_excess()
+
+        result = MealService.cancel(exception, self.actor, "  ")
+
+        self.assertEqual((result.status, result.comment), (MealExcessStatus.CANCELLED, ""))
+        self.assertTrue(AuditEvent.objects.filter(event_type="meals.excess_cancelled").exists())
 
     def test_reviewed_excess_cannot_be_reviewed_again(self):
         period = PayrollPeriod.objects.create(year=2026, month=9)
@@ -1551,15 +1550,16 @@ class MealTicketVoidTests(TestCase):
         self.assertEqual(exception.status, MealExcessStatus.CANCELLED)
         self.assertIn("Accidental scan", exception.comment)
 
-    def test_voiding_one_of_several_excess_tickets_reduces_the_pending_excess(self):
+    def test_voiding_one_extra_ticket_cancels_only_its_own_decision(self):
         self.scan("e1")
-        self.scan("e2", hour=13)
+        second = self.scan("e2", hour=13)
         third = self.scan("e3", hour=14)
 
         MealService.void_collection(third, self.reviewer, "Duplicate")
 
-        exception = MealExcessException.objects.get(employee=self.employee, work_date=self.day)
-        self.assertEqual((exception.status, exception.collected_quantity, exception.excess_quantity, exception.proposed_deduction), (MealExcessStatus.PENDING, 2, 1, Decimal("700.00")))
+        second.refresh_from_db(); third.refresh_from_db()
+        self.assertEqual(second.excess_exception.status, MealExcessStatus.PENDING)
+        self.assertEqual(third.excess_exception.status, MealExcessStatus.CANCELLED)
 
     def test_a_voided_scan_does_not_use_up_the_employees_real_ticket_for_the_day(self):
         test_scan = self.scan("e1")
@@ -1579,15 +1579,16 @@ class MealTicketVoidTests(TestCase):
         second.refresh_from_db()
         self.assertIsNone(second.voided_at)
 
-    def test_a_reason_is_required_and_a_ticket_cannot_be_voided_twice(self):
+    def test_a_ticket_can_be_voided_without_a_reason_but_not_twice(self):
         collection = self.scan("e1")
-        with self.assertRaisesMessage(ValueError, "reason is required"):
-            MealService.void_collection(collection, self.reviewer, "   ")
-        MealService.void_collection(collection, self.reviewer, "Test scan")
+        MealService.void_collection(collection, self.reviewer, "   ")
+        collection.refresh_from_db()
+        self.assertIsNotNone(collection.voided_at)
+        self.assertEqual(collection.void_reason, "")
         with self.assertRaisesMessage(ValueError, "already been voided"):
             MealService.void_collection(collection, self.reviewer, "Again")
 
-    def test_the_void_endpoint_needs_the_review_permission_and_a_reason(self):
+    def test_the_void_endpoint_needs_the_review_permission_and_takes_an_optional_reason(self):
         collection = self.scan("e1")
         viewer = get_user_model().objects.create_user(username="void-viewer", password="pw")
         viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
@@ -1595,8 +1596,7 @@ class MealTicketVoidTests(TestCase):
         self.assertEqual(self.client.post(f"/api/meals/collections/{collection.pk}/void/", {"reason": "x"}, format="json").status_code, 403)
 
         self.client.force_authenticate(self.reviewer)
-        self.assertEqual(self.client.post(f"/api/meals/collections/{collection.pk}/void/", {"reason": ""}, format="json").status_code, 400)
-        ok = self.client.post(f"/api/meals/collections/{collection.pk}/void/", {"reason": "Test scan"}, format="json")
+        ok = self.client.post(f"/api/meals/collections/{collection.pk}/void/", {}, format="json")
         self.assertEqual((ok.status_code, ok.json()["voided"]), (200, True))
 
     def test_the_operations_list_marks_voided_tickets(self):
@@ -1669,10 +1669,11 @@ class MealExcessDeclineTests(TestCase):
         self.assertIsNone(self.exception.payroll_line_item)
         self.assertEqual(PayrollLineItem.objects.count(), 0)
 
-    def test_a_reason_is_required_and_only_a_pending_excess_can_be_declined(self):
-        with self.assertRaisesMessage(ValueError, "reason is required"):
-            MealService.decline(self.exception, self.reviewer, " ")
-        MealService.decline(self.exception, self.reviewer, "Not authorised")
+    def test_a_reason_is_optional_and_only_a_pending_excess_can_be_declined(self):
+        MealService.decline(self.exception, self.reviewer, " ")
+        self.exception.refresh_from_db(); self.extra.refresh_from_db()
+        self.assertEqual((self.exception.status, self.exception.comment), (MealExcessStatus.DECLINED, ""))
+        self.assertEqual(self.extra.void_reason, "Excess declined")
         with self.assertRaisesMessage(ValueError, "already been decided"):
             MealService.decline(self.exception, self.reviewer, "Again")
 
@@ -1691,8 +1692,7 @@ class MealExcessDeclineTests(TestCase):
         self.assertEqual(self.client.post(f"/api/meals/excess/{self.exception.pk}/decline/", {"reason": "x"}, format="json").status_code, 403)
 
         self.client.force_authenticate(self.reviewer)
-        self.assertEqual(self.client.post(f"/api/meals/excess/{self.exception.pk}/decline/", {"reason": ""}, format="json").status_code, 400)
-        ok = self.client.post(f"/api/meals/excess/{self.exception.pk}/decline/", {"reason": "Not authorised"}, format="json")
+        ok = self.client.post(f"/api/meals/excess/{self.exception.pk}/decline/", {}, format="json")
         self.assertEqual((ok.status_code, ok.json()["status"]), (200, "declined"))
 
     def test_operations_rows_say_which_tickets_have_an_excess_decision(self):
@@ -1744,13 +1744,19 @@ class MealSeparateExcessDecisionTests(TestCase):
         first_decision.refresh_from_db()
         self.assertEqual((first_decision.status, first_decision.excess_quantity), (MealExcessStatus.CANCELLED, 1))
 
-    def test_two_extra_tickets_before_any_decision_share_one_open_decision(self):
+    def test_declining_one_of_several_extra_tickets_declines_only_that_one(self):
+        """Production: three extra scans by one person, one Decline click, all three declined."""
         self.scan("e1", 12)
-        second, third = self.scan("e2", 13), self.scan("e3", 14)
+        second, third, fourth = self.scan("e2", 13), self.scan("e3", 14), self.scan("e4", 15)
+        self.assertEqual(len({second.excess_exception_id, third.excess_exception_id, fourth.excess_exception_id}), 3)
 
-        self.assertEqual(second.excess_exception_id, third.excess_exception_id)
-        decision = MealExcessException.objects.get(pk=second.excess_exception_id)
-        self.assertEqual((decision.status, decision.collected_quantity, decision.excess_quantity, decision.proposed_deduction), (MealExcessStatus.PENDING, 3, 2, Decimal("1400.00")))
+        MealService.decline(third.excess_exception, self.reviewer, "")
+
+        second.refresh_from_db(); third.refresh_from_db(); fourth.refresh_from_db()
+        self.assertEqual((second.voided_at is None, third.voided_at is None, fourth.voided_at is None), (True, False, True))
+        self.assertEqual((second.excess_exception.status, fourth.excess_exception.status), (MealExcessStatus.PENDING, MealExcessStatus.PENDING))
+        data = self.client.get(f"/api/meals/vendor/{self.period.pk}/").json()
+        self.assertEqual((data["tickets_issued"], float(data["amount_owed"])), (3, 2100.0))
 
     def test_a_decision_already_accepted_is_left_alone_when_another_extra_arrives(self):
         self.scan("e1", 12)
