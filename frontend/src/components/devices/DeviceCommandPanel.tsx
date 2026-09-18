@@ -12,6 +12,7 @@ type DeviceCommand = {
   status: "pending" | "sent" | "acked" | "failed";
   result: Record<string, unknown>;
   created_at: string;
+  propagated_to?: { device_id: number; device_name: string }[];
 };
 
 type ReconcileResult = {
@@ -70,7 +71,7 @@ export function DeviceCommandPanel({ deviceId, employees }: Props) {
         const data: { results: DeviceCommand[] } = await response.json();
         const found = data.results.find((command) => command.id === commandId);
         if (!found) return;
-        setActive(found);
+        setActive((prev) => ({ ...found, propagated_to: prev?.propagated_to }));
         if (found.status === "acked" || found.status === "failed") {
           stopPolling();
         }
@@ -221,6 +222,15 @@ export function DeviceCommandPanel({ deviceId, employees }: Props) {
       {(active || error) && (
         <div className="rounded-xl border border-slate-200 bg-white p-4 md:col-span-3">
           {error ? <p className="text-sm text-red-700">{error}</p> : <p className="text-sm text-slate-700">{statusMessage()}</p>}
+          {active?.propagated_to !== undefined && (
+            active.propagated_to.length > 0 ? (
+              <p className="mt-2 text-xs text-slate-500">
+                Also queued on: {active.propagated_to.map((d) => d.device_name).join(", ")} — ask the person to scan there too.
+              </p>
+            ) : (
+              <p className="mt-2 text-xs text-slate-500">Already enrolled (or a command already in flight) on every other device.</p>
+            )
+          )}
         </div>
       )}
 

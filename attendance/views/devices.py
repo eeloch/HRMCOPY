@@ -139,7 +139,45 @@ class DeviceCommandListCreateAPIView(APIView):
             device=device, command_type=command_type, payload=payload,
             requested_by=request.user if request.user.is_authenticated else None,
         )
-        return Response(DeviceCommandSerializer(command).data, status=status.HTTP_201_CREATED)
+
+        response_data = DeviceCommandSerializer(command).data
+        if command_type == "enroll_user":
+            response_data["propagated_to"] = self._propagate_enrollment(device, payload, request.user)
+        return Response(response_data, status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _propagate_enrollment(source_device, payload, requesting_user):
+        """Registering someone on one device should mean they're recognized
+        everywhere - queue the same enrollment on every other device too, so
+        an admin enrolls once instead of repeating it per terminal. The
+        employee still has to physically scan at each device (a biometric
+        template can't be copied between terminals), so this only saves the
+        admin-side click, not the scan itself.
+
+        Skips a device the employee is already actively enrolled on, and
+        skips a device that already has a command in flight rather than
+        conflicting with it.
+        """
+        employee_id, biometric_type = payload["employee_id"], payload["biometric_type"]
+        employee_name = payload["name"]
+        queued = []
+        for other_device in BiometricDevice.objects.exclude(pk=source_device.pk):
+            already_enrolled = BiometricIdentity.objects.filter(
+                employee_id=employee_id, system=IDENTITY_SYSTEM, source_identifier=other_device.serial_number, is_active=True,
+            ).exists()
+            if already_enrolled:
+                continue
+            DeviceCommand.expire_stale(device=other_device)
+            if DeviceCommand.objects.filter(device=other_device, status__in=("pending", "sent")).exists():
+                continue
+            enrollid = DeviceCommandListCreateAPIView._next_free_enrollid(other_device)
+            DeviceCommand.objects.create(
+                device=other_device, command_type="enroll_user",
+                payload={"enrollid": enrollid, "employee_id": employee_id, "name": employee_name, "biometric_type": biometric_type},
+                requested_by=requesting_user if requesting_user.is_authenticated else None,
+            )
+            queued.append({"device_id": other_device.id, "device_name": other_device.name})
+        return queued
 
     @staticmethod
     def _build_membership_payload(request, device, command_type):

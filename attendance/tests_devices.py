@@ -394,6 +394,63 @@ class DeviceCommandAPITests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)
 
+    def test_enrolling_on_one_device_auto_queues_it_on_every_other_device(self):
+        other_attendance = BiometricDevice.objects.create(
+            name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory", purpose="attendance",
+        )
+        meal_device = BiometricDevice.objects.create(
+            name="Canteen", serial_number="MEAL00001", location="Canteen", device_type="factory", purpose="meal_ticket",
+        )
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": self.employee.id, "biometric_type": "face"}, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        propagated_device_ids = {row["device_id"] for row in response.data["propagated_to"]}
+        self.assertEqual(propagated_device_ids, {other_attendance.id, meal_device.id})
+
+        for device in (other_attendance, meal_device):
+            queued = DeviceCommand.objects.get(device=device, command_type="enroll_user")
+            self.assertEqual(queued.status, "pending")
+            self.assertEqual(queued.payload["employee_id"], self.employee.id)
+            self.assertEqual(queued.payload["name"], self.employee.full_name)
+            self.assertEqual(queued.payload["biometric_type"], "face")
+
+    def test_propagation_skips_a_device_the_employee_is_already_enrolled_on(self):
+        already_enrolled_device = BiometricDevice.objects.create(
+            name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory", purpose="attendance",
+        )
+        BiometricIdentity.objects.create(
+            employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK99999999", external_user_id="9", is_active=True,
+        )
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": self.employee.id, "biometric_type": "face"}, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["propagated_to"], [])
+        self.assertFalse(DeviceCommand.objects.filter(device=already_enrolled_device).exists())
+
+    def test_propagation_skips_a_device_with_a_command_already_in_flight(self):
+        busy_device = BiometricDevice.objects.create(
+            name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory", purpose="attendance",
+        )
+        DeviceCommand.objects.create(device=busy_device, command_type="refresh_enrolled_ids", payload={}, status="sent")
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": self.employee.id, "biometric_type": "face"}, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["propagated_to"], [])
+        self.assertEqual(DeviceCommand.objects.filter(device=busy_device).count(), 1)
+
+    def test_refresh_enrolled_ids_does_not_propagate(self):
+        BiometricDevice.objects.create(
+            name="Side Gate", serial_number="AYTK99999999", location="Side gate", device_type="factory", purpose="attendance",
+        )
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url(), {"command_type": "refresh_enrolled_ids"}, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertNotIn("propagated_to", response.data)
+
 
 class DeviceReconcileEnrolledIdsAPITests(TestCase):
     def setUp(self):
