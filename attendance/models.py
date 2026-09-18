@@ -500,6 +500,7 @@ class DeviceCommand(models.Model):
     # close enough that a retry right after the UI times out isn't still
     # blocked by the very row that just failed.
     STALE_AFTER = timedelta(seconds=60)
+    CLONE_STALE_AFTER = timedelta(minutes=5)
 
     class Meta:
         ordering = ["created_at"]
@@ -518,14 +519,16 @@ class DeviceCommand(models.Model):
         at-a-time queue forever. "pending" commands are left alone since
         they're legitimately waiting for the device to come online.
 
-        "clone_enrollment" is excluded: it legitimately runs longer than
-        STALE_AFTER (a getuserinfo round trip plus one setuserinfo push per
-        target device, sequentially) and manages its own bounded per-step
-        timeouts in _run_clone_enrollment, so this generic sweep would
-        otherwise race with - and incorrectly override - its own outcome.
+        "clone_enrollment" gets the longer CLONE_STALE_AFTER instead: a relay
+        legitimately runs past STALE_AFTER (a getuserinfo round trip plus one
+        setuserinfo per target), but must still be bounded, or a relay cut off
+        by a dropped connection would block that device's queue forever.
         """
-        cutoff = timezone.now() - cls.STALE_AFTER
-        stale = cls.objects.filter(status="sent", sent_at__lt=cutoff).exclude(command_type="clone_enrollment")
+        now = timezone.now()
+        stale = cls.objects.filter(status="sent").filter(
+            (~Q(command_type="clone_enrollment") & Q(sent_at__lt=now - cls.STALE_AFTER))
+            | Q(command_type="clone_enrollment", sent_at__lt=now - cls.CLONE_STALE_AFTER)
+        )
         if device is not None:
             stale = stale.filter(device=device)
         stale.update(status="failed", result={"detail": "Timed out waiting for the device to respond."}, completed_at=timezone.now())

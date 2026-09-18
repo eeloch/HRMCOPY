@@ -1,8 +1,12 @@
+import asyncio
+import io
+import json
 from datetime import timedelta
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -667,10 +671,10 @@ class DeviceSyncAllAPITests(TestCase):
         self.manager.user_permissions.add(Permission.objects.get(codename="manage_devices"))
         self.viewer = get_user_model().objects.create_user(username="sync-viewer", password="test-password")
         self.device_a = BiometricDevice.objects.create(
-            name="Terminal A", serial_number="AYTK14145399", location="Main entrance", device_type="factory", purpose="attendance",
+            name="Terminal A", serial_number="AYTK14145399", location="Main entrance", device_type="factory", purpose="attendance", is_online=True,
         )
         self.device_b = BiometricDevice.objects.create(
-            name="Terminal B", serial_number="AYTK14145402", location="Side entrance", device_type="factory", purpose="attendance",
+            name="Terminal B", serial_number="AYTK14145402", location="Side entrance", device_type="factory", purpose="attendance", is_online=True,
         )
 
     def url(self):
@@ -739,3 +743,249 @@ class DeviceSyncAllAPITests(TestCase):
         self.assertEqual(response.data["queued"], 2)
         self.assertEqual(DeviceCommand.objects.filter(device=self.device_a, command_type="clone_enrollment").count(), 1)
         self.assertEqual(DeviceCommand.objects.filter(device=self.device_b, command_type="clone_enrollment").count(), 1)
+
+    def test_offline_devices_take_no_part_and_are_reported(self):
+        offline = BiometricDevice.objects.create(
+            name="Canteen", serial_number="MEAL00001", location="Canteen", device_type="factory", purpose="meal_ticket", is_online=False,
+        )
+        employee = Employee.objects.create(employee_id="EMP-001", first_name="Ada", last_name="Okafor")
+        BiometricIdentity.objects.create(employee=employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5", is_active=True)
+        BiometricIdentity.objects.create(employee=employee, system="vendor_flask_gateway", source_identifier="AYTK14145402", external_user_id="5", is_active=True)
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(self.url())
+
+        self.assertEqual(response.data["queued"], 0)
+        self.assertIn("Canteen", response.data["detail"])
+        self.assertFalse(DeviceCommand.objects.filter(command_type="clone_enrollment").exists())
+        self.assertNotIn(offline.id, [t for c in DeviceCommand.objects.all() for t in c.payload.get("target_device_ids", [])])
+
+    def test_needs_two_online_devices(self):
+        BiometricDevice.objects.filter(pk=self.device_b.pk).update(is_online=False)
+        self.client.force_authenticate(self.manager)
+        response = self.client.post(self.url())
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Terminal B", response.data["detail"])
+
+    def test_running_it_twice_does_not_queue_the_same_employee_twice(self):
+        employee = Employee.objects.create(employee_id="EMP-001", first_name="Ada", last_name="Okafor")
+        BiometricIdentity.objects.create(employee=employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="5", is_active=True)
+        self.client.force_authenticate(self.manager)
+
+        first = self.client.post(self.url())
+        second = self.client.post(self.url())
+
+        self.assertEqual(first.data["queued"], 1)
+        self.assertEqual(second.data["queued"], 0)
+        self.assertEqual(DeviceCommand.objects.filter(command_type="clone_enrollment").count(), 1)
+
+
+class CloneQueueRobustnessTests(TestCase):
+    """The failure modes found on real hardware: terminals cycle their connection
+    every ~20-30s, cutting relays off mid-flight, and a big Sync All backlog must
+    neither lock the admin panel nor starve admin commands."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.manager = get_user_model().objects.create_user(username="robust-manager", password="test-password")
+        self.manager.user_permissions.add(Permission.objects.get(codename="manage_devices"))
+        self.source = BiometricDevice.objects.create(name="A", serial_number="AYTK14145399", location="x", device_type="factory")
+        self.target = BiometricDevice.objects.create(name="B", serial_number="AYTK14145402", location="x", device_type="factory")
+        self.employee = Employee.objects.create(employee_id="EMP-001", first_name="Ada", last_name="Okafor")
+        self.payload = {"employee_id": self.employee.id, "enrollid": 5, "name": "Ada Okafor", "biometric_type": "face", "target_device_ids": [self.target.id]}
+
+    def clone(self, **kwargs):
+        return DeviceCommand.objects.create(device=self.source, command_type="clone_enrollment", payload=dict(self.payload), **kwargs)
+
+    def test_a_clone_relay_cut_off_by_a_dropped_connection_is_retried_when_the_device_reregisters(self):
+        stuck = self.clone(status="sent")
+
+        Command._recover_interrupted_clones("AYTK14145399")
+
+        stuck.refresh_from_db()
+        self.assertEqual(stuck.status, "pending")
+        self.assertEqual(stuck.payload["attempts"], 1)
+        self.assertIsNone(stuck.sent_at)
+
+    def test_a_relay_that_keeps_getting_cut_off_eventually_gives_up(self):
+        stuck = self.clone(status="sent")
+        DeviceCommand.objects.filter(pk=stuck.pk).update(payload={**self.payload, "attempts": 2})
+
+        Command._recover_interrupted_clones("AYTK14145399")
+
+        stuck.refresh_from_db()
+        self.assertEqual(stuck.status, "failed")
+
+    def test_recovery_only_touches_clone_rows_in_flight_on_that_device(self):
+        regular = DeviceCommand.objects.create(device=self.source, command_type="refresh_enrolled_ids", payload={}, status="sent")
+        elsewhere = DeviceCommand.objects.create(device=self.target, command_type="clone_enrollment", payload=dict(self.payload), status="sent")
+
+        Command._recover_interrupted_clones("AYTK14145399")
+
+        regular.refresh_from_db()
+        elsewhere.refresh_from_db()
+        self.assertEqual(regular.status, "sent")
+        self.assertEqual(elsewhere.status, "sent")
+
+    def test_a_clone_stuck_past_the_clone_timeout_is_finally_failed(self):
+        stuck = self.clone(status="sent")
+        DeviceCommand.objects.filter(pk=stuck.pk).update(sent_at=timezone.now() - DeviceCommand.CLONE_STALE_AFTER - timedelta(seconds=1))
+
+        DeviceCommand.expire_stale()
+
+        stuck.refresh_from_db()
+        self.assertEqual(stuck.status, "failed")
+
+    def test_a_pending_clone_backlog_does_not_count_as_a_busy_target(self):
+        DeviceCommand.objects.create(device=self.target, command_type="clone_enrollment", payload=dict(self.payload), status="pending")
+        self.assertFalse(Command._device_is_busy(self.target))
+
+    def test_a_clone_in_flight_does_not_count_as_a_busy_target(self):
+        DeviceCommand.objects.create(device=self.target, command_type="clone_enrollment", payload=dict(self.payload), status="sent")
+        self.assertFalse(Command._device_is_busy(self.target))
+
+    def test_an_admin_command_awaiting_a_reply_still_counts_as_busy(self):
+        DeviceCommand.objects.create(device=self.target, command_type="enroll_user", payload={"enrollid": 1}, status="sent")
+        self.assertTrue(Command._device_is_busy(self.target))
+
+    def test_a_clone_backlog_does_not_block_queuing_an_admin_command(self):
+        for _ in range(3):
+            self.clone(status="pending")
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(f"/api/attendance/devices/{self.source.id}/commands/", {"command_type": "refresh_enrolled_ids"}, format="json")
+
+        self.assertEqual(response.status_code, 201)
+
+    def test_admin_commands_are_served_ahead_of_an_older_clone_backlog(self):
+        self.clone(status="pending")
+        admin = DeviceCommand.objects.create(device=self.source, command_type="refresh_enrolled_ids", payload={}, status="pending")
+
+        command_id, wire_message = Command._next_command_to_send("AYTK14145399")
+
+        self.assertEqual(command_id, admin.id)
+        self.assertEqual(wire_message["cmd"], "getuserids")
+
+    def test_target_enrollid_reuses_the_source_id_when_it_is_free(self):
+        self.assertEqual(Command._enrollid_for_target(self.target, 1133), 1133)
+
+    def test_target_enrollid_avoids_an_id_hrm_already_linked_there(self):
+        other = Employee.objects.create(employee_id="EMP-002", first_name="Bola", last_name="Ade")
+        BiometricIdentity.objects.create(employee=other, system="vendor_flask_gateway", source_identifier="AYTK14145402", external_user_id="1133")
+
+        self.assertEqual(Command._enrollid_for_target(self.target, 1133), 1134)
+
+    def test_target_enrollid_avoids_an_id_the_terminal_reported_but_hrm_never_linked(self):
+        """Pushing onto an id someone else owns on the terminal would overwrite them."""
+        DeviceCommand.objects.create(
+            device=self.target, command_type="refresh_enrolled_ids", status="acked", payload={}, result={"record": ["1133", "1200"]},
+        )
+
+        self.assertEqual(Command._enrollid_for_target(self.target, 1133), 1201)
+
+
+class FakeTerminal:
+    """Stands in for a device's websocket: records what the gateway sends and
+    answers the way the terminal would, through the same pending-reply slot the
+    real receive loop resolves."""
+
+    def __init__(self, gateway, serial, responder):
+        self.gateway, self.serial, self.responder, self.sent = gateway, serial, responder, []
+
+    async def send(self, raw):
+        message = json.loads(raw)
+        self.sent.append(message)
+        reply = self.responder(message)
+        if reply is not None:
+            self.gateway._pending_replies[self.serial].set_result(reply)
+
+
+TEMPLATE = "SECRET-BASE64-FACE-TEMPLATE"
+
+
+class CloneEnrollmentRelayTests(TransactionTestCase):
+    """Drives the real async relay against fake terminals. Uses
+    TransactionTestCase because the relay talks to the DB from worker threads."""
+
+    def setUp(self):
+        self.source = BiometricDevice.objects.create(name="Terminal A", serial_number="AYTK14145399", location="x", device_type="factory", is_online=True)
+        self.target = BiometricDevice.objects.create(name="Terminal B", serial_number="AYTK14145402", location="x", device_type="factory", is_online=True)
+        self.employee = Employee.objects.create(employee_id="EMP-001", first_name="Ada", last_name="Okafor")
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="1133", is_active=True)
+        self.log = io.StringIO()
+        self.gateway = Command(stdout=self.log)
+        self.gateway._connections, self.gateway._pending_replies, self.gateway._locks = {}, {}, {}
+        self.job = DeviceCommand.objects.create(
+            device=self.source, command_type="clone_enrollment", status="pending",
+            payload={"employee_id": self.employee.id, "enrollid": 1133, "name": "Ada Okafor", "biometric_type": "face", "target_device_ids": [self.target.id]},
+        )
+
+    def run_relay(self, source_reply, target_reply, target_online=True):
+        source_ws = FakeTerminal(self.gateway, "AYTK14145399", lambda m: source_reply if m["cmd"] == "getuserinfo" else None)
+        target_ws = FakeTerminal(self.gateway, "AYTK14145402", lambda m: target_reply if m["cmd"] == "setuserinfo" else None)
+        self.gateway._connections["AYTK14145399"] = source_ws
+        if target_online:
+            self.gateway._connections["AYTK14145402"] = target_ws
+        with mock.patch("attendance.management.commands.run_aiface_gateway.CLONE_TARGET_WAIT_SECONDS", 0):
+            asyncio.run(self.gateway._run_clone_enrollment(source_ws, "AYTK14145399", self.job.id))
+        self.job.refresh_from_db()
+        return source_ws, target_ws
+
+    def test_pulls_the_template_from_the_source_and_pushes_it_to_the_target(self):
+        source_ws, target_ws = self.run_relay(
+            {"ret": "getuserinfo", "result": True, "record": TEMPLATE},
+            {"ret": "setuserinfo", "result": True},
+        )
+
+        self.assertEqual([m["cmd"] for m in source_ws.sent], ["getuserinfo"])
+        self.assertEqual(source_ws.sent[0]["enrollid"], 1133)
+        self.assertEqual(len(target_ws.sent), 1)
+        pushed = target_ws.sent[0]
+        self.assertEqual((pushed["cmd"], pushed["record"], pushed["name"], pushed["enrollid"]), ("setuserinfo", TEMPLATE, "Ada Okafor", 1133))
+        self.assertEqual(self.job.status, "acked")
+        self.assertEqual(self.job.result["cloned_to"], [{"device_id": self.target.id, "device_name": "Terminal B"}])
+        identity = BiometricIdentity.objects.get(employee=self.employee, source_identifier="AYTK14145402")
+        self.assertEqual(identity.external_user_id, "1133")
+        self.assertTrue(identity.is_active)
+
+    def test_the_template_never_reaches_the_database_or_the_logs(self):
+        self.run_relay({"ret": "getuserinfo", "result": True, "record": TEMPLATE}, {"ret": "setuserinfo", "result": True})
+
+        self.assertNotIn(TEMPLATE, json.dumps(self.job.result))
+        self.assertNotIn(TEMPLATE, json.dumps(self.job.payload))
+        self.assertNotIn(TEMPLATE, self.log.getvalue())
+        for command in DeviceCommand.objects.all():
+            self.assertNotIn(TEMPLATE, json.dumps(command.result) + json.dumps(command.payload))
+
+    def test_an_offline_target_means_the_source_is_never_asked_for_a_template(self):
+        source_ws, _ = self.run_relay({"ret": "getuserinfo", "result": True, "record": TEMPLATE}, None, target_online=False)
+
+        self.assertEqual(source_ws.sent, [])
+        self.assertEqual(self.job.status, "failed")
+        self.assertEqual(self.job.result["skipped_offline"], [{"device_id": self.target.id, "device_name": "Terminal B"}])
+        self.assertFalse(BiometricIdentity.objects.filter(source_identifier="AYTK14145402").exists())
+
+    def test_a_source_that_cannot_return_a_template_pushes_nothing(self):
+        _, target_ws = self.run_relay({"ret": "getuserinfo", "result": False}, {"ret": "setuserinfo", "result": True})
+
+        self.assertEqual(target_ws.sent, [])
+        self.assertEqual(self.job.status, "failed")
+        self.assertFalse(BiometricIdentity.objects.filter(source_identifier="AYTK14145402").exists())
+
+    def test_a_target_that_rejects_the_template_is_reported_and_not_linked(self):
+        self.run_relay({"ret": "getuserinfo", "result": True, "record": TEMPLATE}, {"ret": "setuserinfo", "result": False})
+
+        self.assertEqual(self.job.status, "failed")
+        self.assertEqual(self.job.result["failed"][0]["reason"], "device rejected the template")
+        self.assertFalse(BiometricIdentity.objects.filter(source_identifier="AYTK14145402").exists())
+
+    def test_does_not_overwrite_an_id_the_target_already_has_for_someone_else(self):
+        other = Employee.objects.create(employee_id="EMP-002", first_name="Bola", last_name="Ade")
+        BiometricIdentity.objects.create(employee=other, system="vendor_flask_gateway", source_identifier="AYTK14145402", external_user_id="1133", is_active=True)
+
+        _, target_ws = self.run_relay({"ret": "getuserinfo", "result": True, "record": TEMPLATE}, {"ret": "setuserinfo", "result": True})
+
+        self.assertEqual(target_ws.sent[0]["enrollid"], 1134)
+        self.assertEqual(BiometricIdentity.objects.get(source_identifier="AYTK14145402", external_user_id="1133").employee, other)
+        self.assertEqual(BiometricIdentity.objects.get(employee=self.employee, source_identifier="AYTK14145402").external_user_id, "1134")
+

@@ -20,6 +20,7 @@ from datetime import datetime
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.db.models import Case, When
 from django.utils import timezone
 
 from attendance.models import BiometricDevice, DeviceCommand
@@ -35,6 +36,8 @@ from attendance.integrations.aiface_protocol import (
 )
 
 CLONE_REPLY_TIMEOUT_SECONDS = 20
+CLONE_TARGET_WAIT_SECONDS = 6
+CLONE_MAX_ATTEMPTS = 3
 
 COMMAND_POLL_INTERVAL_SECONDS = 2
 
@@ -78,6 +81,10 @@ class Command(BaseCommand):
         # since the captured record must never be written to the database).
         self._connections = {}
         self._pending_replies = {}
+        # One lock per serial so a device that is the *source* of its own relay
+        # and simultaneously the *target* of another device's relay serializes
+        # the two exchanges instead of overwriting each other's pending reply.
+        self._locks = {}
 
         host, port, bridge_url, meal_bridge_url = options["host"], options["port"], options["bridge_url"], options["meal_bridge_url"]
         self.stdout.write(self.style.SUCCESS(
@@ -115,6 +122,7 @@ class Command(BaseCommand):
                     self.stdout.write(f"[{peer}] reg from device sn={sn}")
                     self._connections[sn] = ws
                     await asyncio.to_thread(self._mark_device_online, sn, peer[0] if peer else None)
+                    await asyncio.to_thread(self._recover_interrupted_clones, sn)
                     await ws.send(json.dumps(build_reg_ack(datetime.now())))
                     if poller_task is None:
                         poller_task = asyncio.create_task(self._poll_commands(ws, sn))
@@ -140,7 +148,10 @@ class Command(BaseCommand):
             if poller_task is not None:
                 poller_task.cancel()
             self.stdout.write(f"[{peer}] disconnected (sn={sn})")
-            if sn:
+            # A device that reconnected already has a newer socket registered under
+            # this serial; only the current one may deregister/mark offline, or a
+            # late-noticed dead connection would evict its replacement.
+            if sn and self._connections.get(sn) is ws:
                 self._connections.pop(sn, None)
                 await asyncio.to_thread(self._mark_device_offline, sn)
 
@@ -169,27 +180,44 @@ class Command(BaseCommand):
         except asyncio.CancelledError:
             pass
 
+    def _lock_for(self, sn):
+        return self._locks.setdefault(sn, asyncio.Lock())
+
     async def _send_and_wait(self, ws, sn, wire_message, timeout):
         """Send one wire message on this device's own connection and return its
         matching `ret` reply, bypassing the generic per-DB-row command resolution -
-        see the `elif ret:` branch in _handle_connection. Only one such wait may be
-        outstanding per serial at a time, which the one-command-at-a-time protocol
-        rule already guarantees for us."""
-        future = asyncio.get_running_loop().create_future()
-        self._pending_replies[sn] = future
-        try:
-            await ws.send(json.dumps(wire_message))
-            return await asyncio.wait_for(future, timeout=timeout)
-        finally:
-            self._pending_replies.pop(sn, None)
+        see the `elif ret:` branch in _handle_connection. The per-serial lock keeps
+        a device that is both the source of one relay and the target of another
+        from having two replies raced through the single pending-reply slot."""
+        async with self._lock_for(sn):
+            future = asyncio.get_running_loop().create_future()
+            self._pending_replies[sn] = future
+            try:
+                await ws.send(json.dumps(wire_message))
+                return await asyncio.wait_for(future, timeout=timeout)
+            finally:
+                self._pending_replies.pop(sn, None)
+
+    async def _wait_for_connection(self, serial_number, seconds):
+        """Devices cycle their connection every ~20-30s, so a device that looks
+        offline this instant is usually back within a second or two."""
+        for _ in range(int(seconds * 2)):
+            if serial_number in self._connections:
+                return self._connections[serial_number]
+            await asyncio.sleep(0.5)
+        return self._connections.get(serial_number)
 
     async def _run_clone_enrollment(self, ws, sn, command_id):
-        """Relay a successful enrollment to every other device that doesn't have
-        it yet, using getuserinfo (pull the captured template from the source)
-        and setuserinfo (push it to a target) - so the person only has to
-        physically scan once. The captured record is held only in a local
-        variable for the life of this one relay and is never written to the
-        database or logged; only device-level outcomes are.
+        """Relay an enrollment to every other device that doesn't have it yet,
+        using getuserinfo (pull the captured template from the source) and
+        setuserinfo (push it to a target) - so the person only has to physically
+        scan once. The captured record is held only in a local variable for the
+        life of this one relay and is never written to the database or logged;
+        only device-level outcomes are.
+
+        If the source's connection drops mid-relay this coroutine is cancelled and
+        the row is left "sent"; _recover_interrupted_clones puts it back to
+        "pending" when that device next registers.
         """
         await asyncio.to_thread(self._mark_command_sent, command_id)
         command = await asyncio.to_thread(lambda: DeviceCommand.objects.select_related("device").get(pk=command_id))
@@ -197,6 +225,18 @@ class Command(BaseCommand):
         enrollid, employee_id, employee_name = payload["enrollid"], payload["employee_id"], payload.get("name", "")
         biometric_type = payload.get("biometric_type", "face")
         target_ids = payload.get("target_device_ids", [])
+        targets = await asyncio.to_thread(lambda: list(BiometricDevice.objects.filter(pk__in=target_ids)))
+
+        # Don't bother the source for a template nobody can receive right now.
+        reachable, skipped_offline = [], []
+        for target in targets:
+            if await self._wait_for_connection(target.serial_number, CLONE_TARGET_WAIT_SECONDS) is None:
+                skipped_offline.append({"device_id": target.id, "device_name": target.name})
+            else:
+                reachable.append(target)
+        if not reachable:
+            await asyncio.to_thread(self._finish_clone_command, command_id, "failed", {"detail": "None of the target devices were online.", "skipped_offline": skipped_offline})
+            return
 
         try:
             reply = await self._send_and_wait(ws, sn, build_getuserinfo_command(sn, enrollid, biometric_type), CLONE_REPLY_TIMEOUT_SECONDS)
@@ -208,11 +248,10 @@ class Command(BaseCommand):
             await asyncio.to_thread(self._finish_clone_command, command_id, "failed", {"detail": "Source device could not return the enrolled template."})
             return
         record = reply.get("record")
-        self.stdout.write(f"[{sn}] clone_enrollment: template captured for enrollid={enrollid}, relaying to {len(target_ids)} device(s)")
+        self.stdout.write(f"[{sn}] clone_enrollment: template captured for enrollid={enrollid}, relaying to {len(reachable)} device(s)")
 
-        cloned_to, skipped_offline, skipped_busy, failed = [], [], [], []
-        targets = await asyncio.to_thread(lambda: list(BiometricDevice.objects.filter(pk__in=target_ids)))
-        for target in targets:
+        cloned_to, skipped_busy, failed = [], [], []
+        for target in reachable:
             target_ws = self._connections.get(target.serial_number)
             if target_ws is None:
                 skipped_offline.append({"device_id": target.id, "device_name": target.name})
@@ -220,7 +259,7 @@ class Command(BaseCommand):
             if await asyncio.to_thread(self._device_is_busy, target):
                 skipped_busy.append({"device_id": target.id, "device_name": target.name})
                 continue
-            target_enrollid = await asyncio.to_thread(self._next_free_enrollid, target)
+            target_enrollid = await asyncio.to_thread(self._enrollid_for_target, target, enrollid)
             push_message = build_setuserinfo_command(target.serial_number, target_enrollid, employee_name, biometric_type, record)
             try:
                 push_reply = await self._send_and_wait(target_ws, target.serial_number, push_message, CLONE_REPLY_TIMEOUT_SECONDS)
@@ -237,7 +276,7 @@ class Command(BaseCommand):
         record = None  # drop the only reference to the template as soon as we're done relaying it
         self.stdout.write(f"[{sn}] clone_enrollment: done - cloned={len(cloned_to)} offline={len(skipped_offline)} busy={len(skipped_busy)} failed={len(failed)}")
         await asyncio.to_thread(
-            self._finish_clone_command, command_id, "acked",
+            self._finish_clone_command, command_id, "acked" if cloned_to else "failed",
             {"cloned_to": cloned_to, "skipped_offline": skipped_offline, "skipped_busy": skipped_busy, "failed": failed},
         )
 
@@ -293,7 +332,7 @@ class Command(BaseCommand):
             return None
         command = (
             DeviceCommand.objects.filter(device__serial_number=serial_number, status="pending")
-            .order_by("created_at")
+            .order_by(Case(When(command_type="clone_enrollment", then=1), default=0), "created_at")
             .first()
         )
         if command is None:
@@ -306,8 +345,48 @@ class Command(BaseCommand):
 
     @staticmethod
     def _device_is_busy(device):
+        """True only while a regular one-shot command (enroll/delete/refresh) is
+        awaiting its reply on this device. A merely "pending" backlog doesn't
+        conflict with a push, and another clone_enrollment's exchange is already
+        serialized per device by _send_and_wait's lock - counting either as busy
+        made every device skip every other during a bulk sync."""
         DeviceCommand.expire_stale(device=device)
-        return DeviceCommand.objects.filter(device=device, status__in=("pending", "sent")).exists()
+        return DeviceCommand.objects.filter(device=device, status="sent").exclude(command_type="clone_enrollment").exists()
+
+    @staticmethod
+    def _enrollid_for_target(device, preferred):
+        """The id to enroll someone under on `device`: the same id they have on the
+        source (ids here are staff numbers, and reconcile relies on that) unless
+        it's already taken there - by an identity HRM knows about *or* by anything
+        the terminal itself last reported - since pushing onto an existing id would
+        overwrite whoever owns it."""
+        from employees.models import BiometricIdentity
+
+        taken = {str(v) for v in BiometricIdentity.objects.filter(
+            system=IDENTITY_SYSTEM, source_identifier=device.serial_number,
+        ).values_list("external_user_id", flat=True)}
+        latest = DeviceCommand.objects.filter(device=device, command_type="refresh_enrolled_ids", status="acked").order_by("-id").first()
+        if latest:
+            taken |= {str(v) for v in (latest.result.get("record") or [])}
+        if preferred is not None and str(preferred) not in taken:
+            return preferred
+        return max((int(v) for v in taken if v.isdigit()), default=0) + 1
+
+    @staticmethod
+    def _recover_interrupted_clones(serial_number):
+        """A device that re-registers while one of its clone_enrollment rows is
+        still "sent" lost its connection mid-relay (they cycle every ~20-30s).
+        Put the row back to "pending" so it retries, up to CLONE_MAX_ATTEMPTS
+        before giving up."""
+        for command in DeviceCommand.objects.filter(device__serial_number=serial_number, command_type="clone_enrollment", status="sent"):
+            attempts = command.payload.get("attempts", 0) + 1
+            if attempts >= CLONE_MAX_ATTEMPTS:
+                DeviceCommand.objects.filter(pk=command.pk).update(
+                    status="failed", completed_at=timezone.now(),
+                    result={"detail": f"Connection dropped mid-relay {attempts} times; gave up."},
+                )
+            else:
+                DeviceCommand.objects.filter(pk=command.pk).update(status="pending", sent_at=None, payload={**command.payload, "attempts": attempts})
 
     @staticmethod
     def _next_free_enrollid(device):

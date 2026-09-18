@@ -118,7 +118,10 @@ class DeviceCommandListCreateAPIView(APIView):
             return Response({"detail": "Device not found."}, status=status.HTTP_404_NOT_FOUND)
 
         DeviceCommand.expire_stale(device=device)
-        if DeviceCommand.objects.filter(device=device, status__in=("pending", "sent")).exists():
+        # Background clone_enrollment jobs (a Sync All can queue dozens per device)
+        # don't count: the gateway serves admin commands ahead of them, so they
+        # shouldn't lock the panel until the whole backlog drains.
+        if DeviceCommand.objects.filter(device=device, status__in=("pending", "sent")).exclude(command_type="clone_enrollment").exists():
             return Response(
                 {"detail": "A command is already queued or in progress for this device. Wait for it to finish first."},
                 status=status.HTTP_409_CONFLICT,
@@ -301,15 +304,24 @@ class DeviceSyncAllAPIView(APIView):
     getuserinfo/setuserinfo relay as a normal enroll_user propagation
     (see run_aiface_gateway._run_clone_enrollment), so no new physical scan
     is needed. Safe to call repeatedly: an employee already present
-    everywhere is simply skipped.
+    everywhere, or already waiting in the clone queue, is simply skipped.
+
+    Only devices that are online right now take part (as source or target):
+    a job aimed at an offline device can't finish and would just clog the
+    queue. Run it again once that device is back.
     """
 
     permission_classes = [IsAuthenticated, CanManageDevices]
 
     def post(self, request):
-        devices = list(BiometricDevice.objects.all())
+        all_devices = list(BiometricDevice.objects.all())
+        devices = [device for device in all_devices if device.is_online]
+        offline_names = [device.name for device in all_devices if not device.is_online]
         if len(devices) < 2:
-            return Response({"detail": "Need at least two registered devices to sync."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "Need at least two devices online to sync." + (f" Offline right now: {', '.join(offline_names)}." if offline_names else "")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         device_by_serial = {device.serial_number: device for device in devices}
         all_serials = set(device_by_serial)
@@ -320,10 +332,15 @@ class DeviceSyncAllAPIView(APIView):
         ).select_related("employee"):
             identities_by_employee.setdefault(identity.employee_id, {})[identity.source_identifier] = identity
 
+        already_waiting = {
+            command.payload.get("employee_id")
+            for command in DeviceCommand.objects.filter(command_type="clone_enrollment", status__in=("pending", "sent"))
+        }
+
         queued = []
         for employee_id, identities_by_serial in identities_by_employee.items():
             missing_serials = all_serials - identities_by_serial.keys()
-            if not missing_serials:
+            if not missing_serials or employee_id in already_waiting:
                 continue
             source_serial, source_identity = next(iter(identities_by_serial.items()))
             source_device = device_by_serial[source_serial]
@@ -347,11 +364,12 @@ class DeviceSyncAllAPIView(APIView):
                 "to_devices": [device_by_serial[serial].name for serial in missing_serials],
             })
 
-        return Response({
-            "queued": len(queued),
-            "detail": f"Queued {len(queued)} sync operation(s). Each device processes its queue one relay at a time as it's online, so this runs in the background.",
-            "operations": queued,
-        })
+        detail = f"Queued {len(queued)} sync operation(s). Each device works through its queue one relay at a time, so this runs in the background."
+        if not queued:
+            detail = "Nothing to sync - every online device already has the same people (or their sync is already queued)."
+        if offline_names:
+            detail += f" Skipped offline device(s): {', '.join(offline_names)} - run Sync All again once they're back."
+        return Response({"queued": len(queued), "detail": detail, "operations": queued})
 
 
 class PersonInformationImportAPIView(APIView):
