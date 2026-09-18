@@ -13,7 +13,7 @@ const VISIBLE_COUNT = 8;
 
 const statusDisplay: Record<string, { label: string; className: string }> = {
   within_entitlement: { label: "Within Entitlement", className: "bg-emerald-100 text-emerald-800 border-emerald-300" },
-  excess: { label: "Excess - Flagged for Deduction", className: "bg-amber-100 text-amber-800 border-amber-300" },
+  excess: { label: "Not entitled - awaiting decision", className: "bg-amber-100 text-amber-800 border-amber-300" },
   rest_day: { label: "Not Entitled Today", className: "bg-slate-200 text-slate-700 border-slate-300" },
 };
 

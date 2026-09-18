@@ -1608,3 +1608,97 @@ class MealTicketVoidTests(TestCase):
 
         self.assertEqual((row["voided"], row["void_reason"]), (True, "Test scan"))
 
+
+class MealExcessDeclineTests(TestCase):
+    """Entitled tickets go straight through; a non-entitled one is decided.
+    Waive (cancel) keeps the ticket so the vendor is still paid; Decline voids it."""
+
+    def setUp(self):
+        self.day = date(2026, 9, 7)
+        self.employee = Employee.objects.create(employee_id="000010", first_name="Test", last_name="Worker")
+        EmployeeMealEntitlement.objects.create(employee=self.employee, tickets_per_work_day=1, effective_from=self.day, reason="test")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=self.day)
+        MealDevice.objects.create(name="Canteen", serial_number="MEAL001", active=True)
+        BiometricIdentity.objects.create(employee=self.employee, system="device", source_identifier="MEAL001", external_user_id="10")
+        shift = Shift.objects.create(name="Decline Test Day", start_time="07:00", end_time="19:00", is_overnight=False)
+        EmployeeRosterDay.objects.create(employee=self.employee, date=self.day, status=RosterDayStatus.WORK, shift=shift)
+        self.reviewer = get_user_model().objects.create_user(username="decline-reviewer", password="pw")
+        self.reviewer.user_permissions.add(Permission.objects.get(codename="review_meal_excess"), Permission.objects.get(codename="record_meal_operations"))
+        self.period = PayrollPeriod.objects.create(year=2026, month=9)
+        self.client = APIClient()
+        self.client.force_authenticate(self.reviewer)
+        self.entitled = self.scan("e1", 12)
+        self.extra = self.scan("e2", 13)
+        self.exception = MealExcessException.objects.get(employee=self.employee, work_date=self.day)
+
+    def scan(self, event_id, hour):
+        collection, _ = MealService.ingest(
+            system="device", source_identifier="MEAL001", device_serial_number="MEAL001", external_user_id="10",
+            external_event_id=event_id, timestamp=timezone.make_aware(datetime(2026, 9, 7, hour, 0)),
+        )
+        return collection
+
+    def vendor(self):
+        data = self.client.get(f"/api/meals/vendor/{self.period.pk}/").json()
+        return data["tickets_issued"], float(data["amount_owed"])
+
+    def test_the_entitled_ticket_goes_straight_through_and_only_the_extra_needs_a_decision(self):
+        self.assertEqual((self.entitled.status, self.extra.status), (MealCollectionStatus.WITHIN, MealCollectionStatus.EXCESS))
+        self.assertEqual((self.exception.status, self.exception.excess_quantity), (MealExcessStatus.PENDING, 1))
+        self.assertEqual(self.vendor(), (2, 1400.0))
+
+    def test_declining_voids_only_the_extra_ticket_so_the_vendor_is_not_billed_for_it(self):
+        MealService.decline(self.exception, self.reviewer, "Not authorised")
+
+        self.exception.refresh_from_db(); self.entitled.refresh_from_db(); self.extra.refresh_from_db()
+        self.assertEqual(self.exception.status, MealExcessStatus.DECLINED)
+        self.assertEqual(self.exception.comment, "Not authorised")
+        self.assertIsNone(self.entitled.voided_at)
+        self.assertIsNotNone(self.extra.voided_at)
+        self.assertIn("Not authorised", self.extra.void_reason)
+        self.assertEqual(self.vendor(), (1, 700.0))
+
+    def test_waiving_the_deduction_still_bills_the_vendor_for_the_extra_ticket(self):
+        MealService.cancel(self.exception, self.reviewer, "Authorised overtime meal")
+
+        self.assertEqual(self.vendor(), (2, 1400.0))
+
+    def test_declining_does_not_create_a_payroll_deduction(self):
+        MealService.decline(self.exception, self.reviewer, "Not authorised")
+        self.exception.refresh_from_db()
+        self.assertIsNone(self.exception.payroll_line_item)
+        self.assertEqual(PayrollLineItem.objects.count(), 0)
+
+    def test_a_reason_is_required_and_only_a_pending_excess_can_be_declined(self):
+        with self.assertRaisesMessage(ValueError, "reason is required"):
+            MealService.decline(self.exception, self.reviewer, " ")
+        MealService.decline(self.exception, self.reviewer, "Not authorised")
+        with self.assertRaisesMessage(ValueError, "already been decided"):
+            MealService.decline(self.exception, self.reviewer, "Again")
+
+    def test_a_declined_extra_frees_the_slot_so_a_later_real_scan_is_not_excess(self):
+        MealService.decline(self.exception, self.reviewer, "Not authorised")
+        MealService.void_collection(self.entitled, self.reviewer, "Wrong person scanned")
+
+        again = self.scan("e3", 15)
+
+        self.assertEqual((again.sequence_number, again.status), (1, MealCollectionStatus.WITHIN))
+
+    def test_the_decline_endpoint_needs_the_review_permission(self):
+        viewer = get_user_model().objects.create_user(username="decline-viewer", password="pw")
+        viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        self.client.force_authenticate(viewer)
+        self.assertEqual(self.client.post(f"/api/meals/excess/{self.exception.pk}/decline/", {"reason": "x"}, format="json").status_code, 403)
+
+        self.client.force_authenticate(self.reviewer)
+        self.assertEqual(self.client.post(f"/api/meals/excess/{self.exception.pk}/decline/", {"reason": ""}, format="json").status_code, 400)
+        ok = self.client.post(f"/api/meals/excess/{self.exception.pk}/decline/", {"reason": "Not authorised"}, format="json")
+        self.assertEqual((ok.status_code, ok.json()["status"]), (200, "declined"))
+
+    def test_operations_rows_say_which_tickets_have_an_excess_decision(self):
+        rows = {row["id"]: row for row in self.client.get("/api/meals/operations/").json()["collections"]}
+        self.assertEqual(rows[self.extra.pk]["excess_id"], self.exception.pk)
+        self.assertEqual(rows[self.extra.pk]["excess_status"], "pending")
+        self.assertEqual(rows[self.extra.pk]["status"], "excess")
+        self.assertEqual(rows[self.entitled.pk]["status"], "within_entitlement")
+

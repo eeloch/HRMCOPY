@@ -623,6 +623,31 @@ class MealService:
 
     @staticmethod
     @transaction.atomic
+    def decline(exception, actor, reason):
+        """Reject a non-entitled meal: the tickets beyond the employee's entitlement
+        are voided (so the vendor isn't billed for them) and nothing is deducted
+        from the employee. Contrast cancel(), which waives the deduction but leaves
+        the tickets standing, i.e. the company still pays the vendor."""
+        reason = reason.strip()
+        if not reason: raise ValueError("A reason is required to decline a meal excess.")
+        if exception.status != MealExcessStatus.PENDING: raise ValueError("This meal excess has already been decided.")
+        now = timezone.now()
+        excess_tickets = list(
+            MealCollection.objects.select_for_update()
+            .filter(employee=exception.employee, work_date=exception.work_date, voided_at__isnull=True)
+            .order_by("-event__timestamp")[:exception.excess_quantity]
+        )
+        for ticket in excess_tickets:
+            ticket.voided_at, ticket.voided_by, ticket.void_reason = now, actor, f"Excess declined: {reason}"
+            ticket.save(update_fields=["voided_at", "voided_by", "void_reason"])
+        exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.DECLINED, actor, now, reason
+        exception.save()
+        AuditService.log(event_type="meals.excess_declined", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.WARNING, title="Meal excess declined", description=f"{len(excess_tickets)} ticket(s) beyond entitlement declined; vendor not billed, no deduction.", metadata={"exception": exception.pk, "reason": reason, "tickets_voided": [t.pk for t in excess_tickets]})
+        for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_declined", title="Meal excess declined", message=f"{exception.employee.full_name}: {reason}", severity="warning", employee=exception.employee, related_url="/meals")
+        return exception
+
+    @staticmethod
+    @transaction.atomic
     def void_collection(collection, actor, reason):
         """Void a ticket that shouldn't count (a test or accidental scan).
 

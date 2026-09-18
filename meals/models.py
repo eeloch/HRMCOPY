@@ -99,6 +99,7 @@ class MealExcessStatus(models.TextChoices):
     APPROVED = "approved", "Approved"
     CANCELLED = "cancelled", "Cancelled"
     DEDUCTED = "deducted", "Deducted"
+    DECLINED = "declined", "Declined"
 
 
 class MealExcessException(models.Model):

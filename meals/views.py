@@ -338,6 +338,12 @@ class MealOperationsAPIView(APIView):
             .order_by("-created_at")
         )
 
+        shown = list(collections[:100])
+        excess_by_day = {
+            (x.employee_id, x.work_date): x
+            for x in MealExcessException.objects.filter(employee_id__in={c.employee_id for c in shown}, work_date__in={c.work_date for c in shown})
+        }
+
         return Response(
             {
                 "collections": [
@@ -354,8 +360,10 @@ class MealOperationsAPIView(APIView):
                         "status": x.status,
                         "voided": x.voided_at is not None,
                         "void_reason": x.void_reason,
+                        "excess_id": excess_by_day[(x.employee_id, x.work_date)].pk if (x.employee_id, x.work_date) in excess_by_day else None,
+                        "excess_status": excess_by_day[(x.employee_id, x.work_date)].status if (x.employee_id, x.work_date) in excess_by_day else None,
                     }
-                    for x in collections[:100]
+                    for x in shown
                 ],
                 "exceptions": [
                     {
@@ -377,6 +385,18 @@ class MealOperationsAPIView(APIView):
                 ],
             }
         )
+
+
+class MealExcessDeclineAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanReviewMealExcess]
+
+    def post(self, request, pk):
+        exception = get_object_or_404(MealExcessException, pk=pk)
+        try:
+            MealService.decline(exception, request.user, str(request.data.get("reason", "")))
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response({"id": exception.pk, "status": exception.status, "reviewer": exception.reviewer_id, "reviewed_at": exception.reviewed_at, "comment": exception.comment})
 
 
 class MealCollectionVoidAPIView(APIView):
