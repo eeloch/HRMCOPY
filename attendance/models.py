@@ -177,6 +177,32 @@ class BiometricDevice(models.Model):
     def __str__(self):
         return f"{self.name} - {self.serial_number}"
 
+    def free_enrollid(self, preferred=None):
+        """The user id to enroll someone under on this terminal.
+
+        Ids here are staff numbers (terminals were enrolled that way and the
+        reconcile step relies on it), so `preferred` - normally the employee's
+        numeric staff number, or their id on the device they were cloned from -
+        is used whenever it's free. Free means neither linked to anyone in HRM
+        nor present in the id list the terminal itself last reported, since
+        enrolling onto a taken id would overwrite whoever owns it. Otherwise
+        falls back to one past the highest known id.
+        """
+        from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
+        from employees.models import BiometricIdentity
+
+        taken = {
+            str(value) for value in BiometricIdentity.objects.filter(
+                system=IDENTITY_SYSTEM, source_identifier=self.serial_number,
+            ).values_list("external_user_id", flat=True)
+        }
+        latest = self.commands.filter(command_type="refresh_enrolled_ids", status="acked").order_by("-id").first()
+        if latest:
+            taken |= {str(value) for value in (latest.result.get("record") or [])}
+        if preferred is not None and preferred > 0 and str(preferred) not in taken:
+            return preferred
+        return max((int(value) for value in taken if value.isdigit()), default=0) + 1
+
 
 class AttendanceEvent(models.Model):
 

@@ -459,6 +459,39 @@ class DeviceCommandAPITests(TestCase):
         self.assertEqual(response.data["payload"]["enrollid"], 1)
         self.assertEqual(response.data["payload"]["name"], "Chika Nwosu")
 
+    def test_enroll_uses_the_staff_number_as_the_user_id_when_it_is_free(self):
+        """Terminals were enrolled with id == staff number and reconcile relies on
+        it, so HRM-side enrollment must not hand out 'highest + 1' instead."""
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="OTHER-DEVICE", external_user_id="1330")
+        staffer = Employee.objects.create(employee_id="001307", first_name="Umeadi", last_name="Emmanuella")
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="1330")
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": staffer.id, "biometric_type": "face"}, format="json")
+
+        self.assertEqual(response.data["payload"]["enrollid"], 1307)
+
+    def test_enroll_falls_back_to_the_next_free_id_when_the_staff_number_is_taken_on_the_terminal(self):
+        DeviceCommand.objects.create(
+            device=self.device, command_type="refresh_enrolled_ids", status="acked", payload={}, result={"record": ["1307", "1330"]},
+        )
+        staffer = Employee.objects.create(employee_id="001307", first_name="Umeadi", last_name="Emmanuella")
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": staffer.id, "biometric_type": "face"}, format="json")
+
+        self.assertEqual(response.data["payload"]["enrollid"], 1331)
+
+    def test_enroll_falls_back_to_the_next_free_id_when_the_staff_number_is_linked_to_someone_else(self):
+        other = Employee.objects.create(employee_id="EMP-777", first_name="Bola", last_name="Ade")
+        BiometricIdentity.objects.create(employee=other, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="1307")
+        staffer = Employee.objects.create(employee_id="001307", first_name="Umeadi", last_name="Emmanuella")
+        self.client.force_authenticate(self.manager)
+
+        response = self.client.post(self.url(), {"command_type": "enroll_user", "employee": staffer.id, "biometric_type": "face"}, format="json")
+
+        self.assertEqual(response.data["payload"]["enrollid"], 1308)
+
     def test_enroll_user_assigns_the_next_free_enrollid_after_existing_ones(self):
         BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier="AYTK14145399", external_user_id="7")
         other_employee = Employee.objects.create(employee_id="EMP-011", first_name="Tobi", last_name="Lawal")

@@ -186,16 +186,13 @@ class DeviceCommandListCreateAPIView(APIView):
         biometric_type = request.data.get("biometric_type", "face")
         if biometric_type not in BIOMETRIC_TYPES:
             return Response({"detail": "biometric_type must be 'face' or 'fingerprint'."}, status=status.HTTP_400_BAD_REQUEST)
-        enrollid = int(existing_identity.external_user_id) if existing_identity else DeviceCommandListCreateAPIView._next_free_enrollid(device)
+        staff_number = int(employee.employee_id) if employee.employee_id.isdigit() else None
+        enrollid = int(existing_identity.external_user_id) if existing_identity else device.free_enrollid(preferred=staff_number)
         return {"enrollid": enrollid, "employee_id": employee.id, "name": employee.full_name, "biometric_type": biometric_type}
 
     @staticmethod
     def _next_free_enrollid(device):
-        used_ids = BiometricIdentity.objects.filter(
-            system=IDENTITY_SYSTEM, source_identifier=device.serial_number,
-        ).values_list("external_user_id", flat=True)
-        numeric_ids = [int(value) for value in used_ids if value.isdigit()]
-        return max(numeric_ids, default=0) + 1
+        return device.free_enrollid()
 
 
 class DeviceReconcileEnrolledIdsAPIView(APIView):

@@ -355,22 +355,8 @@ class Command(BaseCommand):
 
     @staticmethod
     def _enrollid_for_target(device, preferred):
-        """The id to enroll someone under on `device`: the same id they have on the
-        source (ids here are staff numbers, and reconcile relies on that) unless
-        it's already taken there - by an identity HRM knows about *or* by anything
-        the terminal itself last reported - since pushing onto an existing id would
-        overwrite whoever owns it."""
-        from employees.models import BiometricIdentity
-
-        taken = {str(v) for v in BiometricIdentity.objects.filter(
-            system=IDENTITY_SYSTEM, source_identifier=device.serial_number,
-        ).values_list("external_user_id", flat=True)}
-        latest = DeviceCommand.objects.filter(device=device, command_type="refresh_enrolled_ids", status="acked").order_by("-id").first()
-        if latest:
-            taken |= {str(v) for v in (latest.result.get("record") or [])}
-        if preferred is not None and str(preferred) not in taken:
-            return preferred
-        return max((int(v) for v in taken if v.isdigit()), default=0) + 1
+        """Same id as on the source when free on the target - see BiometricDevice.free_enrollid."""
+        return device.free_enrollid(preferred=preferred)
 
     @staticmethod
     def _recover_interrupted_clones(serial_number):
@@ -390,13 +376,7 @@ class Command(BaseCommand):
 
     @staticmethod
     def _next_free_enrollid(device):
-        from employees.models import BiometricIdentity
-
-        used_ids = BiometricIdentity.objects.filter(
-            system=IDENTITY_SYSTEM, source_identifier=device.serial_number,
-        ).values_list("external_user_id", flat=True)
-        numeric_ids = [int(value) for value in used_ids if value.isdigit()]
-        return max(numeric_ids, default=0) + 1
+        return device.free_enrollid()
 
     @staticmethod
     def _mark_command_sent(command_id):
