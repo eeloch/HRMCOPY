@@ -200,14 +200,15 @@ class MealVendorPaymentListCreateAPIView(APIView):
         )
 
 
-class MealDeviceListCreateAPIView(APIView):
-    def get_permissions(self):
-        permission = (
-            CanManageMealConfiguration
-            if self.request.method == "POST"
-            else CanViewMealOperations
-        )
-        return [IsAuthenticated(), permission()]
+class MealDeviceListAPIView(APIView):
+    """Read-only: devices are registered on the Biometric Devices page
+    (purpose=meal_ticket) and mirrored here automatically - see
+    attendance.views.devices.sync_meal_device. There's deliberately no
+    create/update here, since a MealDevice with no matching BiometricDevice
+    is one the AiFace gateway can't route scans to.
+    """
+
+    permission_classes = [IsAuthenticated, CanViewMealOperations]
 
     def get(self, request):
         devices = MealDevice.objects.order_by("name")
@@ -215,24 +216,6 @@ class MealDeviceListCreateAPIView(APIView):
             "count": devices.count(),
             "results": MealDeviceSerializer(devices, many=True).data,
         })
-
-    def post(self, request):
-        serializer = MealDeviceSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        return Response(
-            MealDeviceSerializer(serializer.save()).data,
-            status=201,
-        )
-
-
-class MealDeviceDetailAPIView(APIView):
-    permission_classes = [IsAuthenticated, CanManageMealConfiguration]
-
-    def patch(self, request, pk):
-        device = get_object_or_404(MealDevice, pk=pk)
-        serializer = MealDeviceSerializer(device, data=request.data, partial=True)
-        serializer.is_valid(raise_exception=True)
-        return Response(MealDeviceSerializer(serializer.save()).data)
 
 
 class MealExcessCancelAPIView(APIView):

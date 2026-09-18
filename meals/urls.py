@@ -3,8 +3,7 @@ from django.urls import path
 from .bridge import MealVendorGatewayPunchBridgeAPIView
 from .views import (
     EmployeeMealsProfileAPIView,
-    MealDeviceDetailAPIView,
-    MealDeviceListCreateAPIView,
+    MealDeviceListAPIView,
     MealEntitlementListCreateAPIView,
     MealEntitlementRuleDetailAPIView,
     MealEntitlementRuleListCreateAPIView,
@@ -50,13 +49,8 @@ urlpatterns = [
     ),
     path(
         "devices/",
-        MealDeviceListCreateAPIView.as_view(),
+        MealDeviceListAPIView.as_view(),
         name="meal-devices",
-    ),
-    path(
-        "devices/<int:pk>/",
-        MealDeviceDetailAPIView.as_view(),
-        name="meal-device-detail",
     ),
     path(
         "operations/",

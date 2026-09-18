@@ -1285,19 +1285,35 @@ class MealWorkflowTests(TestCase):
         self.assertEqual(second_rate.status_code, 201)
         self.assertEqual(self.client.get("/api/meals/rates/").json()["count"], 3)
 
-        device = self.client.post(
+    def test_meal_devices_endpoint_is_read_only(self):
+        """Devices are only ever created via the Biometric Devices page (see
+        attendance.views.devices.sync_meal_device) - creating or editing one
+        directly here would make a MealDevice with no matching
+        BiometricDevice for the gateway to route scans to."""
+        self.actor.user_permissions.add(
+            Permission.objects.get(codename="manage_meal_configuration")
+        )
+        self.client.force_authenticate(self.actor)
+        device = MealDevice.objects.create(name="Canteen Scanner", serial_number="MEALDEV001")
+
+        listed = self.client.get("/api/meals/devices/")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["count"], 1)
+        self.assertEqual(listed.json()["results"][0]["serial_number"], "MEALDEV001")
+
+        create_attempt = self.client.post(
             "/api/meals/devices/",
-            {"name": "Configured Meal Device", "serial_number": "CONFIG001"},
+            {"name": "Orphaned Device", "serial_number": "NOPE001"},
             format="json",
         )
-        self.assertEqual(device.status_code, 201)
-        deactivated = self.client.patch(
-            f"/api/meals/devices/{device.json()['id']}/",
+        self.assertEqual(create_attempt.status_code, 405)
+
+        edit_attempt = self.client.patch(
+            f"/api/meals/devices/{device.pk}/",
             {"active": False},
             format="json",
         )
-        self.assertEqual(deactivated.status_code, 200)
-        self.assertFalse(deactivated.json()["active"])
+        self.assertEqual(edit_attempt.status_code, 404)
 
     def test_configuration_user_can_create_a_normal_entitlement(self):
         configuration_user = get_user_model().objects.create_user(

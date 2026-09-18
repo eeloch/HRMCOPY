@@ -5,9 +5,25 @@ from .models import MealDevice, MealTicketRate, MealEntitlementRule, EmployeeMea
 
 @admin.register(MealDevice)
 class MealDeviceAdmin(admin.ModelAdmin):
+    """Read-only: devices are registered from the Biometric Devices page
+    (purpose=meal_ticket) and mirrored here automatically - see
+    attendance.views.devices.sync_meal_device. Adding or editing a row
+    directly here would create one with no matching BiometricDevice, which
+    the AiFace gateway can't route scans to.
+    """
+
     list_display = ("name", "serial_number", "active", "created_at")
     list_filter = ("active",)
     search_fields = ("name", "serial_number")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(MealTicketRate)
