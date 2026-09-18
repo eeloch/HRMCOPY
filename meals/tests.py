@@ -8,6 +8,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from attendance.models import (
+    BiometricDevice,
     AttendanceException,
     DailyAttendance,
     EmployeeRosterDay,
@@ -1443,3 +1444,56 @@ class MealWorkflowTests(TestCase):
                 self.assertEqual(collection.rate_snapshot, Decimal("800.00"))
         historical = MealCollection.objects.get(event__external_event_id="RATE001")
         self.assertEqual(historical.rate_snapshot, Decimal("700.00"))
+
+
+class MealDeviceMirrorSelfHealingTests(TestCase):
+    """The Biometric Devices page is the source of truth for meal terminals; a
+    missing or deactivated MealDevice mirror must not make the terminal's scans
+    vanish as "Unknown meal device" (seen in production)."""
+
+    SERIAL = "AYTF25068946"
+
+    def setUp(self):
+        self.work_date = date(2026, 9, 7)
+        self.employee = Employee.objects.create(employee_id="000010", first_name="Test", last_name="Worker")
+        EmployeeMealEntitlement.objects.create(employee=self.employee, tickets_per_work_day=1, effective_from=self.work_date, reason="test")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=self.work_date)
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier=self.SERIAL, external_user_id="10")
+
+    def scan(self, serial=None):
+        serial = serial or self.SERIAL
+        return MealService.ingest(
+            system="vendor_flask_gateway", source_identifier=serial, device_serial_number=serial,
+            external_user_id="10", external_event_id="rec-1", timestamp=timezone.make_aware(datetime(2026, 9, 7, 12, 0)),
+        )
+
+    def test_a_registered_meal_terminal_whose_mirror_row_is_missing_still_records_the_scan(self):
+        BiometricDevice.objects.create(name="AI Meal Ticket", serial_number=self.SERIAL, location="x", device_type="factory", purpose="meal_ticket")
+        self.assertFalse(MealDevice.objects.exists())
+
+        _, created = self.scan()
+
+        self.assertTrue(created)
+        mirror = MealDevice.objects.get(serial_number=self.SERIAL)
+        self.assertTrue(mirror.active)
+        self.assertEqual(mirror.name, "AI Meal Ticket")
+
+    def test_a_deactivated_mirror_is_reactivated_for_a_registered_meal_terminal(self):
+        BiometricDevice.objects.create(name="AI Meal Ticket", serial_number=self.SERIAL, location="x", device_type="factory", purpose="meal_ticket")
+        MealDevice.objects.create(name="AI Meal Ticket", serial_number=self.SERIAL, active=False)
+
+        _, created = self.scan()
+
+        self.assertTrue(created)
+        self.assertTrue(MealDevice.objects.get(serial_number=self.SERIAL).active)
+
+    def test_a_serial_that_is_not_registered_at_all_is_still_rejected(self):
+        with self.assertRaisesMessage(ValueError, "Unknown meal device."):
+            self.scan()
+        self.assertFalse(MealDevice.objects.exists())
+
+    def test_an_attendance_terminal_cannot_post_meal_scans(self):
+        BiometricDevice.objects.create(name="Gate", serial_number=self.SERIAL, location="x", device_type="factory", purpose="attendance")
+        with self.assertRaisesMessage(ValueError, "Unknown meal device."):
+            self.scan()
+

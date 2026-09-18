@@ -11,6 +11,7 @@ from audit.models import AuditSeverity
 from audit.services import AuditService
 from attendance.models import (
     AttendanceException,
+    BiometricDevice,
     EmployeeRosterDay,
     RosterDayStatus,
     
@@ -522,7 +523,16 @@ class MealService:
     def ingest(cls, *, system, source_identifier, device_serial_number, external_user_id, external_event_id, timestamp, verification_type="unknown", raw_payload=None):
         if not timezone.is_aware(timestamp): raise ValueError("Meal timestamps must be timezone-aware.")
         device = MealDevice.objects.filter(serial_number=device_serial_number, active=True).first()
-        if not device: raise ValueError("Unknown meal device.")
+        if not device:
+            # The Biometric Devices page is the source of truth: the gateway already
+            # routed this scan here *because* the terminal is registered there with
+            # purpose=meal_ticket. Its MealDevice mirror can go missing (deleted by
+            # hand, or deactivated by a purpose change and back) - rebuild it rather
+            # than dropping every scan the terminal ever sends. A serial that isn't a
+            # registered meal terminal is still rejected.
+            registered = BiometricDevice.objects.filter(serial_number=device_serial_number, purpose="meal_ticket").first()
+            if not registered: raise ValueError("Unknown meal device.")
+            device, _ = MealDevice.objects.update_or_create(serial_number=device_serial_number, defaults={"name": registered.name, "active": True})
         identity = BiometricIdentity.objects.select_related("employee").filter(system=system, source_identifier=source_identifier, external_user_id=str(external_user_id), is_active=True).first()
         if not identity:
             revoked_identity = BiometricIdentity.objects.select_related("employee").filter(system=system, source_identifier=source_identifier, external_user_id=str(external_user_id), is_active=False).first()
