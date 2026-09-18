@@ -85,6 +85,12 @@ class MealCollection(models.Model):
     rate_snapshot = models.DecimalField(max_digits=12, decimal_places=2)
     status = models.CharField(max_length=30, choices=MealCollectionStatus.choices)
     created_at = models.DateTimeField(auto_now_add=True)
+    # A voided ticket (test scan, accidental scan) stays on record for audit but no
+    # longer counts: not toward the vendor's amount owed, the employee's daily
+    # sequence, or their excess. See MealService.void_collection.
+    voided_at = models.DateTimeField(null=True, blank=True)
+    voided_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="meal_collections_voided")
+    void_reason = models.TextField(blank=True)
     class Meta: ordering = ["-event__timestamp"]
 
 

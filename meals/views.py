@@ -170,6 +170,7 @@ class MealVendorPeriodAPIView(APIView):
         collections = MealCollection.objects.filter(
             work_date__gte=period.start_date,
             work_date__lte=period.end_date,
+            voided_at__isnull=True,
         )
         tickets_issued = collections.count()
         amount_owed = collections.aggregate(total=Sum("rate_snapshot"))["total"] or 0
@@ -351,6 +352,8 @@ class MealOperationsAPIView(APIView):
                         "sequence": x.sequence_number,
                         "rate": x.rate_snapshot,
                         "status": x.status,
+                        "voided": x.voided_at is not None,
+                        "void_reason": x.void_reason,
                     }
                     for x in collections[:100]
                 ],
@@ -374,6 +377,18 @@ class MealOperationsAPIView(APIView):
                 ],
             }
         )
+
+
+class MealCollectionVoidAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanReviewMealExcess]
+
+    def post(self, request, pk):
+        collection = get_object_or_404(MealCollection.objects.select_related("employee"), pk=pk)
+        try:
+            MealService.void_collection(collection, request.user, str(request.data.get("reason", "")))
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response({"id": collection.pk, "voided": True, "void_reason": collection.void_reason})
 
 
 class EmployeeMealsProfileAPIView(APIView):
@@ -478,6 +493,8 @@ class EmployeeMealsProfileAPIView(APIView):
                         "entitlement": x.entitlement_snapshot,
                         "rate": x.rate_snapshot,
                         "status": x.status,
+                        "voided": x.voided_at is not None,
+                        "void_reason": x.void_reason,
                     }
                     for x in collections
                 ],

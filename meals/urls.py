@@ -8,6 +8,7 @@ from .views import (
     MealEntitlementRuleDetailAPIView,
     MealEntitlementRuleListCreateAPIView,
     MealExcessApproveAPIView,
+    MealCollectionVoidAPIView,
     MealExcessCancelAPIView,
     MealOperationsAPIView,
     MealReviewRemindersAPIView,
@@ -66,6 +67,11 @@ urlpatterns = [
         "excess/<int:pk>/approve/",
         MealExcessApproveAPIView.as_view(),
         name="meal-excess-approve",
+    ),
+    path(
+        "collections/<int:pk>/void/",
+        MealCollectionVoidAPIView.as_view(),
+        name="meal-collection-void",
     ),
     path(
         "excess/<int:pk>/cancel/",

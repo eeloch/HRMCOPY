@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import { apiFetch, getAccessToken } from "@/lib/api";
 
-type Collection = { id: number; employee_name: string; work_date: string; timestamp: string; device: string; entitlement: number; sequence: number; rate: string; status: string };
+type Collection = { id: number; employee_name: string; work_date: string; timestamp: string; device: string; entitlement: number; sequence: number; rate: string; status: string; voided: boolean };
 
 const POLL_INTERVAL_MS = 4000;
 const VISIBLE_COUNT = 8;
@@ -38,7 +38,7 @@ export default function MealsLivePage() {
       if (response.status === 403) { setError("Your account does not have permission to view meal operations."); return; }
       if (!response.ok) throw new Error("Unable to load meal collections.");
       const data = await response.json();
-      setCollections((data.collections || []).slice(0, VISIBLE_COUNT));
+      setCollections(((data.collections || []) as Collection[]).filter((item) => !item.voided).slice(0, VISIBLE_COUNT));
       setError("");
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load meal collections.");

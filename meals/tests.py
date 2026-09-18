@@ -1497,3 +1497,114 @@ class MealDeviceMirrorSelfHealingTests(TestCase):
         with self.assertRaisesMessage(ValueError, "Unknown meal device."):
             self.scan()
 
+
+class MealTicketVoidTests(TestCase):
+    """Test/accidental scans must be removable from what the vendor is owed
+    without deleting the record, and without leaving a stale excess behind."""
+
+    def setUp(self):
+        self.day = date(2026, 9, 7)
+        self.employee = Employee.objects.create(employee_id="000010", first_name="Test", last_name="Worker")
+        EmployeeMealEntitlement.objects.create(employee=self.employee, tickets_per_work_day=1, effective_from=self.day, reason="test")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=self.day)
+        MealDevice.objects.create(name="Canteen", serial_number="MEAL001", active=True)
+        BiometricIdentity.objects.create(employee=self.employee, system="device", source_identifier="MEAL001", external_user_id="10")
+        self.reviewer = get_user_model().objects.create_user(username="void-reviewer", password="pw")
+        self.reviewer.user_permissions.add(Permission.objects.get(codename="review_meal_excess"), Permission.objects.get(codename="record_meal_operations"))
+        self.period = PayrollPeriod.objects.create(year=2026, month=9)
+        shift = Shift.objects.create(name="Void Test Day", start_time="07:00", end_time="19:00", is_overnight=False)
+        EmployeeRosterDay.objects.create(employee=self.employee, date=self.day, status=RosterDayStatus.WORK, shift=shift)
+        self.client = APIClient()
+
+    def scan(self, event_id, hour=12):
+        collection, _ = MealService.ingest(
+            system="device", source_identifier="MEAL001", device_serial_number="MEAL001", external_user_id="10",
+            external_event_id=event_id, timestamp=timezone.make_aware(datetime(2026, 9, 7, hour, 0)),
+        )
+        return collection
+
+    def owed(self):
+        self.client.force_authenticate(self.reviewer)
+        return self.client.get(f"/api/meals/vendor/{self.period.pk}/").json()
+
+    def test_a_voided_ticket_drops_out_of_the_vendor_total_but_stays_on_record(self):
+        collection = self.scan("e1")
+        self.assertEqual((self.owed()["tickets_issued"], float(self.owed()["amount_owed"])), (1, 700.0))
+
+        MealService.void_collection(collection, self.reviewer, "Test scan")
+
+        self.assertEqual((self.owed()["tickets_issued"], float(self.owed()["amount_owed"])), (0, 0.0))
+        collection.refresh_from_db()
+        self.assertIsNotNone(collection.voided_at)
+        self.assertEqual((collection.voided_by, collection.void_reason), (self.reviewer, "Test scan"))
+        self.assertTrue(MealCollection.objects.filter(pk=collection.pk).exists())
+
+    def test_voiding_the_only_over_entitlement_ticket_cancels_the_pending_excess(self):
+        self.scan("e1")
+        second = self.scan("e2", hour=13)
+        exception = MealExcessException.objects.get(employee=self.employee, work_date=self.day)
+        self.assertEqual((exception.status, exception.collected_quantity), (MealExcessStatus.PENDING, 2))
+
+        MealService.void_collection(second, self.reviewer, "Accidental scan")
+
+        exception.refresh_from_db()
+        self.assertEqual(exception.status, MealExcessStatus.CANCELLED)
+        self.assertIn("Accidental scan", exception.comment)
+
+    def test_voiding_one_of_several_excess_tickets_reduces_the_pending_excess(self):
+        self.scan("e1")
+        self.scan("e2", hour=13)
+        third = self.scan("e3", hour=14)
+
+        MealService.void_collection(third, self.reviewer, "Duplicate")
+
+        exception = MealExcessException.objects.get(employee=self.employee, work_date=self.day)
+        self.assertEqual((exception.status, exception.collected_quantity, exception.excess_quantity, exception.proposed_deduction), (MealExcessStatus.PENDING, 2, 1, Decimal("700.00")))
+
+    def test_a_voided_scan_does_not_use_up_the_employees_real_ticket_for_the_day(self):
+        test_scan = self.scan("e1")
+        MealService.void_collection(test_scan, self.reviewer, "Test scan")
+
+        real = self.scan("e2", hour=13)
+
+        self.assertEqual((real.sequence_number, real.status), (1, MealCollectionStatus.WITHIN))
+
+    def test_cannot_void_once_the_excess_was_approved_for_a_payroll_deduction(self):
+        self.scan("e1")
+        second = self.scan("e2", hour=13)
+        MealExcessException.objects.filter(employee=self.employee).update(status=MealExcessStatus.APPROVED)
+
+        with self.assertRaisesMessage(ValueError, "already approved"):
+            MealService.void_collection(second, self.reviewer, "Oops")
+        second.refresh_from_db()
+        self.assertIsNone(second.voided_at)
+
+    def test_a_reason_is_required_and_a_ticket_cannot_be_voided_twice(self):
+        collection = self.scan("e1")
+        with self.assertRaisesMessage(ValueError, "reason is required"):
+            MealService.void_collection(collection, self.reviewer, "   ")
+        MealService.void_collection(collection, self.reviewer, "Test scan")
+        with self.assertRaisesMessage(ValueError, "already been voided"):
+            MealService.void_collection(collection, self.reviewer, "Again")
+
+    def test_the_void_endpoint_needs_the_review_permission_and_a_reason(self):
+        collection = self.scan("e1")
+        viewer = get_user_model().objects.create_user(username="void-viewer", password="pw")
+        viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        self.client.force_authenticate(viewer)
+        self.assertEqual(self.client.post(f"/api/meals/collections/{collection.pk}/void/", {"reason": "x"}, format="json").status_code, 403)
+
+        self.client.force_authenticate(self.reviewer)
+        self.assertEqual(self.client.post(f"/api/meals/collections/{collection.pk}/void/", {"reason": ""}, format="json").status_code, 400)
+        ok = self.client.post(f"/api/meals/collections/{collection.pk}/void/", {"reason": "Test scan"}, format="json")
+        self.assertEqual((ok.status_code, ok.json()["voided"]), (200, True))
+
+    def test_the_operations_list_marks_voided_tickets(self):
+        collection = self.scan("e1")
+        MealService.void_collection(collection, self.reviewer, "Test scan")
+        self.client.force_authenticate(self.reviewer)
+
+        row = self.client.get("/api/meals/operations/").json()["collections"][0]
+
+        self.assertEqual((row["voided"], row["void_reason"]), (True, "Test scan"))
+
