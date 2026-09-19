@@ -129,3 +129,43 @@ class DeferredFundTests(TestCase):
         self.assertEqual(client.post(f"/api/deferred-funds/withdrawals/{wid}/pay/").json()["status"], "paid")
         client.force_authenticate(get_user_model().objects.create_user("nobody", password="pw"))
         self.assertEqual(client.get("/api/deferred-funds/").status_code, 403)
+
+
+class WithdrawalBankFileTests(TestCase):
+    def setUp(self):
+        self.hr = user_with("hr", "manage_deferred_funds")
+        self.boss = user_with("boss", "approve_deferred_withdrawal")
+        self.finance = user_with("fin", "pay_deferred_withdrawal")
+        self.client = APIClient()
+        self.client.force_authenticate(self.finance)
+
+    def approved(self, staff_id, opening, kind="partial", amount=None, account="2252037955", code="000015"):
+        employee = Employee.objects.create(employee_id=staff_id, first_name="C", last_name=staff_id, employment_type="contract", basic_salary=Decimal("100000"), bank_name="Zenith", account_number=account, bank_code=code)
+        acct = DeferredFundService.enrol(employee=employee, percent=Decimal("10"), opening_balance=Decimal(opening), actor=self.hr)
+        withdrawal = DeferredFundService.request_withdrawal(acct, kind=kind, amount=amount, actor=self.hr)
+        return DeferredFundService.approve(withdrawal, actor=self.boss)
+
+    def test_file_has_the_payroll_layout_and_full_release_uses_the_whole_balance(self):
+        import io
+        from openpyxl import load_workbook
+        part = self.approved("C1", "100000", amount=Decimal("25000"), code="14")
+        full = self.approved("C2", "80000", kind="final")
+        response = self.client.post("/api/deferred-funds/withdrawals/bank-upload/", {"ids": [part.pk, full.pk]}, format="json")
+        self.assertEqual(response.status_code, 200)
+        sheet = load_workbook(io.BytesIO(response.content)).active
+        self.assertEqual([c.value for c in sheet[1]], ["Account_Number", "Amount", "Bank_Codes", "Narration"])
+        self.assertEqual([c.value for c in sheet[2]], [2252037955, 25000, "000014", "Hello"])
+        self.assertEqual([c.value for c in sheet[3]], [2252037955, 80000, "000015", "Hello"])
+
+    def test_mark_paid_only_covers_people_in_the_file(self):
+        good = self.approved("C1", "50000", amount=Decimal("1000"))
+        bad = self.approved("C2", "50000", amount=Decimal("1000"), account="", code="")
+        self.assertEqual(self.client.post("/api/deferred-funds/withdrawals/mark-paid/", {"ids": [good.pk, bad.pk], "reference": "B1"}, format="json").json(), {"paid": 1})
+        good.refresh_from_db(); bad.refresh_from_db()
+        self.assertEqual((good.status, bad.status), ("paid", "approved"))
+        self.assertEqual(good.account.balance, Decimal("49000.00"))
+
+    def test_needs_the_pay_permission(self):
+        item = self.approved("C1", "50000", amount=Decimal("1000"))
+        self.client.force_authenticate(self.boss)
+        self.assertEqual(self.client.post("/api/deferred-funds/withdrawals/bank-upload/", {"ids": [item.pk]}, format="json").status_code, 403)

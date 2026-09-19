@@ -4,6 +4,7 @@ import { useEffect, useEffectEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
+import { AdvancePaymentModal } from "@/components/advances/AdvancePaymentModal";
 import { AppCard, MetricCard, PageHeader, Section } from "@/components/ui";
 import { apiFetch, getAccessToken, getCurrentUser, type CurrentUser } from "@/lib/api";
 
@@ -20,6 +21,7 @@ type Dialog =
   | { kind: "adjust"; account: Account }
   | { kind: "decide"; withdrawal: Withdrawal; action: "approve" | "decline" | "pay" | "cancel" };
 
+const PAY_PATHS = { preview: "/deferred-funds/withdrawals/bank-upload/preview/", download: "/deferred-funds/withdrawals/bank-upload/", markPaid: "/deferred-funds/withdrawals/mark-paid/" };
 const money = (value: string | number) => `₦${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const inputClass = "mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500";
 const badge: Record<string, string> = { requested: "bg-amber-100 text-amber-800", approved: "bg-blue-100 text-blue-800", declined: "bg-red-100 text-red-700", paid: "bg-emerald-100 text-emerald-800", cancelled: "bg-slate-200 text-slate-600" };
@@ -45,6 +47,8 @@ export default function DeferredFundsPage() {
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [ticked, setTicked] = useState<number[]>([]);
+  const [paying, setPaying] = useState(false);
   const [f, setF] = useState({ percent: "15", opening: "", amount: "", text: "", date: new Date().toISOString().slice(0, 10), full: false });
 
   const perms = user?.permissions;
@@ -121,6 +125,8 @@ export default function DeferredFundsPage() {
     return <div className="min-h-screen bg-slate-100"><Sidebar /><main className="ml-64 p-8"><AppCard><p className="p-8 text-center text-slate-600">{error || "Your account does not have access to deferred funds."}</p></AppCard></main></div>;
   }
 
+  const payable = withdrawals.filter((w) => w.status === "approved");
+  const chosen = ticked.filter((id) => payable.some((w) => w.id === id));
   const open_ = withdrawals.filter((w) => ["requested", "approved"].includes(w.status)).length;
   const title = dialog?.kind === "enrol" ? `Enrol ${dialog.person.full_name}` : dialog?.kind === "percent" ? `Change percentage - ${dialog.account.employee_name}` : dialog?.kind === "withdraw" ? `Withdrawal - ${dialog.account.employee_name}` : dialog?.kind === "adjust" ? `Adjust balance - ${dialog.account.employee_name}` : dialog?.kind === "decide" ? `${{ approve: "Approve", decline: "Decline", pay: "Pay out", cancel: "Cancel" }[dialog.action]} withdrawal - ${dialog.withdrawal.employee_name}` : "";
 
@@ -185,13 +191,22 @@ export default function DeferredFundsPage() {
         )}
 
         {tab === "withdrawals" && (
+          <>
+          {canPay && payable.length > 0 && (
+            <div className="mb-4 flex flex-wrap items-center gap-3 rounded-2xl border border-violet-200 bg-violet-50 p-4">
+              <p className="text-sm text-violet-900"><b>{payable.length}</b> approved withdrawal{payable.length === 1 ? "" : "s"} waiting for payment. Tick the ones you are paying now.</p>
+              <button type="button" onClick={() => setTicked(chosen.length === payable.length ? [] : payable.map((w) => w.id))} className="rounded-xl border border-violet-300 bg-white px-3 py-2 text-sm font-semibold text-violet-800">{chosen.length === payable.length ? "Untick all" : "Tick all"}</button>
+              <button type="button" disabled={chosen.length === 0} onClick={() => setPaying(true)} className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:bg-violet-300">Pay Selected ({chosen.length}) - Bank File</button>
+            </div>
+          )}
           <Section title="Withdrawals" subtitle="HR records, management approves, finance pays.">
             {withdrawals.length ? (
               <div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left">
-                <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3">Employee</th><th className="px-5 py-3">Request</th><th className="px-5 py-3">Status</th><th className="px-5 py-3">Trail</th><th className="px-5 py-3" /></tr></thead>
+                <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>{canPay && <th className="w-10 px-3 py-3" />}<th className="px-5 py-3">Employee</th><th className="px-5 py-3">Request</th><th className="px-5 py-3">Status</th><th className="px-5 py-3">Trail</th><th className="px-5 py-3" /></tr></thead>
                 <tbody className="divide-y divide-slate-100 align-top">
                   {withdrawals.map((w) => (
                     <tr key={w.id}>
+                      {canPay && <td className="px-3 py-4">{w.status === "approved" && <input type="checkbox" checked={chosen.includes(w.id)} onChange={(event) => setTicked(event.target.checked ? [...chosen, w.id] : chosen.filter((id) => id !== w.id))} aria-label={`Select ${w.employee_name}`} />}</td>}
                       <td className="px-5 py-4"><p className="font-semibold">{w.employee_name}</p><p className="text-sm text-slate-500">{w.employee_number} · holds {money(w.balance)}</p></td>
                       <td className="px-5 py-4"><p className="font-semibold">{w.amount ? money(w.amount) : "Whole balance"}</p><p className="text-sm text-slate-500">{w.kind_label}</p>{w.reason && <p className="mt-1 max-w-[220px] text-sm text-slate-500">{w.reason}</p>}</td>
                       <td className="px-5 py-4"><span className={`rounded-full px-3 py-1 text-xs font-semibold ${badge[w.status]}`}>{w.status_label}</span></td>
@@ -208,7 +223,10 @@ export default function DeferredFundsPage() {
               </table></div>
             ) : <p className="p-12 text-center text-slate-500">No withdrawals yet.</p>}
           </Section>
+          </>
         )}
+
+        {paying && <AdvancePaymentModal ids={chosen} paths={PAY_PATHS} noun="deferred fund withdrawal" afterPaid="the money comes off the balance" onClose={() => setPaying(false)} onPaid={(count) => { setPaying(false); setTicked([]); setFeedback(`${count} withdrawal${count === 1 ? "" : "s"} marked as paid and taken off the balance.`); void load(); }} />}
 
         {dialog && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">

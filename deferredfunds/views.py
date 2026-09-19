@@ -1,14 +1,19 @@
 from decimal import Decimal
 
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from audit.models import AuditSeverity
+from audit.services import AuditService
 from employees.models import Employee, EmploymentType
+from payroll.services.bank_upload import BANK_UPLOAD_NARRATION, bank_file, split_payable
 
-from .models import DeferredFundAccount, DeferredFundEntry, DeferredFundWithdrawal
+from .models import DeferredFundAccount, DeferredFundEntry, DeferredFundWithdrawal, WithdrawalKind, WithdrawalStatus
 from .serializers import AccountSerializer, AdjustSerializer, EnrolSerializer, EntrySerializer, PercentSerializer, WithdrawalActionSerializer, WithdrawalCreateSerializer, WithdrawalSerializer
 from .services import DeferredFundService
 
@@ -166,3 +171,83 @@ class WithdrawalCancelAPIView(WithdrawalActionAPIView):
 
 class WithdrawalPayAPIView(WithdrawalActionAPIView):
     action, needs = "pay", ("pay",)
+
+
+class BulkWithdrawalMixin:
+    """The ticked, approved withdrawals as a bank file, and marking them paid in one go."""
+
+    def get_permissions(self):
+        return [IsAuthenticated(), allow("pay")()]
+
+    def selected(self, request):
+        ids = request.data.get("ids")
+        if not isinstance(ids, list) or not ids or not all(isinstance(item, int) for item in ids):
+            return None, fail("Select at least one withdrawal.")
+        withdrawals = list(withdrawals_queryset().filter(pk__in=ids, status=WithdrawalStatus.APPROVED).order_by("account__employee__employee_id", "id"))
+        if not withdrawals:
+            return None, fail("None of the selected withdrawals is awaiting payment.")
+        return withdrawals, None
+
+    @staticmethod
+    def amount_of(withdrawal):
+        # A full release pays whatever is held at the time of payment.
+        return withdrawal.account.balance if withdrawal.kind == WithdrawalKind.FINAL else withdrawal.amount
+
+    def payable(self, withdrawals):
+        return split_payable((w.account.employee, self.amount_of(w)) for w in withdrawals)
+
+
+class WithdrawalBankPreviewAPIView(BulkWithdrawalMixin, APIView):
+    def post(self, request):
+        withdrawals, error = self.selected(request)
+        if error:
+            return error
+        rows, issues = self.payable(withdrawals)
+        return Response({
+            "narration": BANK_UPLOAD_NARRATION,
+            "ready_count": len(rows),
+            "ready_total": str(sum((row.amount for row in rows), Decimal("0.00"))),
+            "padded": [{"employee_id": r.employee_id, "employee_name": r.employee_name, "account_number": r.account_number} for r in rows if r.padded],
+            "issues": [{**issue.__dict__, "net_pay": str(issue.net_pay)} for issue in issues],
+        })
+
+
+class WithdrawalBankDownloadAPIView(BulkWithdrawalMixin, APIView):
+    def post(self, request):
+        withdrawals, error = self.selected(request)
+        if error:
+            return error
+        rows, issues = self.payable(withdrawals)
+        if not rows:
+            return fail("None of the selected people can be included yet - fix their bank details first.")
+        filename, content_type, content = bank_file(f"Deferred Fund {timezone.localdate().strftime('%d %b %Y')}", rows)
+        total = sum((row.amount for row in rows), Decimal("0.00"))
+        AuditService.log(
+            event_type="deferred_fund.bank_upload_exported", module="deferred_funds", actor=request.user, severity=AuditSeverity.INFO,
+            title="Deferred fund bank file created", description=f"Bank file for {len(rows)} deferred fund withdrawal(s), {total:,.2f} total; {len(issues)} left out.",
+            metadata={"withdrawal_ids": [w.pk for w in withdrawals], "payments": len(rows), "total": str(total), "left_out": len(issues)},
+        )
+        response = HttpResponse(content, content_type=content_type)
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+
+class WithdrawalBulkPayAPIView(BulkWithdrawalMixin, APIView):
+    def post(self, request):
+        withdrawals, error = self.selected(request)
+        if error:
+            return error
+        serializer = WithdrawalActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        paid = 0
+        for withdrawal in withdrawals:
+            # Only people who were in the bank file: anyone left out stays awaiting payment.
+            if not split_payable([(withdrawal.account.employee, self.amount_of(withdrawal))])[0]:
+                continue
+            try:
+                DeferredFundService.pay(withdrawal, actor=request.user, paid_on=data.get("paid_on"), reference=data.get("reference", ""))
+                paid += 1
+            except ValueError:
+                continue
+        return Response({"paid": paid})

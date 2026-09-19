@@ -14,7 +14,11 @@ function message(data: unknown, fallback: string) {
 }
 
 /** Bank file for the ticked advances, then (once the bank has them) mark them all paid in one go. */
-export function AdvancePaymentModal({ ids: selection, onClose, onPaid }: { ids: number[]; onClose: () => void; onPaid: (count: number) => void }) {
+type Paths = { preview: string; download: string; markPaid: string };
+const ADVANCE_PATHS: Paths = { preview: "/advances/bank-upload/preview/", download: "/advances/bank-upload/", markPaid: "/advances/mark-paid/" };
+
+/** `paths` and `noun` let the same window pay salary advances (default) or deferred fund withdrawals. */
+export function AdvancePaymentModal({ ids: selection, onClose, onPaid, paths = ADVANCE_PATHS, noun = "salary advance", afterPaid = "repayment starts" }: { ids: number[]; onClose: () => void; onPaid: (count: number) => void; paths?: Paths; noun?: string; afterPaid?: string }) {
   const [ids] = useState(selection); // the selection is fixed once the window opens
   const [preview, setPreview] = useState<Preview | null>(null);
   const [error, setError] = useState("");
@@ -27,7 +31,7 @@ export function AdvancePaymentModal({ ids: selection, onClose, onPaid }: { ids: 
     let cancelled = false;
     void (async () => {
       try {
-        const response = await apiFetch("/advances/bank-upload/preview/", { method: "POST", body: JSON.stringify({ ids }) });
+        const response = await apiFetch(paths.preview, { method: "POST", body: JSON.stringify({ ids }) });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(message(data, "Unable to prepare the bank file."));
         if (!cancelled) setPreview(data);
@@ -36,13 +40,13 @@ export function AdvancePaymentModal({ ids: selection, onClose, onPaid }: { ids: 
       }
     })();
     return () => { cancelled = true; };
-  }, [ids]);
+  }, [ids, paths.preview]);
 
   async function download() {
     setBusy(true);
     setError("");
     try {
-      const response = await apiFetch("/advances/bank-upload/", { method: "POST", body: JSON.stringify({ ids }) });
+      const response = await apiFetch(paths.download, { method: "POST", body: JSON.stringify({ ids }) });
       if (!response.ok) throw new Error(message(await response.json().catch(() => ({})), "Unable to create the bank file."));
       const disposition = response.headers.get("Content-Disposition") || "";
       const name = /filename="([^"]+)"/.exec(disposition)?.[1] || "Salary Advances - Bank Upload.xlsx";
@@ -66,7 +70,7 @@ export function AdvancePaymentModal({ ids: selection, onClose, onPaid }: { ids: 
     setBusy(true);
     setError("");
     try {
-      const response = await apiFetch("/advances/mark-paid/", { method: "POST", body: JSON.stringify({ ids, paid_on: paidOn, reference }) });
+      const response = await apiFetch(paths.markPaid, { method: "POST", body: JSON.stringify({ ids, paid_on: paidOn, reference }) });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(message(data, "Unable to mark these as paid."));
       onPaid(data.paid);
@@ -84,8 +88,8 @@ export function AdvancePaymentModal({ ids: selection, onClose, onPaid }: { ids: 
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
       <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-xl">
         <div className="border-b border-slate-200 p-6">
-          <h2 className="text-xl font-bold text-slate-900">Pay {ids.length} salary advance{ids.length === 1 ? "" : "s"}</h2>
-          <p className="mt-1 text-sm text-slate-500">Step 1: download the bank file for accounting to upload. Step 2: once the bank has them, mark them paid so repayment starts.</p>
+          <h2 className="text-xl font-bold text-slate-900">Pay {ids.length} {noun}{ids.length === 1 ? "" : "s"}</h2>
+          <p className="mt-1 text-sm text-slate-500">Step 1: download the bank file for accounting to upload. Step 2: once the bank has them, mark them paid so {afterPaid}.</p>
         </div>
         <div className="overflow-y-auto p-6">
           {error && <p className="mb-4 rounded-xl bg-red-50 p-4 text-sm text-red-700">{error}</p>}
@@ -113,7 +117,7 @@ export function AdvancePaymentModal({ ids: selection, onClose, onPaid }: { ids: 
 
               <div className="mt-4 rounded-xl border border-slate-200 p-4">
                 <p className="text-sm font-semibold text-slate-800">2. After the bank has paid: mark as paid</p>
-                <p className="mt-1 text-xs text-slate-500">This marks the {preview.ready_count} advance{preview.ready_count === 1 ? "" : "s"} in the file paid and starts their repayment through payroll.{fix.length > 0 ? " People not in the file are skipped." : ""}</p>
+                <p className="mt-1 text-xs text-slate-500">This marks the {preview.ready_count} {noun}{preview.ready_count === 1 ? "" : "s"} in the file paid.{fix.length > 0 ? " People not in the file are skipped." : ""}</p>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   <label className="text-sm font-semibold text-slate-700">Date paid<input type="date" value={paidOn} onChange={(event) => setPaidOn(event.target.value)} className={inputClass} /></label>
                   <label className="text-sm font-semibold text-slate-700">Bank reference (optional)<input value={reference} onChange={(event) => setReference(event.target.value)} className={inputClass} /></label>
