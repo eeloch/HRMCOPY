@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
 import { AppCard, PageHeader, Section, StatusBadge } from "@/components/ui";
+import { AccommodationTracker } from "@/components/accommodation/AccommodationTracker";
 import { apiFetch, getAccessToken, getCurrentUser, type CurrentUser } from "@/lib/api";
 
 type Employee = {
@@ -64,6 +65,10 @@ export default function EmployeesPage() {
 
     void loadEmployees();
     getCurrentUser().then(setCurrentUser).catch(() => {});
+    const timer = window.setTimeout(() => {
+      if (new URLSearchParams(window.location.search).get("tab") === "accommodation") setTab("accommodation");
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [router]);
 
   useEffect(() => {
@@ -234,6 +239,7 @@ export default function EmployeesPage() {
         )}
 
         {tab === "accommodation" && (
+          <>
           <Section title="Accommodation Status Report" subtitle="Active employees, by housing type and category">
             {loadingAccommodation || !accommodation ? (
               <div className="p-10">Loading...</div>
@@ -260,6 +266,8 @@ export default function EmployeesPage() {
               </div>
             )}
           </Section>
+          <AccommodationTracker />
+          </>
         )}
 
         {tab === "directory" && <>
