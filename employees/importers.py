@@ -86,6 +86,9 @@ HEADER_ALIASES = {
     "room_number": "hostel_room_number",
     "room_no": "hostel_room_number",
     "room": "hostel_room_number",
+    "room_allocated": "room_allocated",
+    "room_allocation": "room_allocated",
+    "allocated_room": "room_allocated",
 
     # Status
     "status": "status",
@@ -969,14 +972,33 @@ def validate_employee_rows(
         if not accommodation_value and not hostel_room:
             lives_in_hostel = False
 
+        # Where the person sleeps, worked out from the Accommodation and ROOM ALLOCATED columns:
+        # a room = in company accommodation (in that room and bed); YES with no room = living
+        # outside; NO = no accommodation. Left alone when the sheet has neither column.
+        room_allocated = normalize_value(row.get("room_allocated"))
+        has_accommodation_columns = "room_allocated" in row or "lives_in_company_hostel" in row
+        accommodation_placement = ""
+        if room_allocated:
+            from accommodation.services import parse_room_label
+
+            if parse_room_label(room_allocated):
+                accommodation_placement = "inside"
+                lives_in_hostel = True
+                hostel_room = room_allocated
+            else:
+                warnings.append(
+                    f"Room '{room_allocated}' was not understood (expected e.g. 'Room 301 - Bed 1'), so the room was not recorded."
+                )
+        if not accommodation_placement and has_accommodation_columns and accommodation_value:
+            if lives_in_hostel:
+                accommodation_placement = "outside"
+                lives_in_hostel = False
+            else:
+                accommodation_placement = "none"
+
         if hostel_room and not lives_in_hostel:
             warnings.append(
                 "Hostel room number was supplied but the row is not marked as company accommodation."
-            )
-
-        if lives_in_hostel and not hostel_room:
-            warnings.append(
-                "Employee is marked as company accommodation resident, but no room number was provided in the source file."
             )
 
         allowed_statuses = [
@@ -1062,6 +1084,8 @@ def validate_employee_rows(
             ),
             "lives_in_company_hostel": lives_in_hostel,
             "hostel_room_number": hostel_room,
+            "room_allocated": room_allocated,
+            "accommodation_placement": accommodation_placement,
             "status": status,
             "biometric_system": (
                 normalize_value(

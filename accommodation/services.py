@@ -54,7 +54,7 @@ def sync_employee_flags(employee):
 
 class AccommodationService:
     @staticmethod
-    def assign(employee, room, *, bed_number=None, actor=None):
+    def assign(employee, room, *, bed_number=None, actor=None, enforce_capacity=True):
         with transaction.atomic():
             if employee.status != "active":
                 raise ValueError("Only active staff can be given a room.")
@@ -65,7 +65,7 @@ class AccommodationService:
                 taken = RoomAssignment.objects.filter(room=room, bed_number=bed_number).exclude(employee=employee).select_related("employee").first()
                 if taken:
                     raise ValueError(f"Bed {bed_number} in {room.name} is already taken by {taken.employee.full_name}.")
-            elif room.capacity is not None and RoomAssignment.objects.filter(room=room).exclude(employee=employee).count() >= room.capacity:
+            elif enforce_capacity and room.capacity is not None and RoomAssignment.objects.filter(room=room).exclude(employee=employee).count() >= room.capacity:
                 raise ValueError(f"{room.name} is full ({room.capacity} of {room.capacity}).")
             existing = RoomAssignment.objects.filter(employee=employee).select_related("room__building").first()
             previous = f"{existing.room.building.name} {existing.room.name}" if existing else None
@@ -85,6 +85,36 @@ class AccommodationService:
                 AuditService.log(event_type="accommodation.unassigned", module="accommodation", employee=employee, actor=actor, severity=AuditSeverity.INFO, title="Room vacated", description=f"{employee.full_name} left {label}.")
             employee = Employee.objects.get(pk=employee.pk)
             Employee.objects.filter(pk=employee.pk).update(lives_in_company_hostel=False, hostel_room_number="", lives_in_external_accommodation=outside, external_accommodation_address="" if not outside else employee.external_accommodation_address)
+
+
+BUILDING_ORDER = [MAIN_HOSTEL, "Lodge 1", "Lodge 2", "Security Quarters", "Admin"]
+
+
+def apply_import_placement(employee, placement, room_label, *, actor=None):
+    """Place one employee as the Bulk Import's Accommodation / ROOM ALLOCATED columns say.
+    Returns what happened: inside, inside_no_bed, vacated, outside or none (None = left alone)."""
+    if not placement:
+        return None
+    parsed = parse_room_label(room_label) if room_label else None
+    if placement == "inside" and parsed:
+        building_name, room_name, bed = parsed
+        building, _ = Building.objects.get_or_create(name=building_name, defaults={"kind": BuildingKind.COMPANY, "sort_order": BUILDING_ORDER.index(building_name) if building_name in BUILDING_ORDER else 50})
+        room, created = Room.objects.get_or_create(building=building, name=room_name, defaults={"capacity": bed, "capacity_estimated": True})
+        # A room's size is a guess from the highest bed seen until someone sets it.
+        if not created and room.capacity_estimated and (room.capacity is None or bed > room.capacity):
+            room.capacity = bed
+            room.save(update_fields=["capacity"])
+        if employee.status != "active":
+            AccommodationService.unassign(employee, actor=actor)  # they have left: the bed is free again
+            return "vacated"
+        try:
+            AccommodationService.assign(employee, room, bed_number=bed, actor=actor)
+            return "inside"
+        except ValueError:
+            AccommodationService.assign(employee, room, actor=actor, enforce_capacity=False)  # bed already taken: place without a bed number
+            return "inside_no_bed"
+    AccommodationService.unassign(employee, actor=actor, outside=placement == "outside" and employee.status == "active")
+    return "outside" if placement == "outside" else "none"
 
 
 @dataclass

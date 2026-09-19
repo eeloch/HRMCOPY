@@ -44,6 +44,8 @@ type ImportRow = {
 
     lives_in_company_hostel: boolean;
     hostel_room_number: string;
+    room_allocated?: string;
+    accommodation_placement?: string;
 
     status: string;
 
@@ -345,6 +347,17 @@ export default function EmployeeImportPage() {
       if (updated) parts.push(`${updated} existing employee${updated === 1 ? "" : "s"} updated`);
       if (skipped) parts.push(`${skipped} row${skipped === 1 ? "" : "s"} skipped due to errors`);
 
+      const stay = data.accommodation;
+      if (stay) {
+        const placed = (stay.inside ?? 0) + (stay.inside_no_bed ?? 0);
+        const accommodationParts = [];
+        if (placed) accommodationParts.push(`${placed} placed in rooms`);
+        if (stay.outside) accommodationParts.push(`${stay.outside} living outside`);
+        if (stay.none) accommodationParts.push(`${stay.none} with no accommodation`);
+        if (stay.vacated) accommodationParts.push(`${stay.vacated} beds freed`);
+        if (accommodationParts.length) parts.push(`accommodation: ${accommodationParts.join(", ")}`);
+      }
+
       setImportMessage(
         `${parts.join(", ") || "No changes were needed"}. Redirecting to Employees...`
       );
@@ -620,6 +633,22 @@ export default function EmployeeImportPage() {
     ).length ?? 0;
 
 
+  const insideCount =
+    preview?.results.filter(
+      (row) => row.valid && row.data.accommodation_placement === "inside"
+    ).length ?? 0;
+
+  const outsideCount =
+    preview?.results.filter(
+      (row) => row.valid && row.data.accommodation_placement === "outside"
+    ).length ?? 0;
+
+  const noAccommodationCount =
+    preview?.results.filter(
+      (row) => row.valid && row.data.accommodation_placement === "none"
+    ).length ?? 0;
+
+
   const canImport =
     (preview?.can_import === true || (skipInvalid && (preview?.valid_rows ?? 0) > 0)) &&
     !uploading &&
@@ -884,6 +913,25 @@ export default function EmployeeImportPage() {
                   exitDateSetCount
                 }
               />
+
+              {(insideCount + outsideCount + noAccommodationCount) > 0 && (
+                <>
+                  <SummaryCard
+                    label="Placed in a Company Room"
+                    value={insideCount}
+                  />
+
+                  <SummaryCard
+                    label="Living Outside (no room)"
+                    value={outsideCount}
+                  />
+
+                  <SummaryCard
+                    label="No Accommodation"
+                    value={noAccommodationCount}
+                  />
+                </>
+              )}
 
             </div>
 

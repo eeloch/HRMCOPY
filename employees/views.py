@@ -561,6 +561,7 @@ class EmployeeImportAPIView(APIView):
 
         serializers = []
         serialization_errors = []
+        placements = {}
 
         for item in rows_to_import:
             existing_id = item["data"].get("existing_employee_id")
@@ -596,6 +597,7 @@ class EmployeeImportAPIView(APIView):
                 continue
 
             serializers.append(serializer)
+            placements[id(serializer)] = (row_data.get("accommodation_placement"), row_data.get("room_allocated"))
 
         if serialization_errors and (not skip_invalid or not serializers):
             return Response(
@@ -618,13 +620,21 @@ class EmployeeImportAPIView(APIView):
         updated_count = 0
         saved_employees = []
 
+        from accommodation.services import apply_import_placement
+
+        accommodation = {"inside": 0, "inside_no_bed": 0, "outside": 0, "none": 0, "vacated": 0}
         for serializer in serializers:
             is_update = serializer.instance is not None
-            saved_employees.append(serializer.save())
+            employee = serializer.save()
+            saved_employees.append(employee)
             if is_update:
                 updated_count += 1
             else:
                 created_count += 1
+            placement, room_label = placements.get(id(serializer), (None, None))
+            outcome = apply_import_placement(employee, placement, room_label, actor=request.user)
+            if outcome:
+                accommodation[outcome] += 1
 
         incomplete_employees = [
             employee
@@ -647,6 +657,7 @@ class EmployeeImportAPIView(APIView):
                     "skipped": len(skipped_rows),
                     "failed": 0,
                 },
+                "accommodation": accommodation,
                 "errors": skipped_rows,
             },
             status=status.HTTP_201_CREATED,
