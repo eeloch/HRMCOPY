@@ -26,6 +26,9 @@ MANAGED_PERMISSIONS = [
     {"codename": "manage_offence_configuration", "app_label": "offences", "label": "Manage offence types", "group": "Offences"},
     {"codename": "record_ppe_issue", "app_label": "ppe", "label": "Record PPE issues", "group": "PPE"},
     {"codename": "review_ppe_deduction", "app_label": "ppe", "label": "Review PPE deductions", "group": "PPE"},
+    {"codename": "record_salary_advance", "app_label": "advances", "label": "Record salary advance requests", "group": "Salary Advances"},
+    {"codename": "approve_salary_advance", "app_label": "advances", "label": "Approve or decline salary advances", "group": "Salary Advances"},
+    {"codename": "pay_salary_advance", "app_label": "advances", "label": "Pay out approved salary advances", "group": "Salary Advances"},
     {"codename": "view_documents", "app_label": "documents", "label": "View employee documents", "group": "Documents"},
     {"codename": "manage_documents", "app_label": "documents", "label": "Upload & delete employee documents", "group": "Documents"},
 ]

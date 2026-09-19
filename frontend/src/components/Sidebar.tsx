@@ -69,6 +69,10 @@ const menu: MenuItem[] = [
     href: "/ppe",
   },
   {
+    label: "Salary Advances",
+    href: "/advances",
+  },
+  {
     label: "Meals",
     href: "/meals",
   },

@@ -29,6 +29,9 @@ export type CurrentUser = {
     review_employee_offences: boolean;
     manage_offence_configuration: boolean;
     view_bank_details: boolean;
+    record_salary_advance: boolean;
+    approve_salary_advance: boolean;
+    pay_salary_advance: boolean;
   };
 };
 

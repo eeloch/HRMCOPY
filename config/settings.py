@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     "audit",
     "notifications",
     "ppe",
+    "advances",
     "meals",
     "offences",
 ]

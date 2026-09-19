@@ -42,6 +42,7 @@ def generate_payroll_for_period(period, *, actor=None):
         # Deductions accepted/approved before this month's payroll existed (meal
         # excess, offence punishments, PPE) land here, in that month's salary. Deferred
         # imports: meals and offences import payroll at module load.
+        from advances.services import AdvanceService
         from meals.services import MealService
         from offences.services import OffenceService
         from ppe.services import PPEDeductionService
@@ -50,6 +51,7 @@ def generate_payroll_for_period(period, *, actor=None):
             MealService.apply_accepted_excess_for_period(period)
             + OffenceService.apply_approved_offences_for_period(period)
             + PPEDeductionService.apply_approved_for_period(period)
+            + AdvanceService.apply_for_period(period)
         )
 
         if summary.created:

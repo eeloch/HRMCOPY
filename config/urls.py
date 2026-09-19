@@ -99,6 +99,7 @@ urlpatterns = [
         include("notifications.urls"),
     ),
 
+    path("api/advances/", include("advances.urls")),
     path(
         "api/ppe/",
         include("ppe.urls"),
