@@ -87,6 +87,33 @@ class AccommodationService:
             Employee.objects.filter(pk=employee.pk).update(lives_in_company_hostel=False, hostel_room_number="", lives_in_external_accommodation=outside, external_accommodation_address="" if not outside else employee.external_accommodation_address)
 
 
+SEQUENCE_NOTE = "Added to keep the room numbers in sequence. Set its capacity, or close it if it does not exist."
+NUMBERED_ROOM = re.compile(r"^(?P<prefix>\D*?)(?P<number>\d+)$")
+
+
+def fill_room_sequence(building=None):
+    """Add the empty rooms missing from a run of consecutive room numbers, so 001, 002, 006 becomes
+    001 ... 006. A run is one floor of one style of name (Room 001-011, Room 301-314, Rm 003-011).
+    Numbers are only filled between two rooms that exist, never before the first or after the last.
+    Returns the names added."""
+    added = []
+    for current in ([building] if building else list(Building.objects.all())):
+        groups = defaultdict(dict)
+        for room in current.rooms.all():
+            match = NUMBERED_ROOM.match(room.name)
+            if match:
+                number, width = int(match.group("number")), len(match.group("number"))
+                groups[(match.group("prefix"), width, number // 100)][number] = room
+        for (prefix, width, _floor), rooms in groups.items():
+            for number in range(min(rooms), max(rooms) + 1):
+                if number not in rooms:
+                    name = f"{prefix}{number:0{width}d}"
+                    _room, created = Room.objects.get_or_create(building=current, name=name, defaults={"capacity": None, "notes": SEQUENCE_NOTE})
+                    if created:
+                        added.append(f"{current.name} {name}")
+    return added
+
+
 BUILDING_ORDER = [MAIN_HOSTEL, "Lodge 1", "Lodge 2", "Security Quarters", "Admin"]
 
 
@@ -133,6 +160,7 @@ class ImportReport:
     bed_conflicts: list = field(default_factory=list)
     mixed_gender_rooms: list = field(default_factory=list)
     freed_beds_from_inactive: int = 0
+    rooms_added_for_sequence: list = field(default_factory=list)
 
     def as_dict(self):
         return self.__dict__.copy()
@@ -235,6 +263,7 @@ def import_workbook(file, *, dry_run, actor=None):
                 AccommodationService.unassign(employee, actor=actor, outside=False)
                 report.no_accommodation += 1
         report.mixed_gender_rooms = [f"{b} {r}" for (b, r), g in genders.items() if len(g) > 1]
+        report.rooms_added_for_sequence = fill_room_sequence()
         if not dry_run:
             AuditService.log(event_type="accommodation.imported", module="accommodation", actor=actor, severity=AuditSeverity.INFO, title="Accommodation spreadsheet imported", description=f"{report.placed_inside} placed in rooms, {report.outside_unplaced} outside, {report.no_accommodation} with none.", metadata=report.as_dict() | {"unmatched_ids": report.unmatched_ids[:50]})
         else:

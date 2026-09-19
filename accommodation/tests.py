@@ -149,3 +149,36 @@ class AssignAndOverviewTests(TestCase):
         outsider = get_user_model().objects.create_user("outsider", password="pw")
         client.force_authenticate(outsider)
         self.assertEqual(client.get("/api/accommodation/").status_code, 403)
+
+
+class RoomSequenceTests(TestCase):
+    def rooms(self, building, names):
+        for name in names:
+            Room.objects.create(building=building, name=name, capacity=4)
+
+    def test_gaps_inside_a_run_are_filled_with_empty_rooms_in_order(self):
+        from .services import fill_room_sequence
+        hostel = Building.objects.create(name="Main Hostel")
+        self.rooms(hostel, ["Room 001", "Room 002", "Room 006", "Room 301", "Room 304"])
+        added = fill_room_sequence()
+        self.assertEqual(added, ["Main Hostel Room 003", "Main Hostel Room 004", "Main Hostel Room 005", "Main Hostel Room 302", "Main Hostel Room 303"])
+        names = [r["name"] for r in build_overview()["buildings"][0]["rooms"]]
+        self.assertEqual(names, ["Room 001", "Room 002", "Room 003", "Room 004", "Room 005", "Room 006", "Room 301", "Room 302", "Room 303", "Room 304"])
+        self.assertIsNone(Room.objects.get(name="Room 003").capacity)
+
+    def test_it_never_invents_rooms_before_the_first_or_after_the_last_and_keeps_floors_apart(self):
+        from .services import fill_room_sequence
+        lodge = Building.objects.create(name="Lodge 2")
+        self.rooms(lodge, ["Rm003", "Rm005", "Rm101"])
+        self.assertEqual(fill_room_sequence(), ["Lodge 2 Rm004"])
+        self.assertFalse(Room.objects.filter(name__in=["Rm001", "Rm002", "Rm102", "Rm006", "Rm050"]).exists())
+
+    def test_running_it_twice_adds_nothing_more_and_closed_rooms_stay_out_of_the_bed_count(self):
+        from .services import fill_room_sequence
+        hostel = Building.objects.create(name="Main Hostel")
+        self.rooms(hostel, ["Room 001", "Room 003"])
+        fill_room_sequence()
+        self.assertEqual(fill_room_sequence(), [])
+        Room.objects.filter(name="Room 002").update(active=False)
+        overview = build_overview()
+        self.assertEqual(overview["summary"]["beds_total"], 8)

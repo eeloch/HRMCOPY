@@ -635,6 +635,10 @@ class EmployeeImportAPIView(APIView):
             outcome = apply_import_placement(employee, placement, room_label, actor=request.user)
             if outcome:
                 accommodation[outcome] += 1
+        if any(accommodation.values()):
+            from accommodation.services import fill_room_sequence
+
+            fill_room_sequence()
 
         incomplete_employees = [
             employee
