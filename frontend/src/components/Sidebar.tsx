@@ -74,6 +74,10 @@ const menu: MenuItem[] = [
     href: "/advances",
   },
   {
+    label: "Accommodation",
+    href: "/accommodation",
+  },
+  {
     label: "Meals",
     href: "/meals",
   },

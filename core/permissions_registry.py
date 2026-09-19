@@ -33,6 +33,8 @@ MANAGED_PERMISSIONS = [
     {"codename": "manage_deferred_funds", "app_label": "deferredfunds", "label": "Enrol staff, set percentages, record withdrawals", "group": "Deferred Funds"},
     {"codename": "approve_deferred_withdrawal", "app_label": "deferredfunds", "label": "Approve or decline deferred fund withdrawals", "group": "Deferred Funds"},
     {"codename": "pay_deferred_withdrawal", "app_label": "deferredfunds", "label": "Pay out deferred fund withdrawals", "group": "Deferred Funds"},
+    {"codename": "view_accommodation", "app_label": "accommodation", "label": "View accommodation", "group": "Accommodation"},
+    {"codename": "manage_accommodation", "app_label": "accommodation", "label": "Manage rooms and place staff in them", "group": "Accommodation"},
     {"codename": "view_documents", "app_label": "documents", "label": "View employee documents", "group": "Documents"},
     {"codename": "manage_documents", "app_label": "documents", "label": "Upload & delete employee documents", "group": "Documents"},
 ]
