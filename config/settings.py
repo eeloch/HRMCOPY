@@ -77,6 +77,7 @@ INSTALLED_APPS = [
     "advances",
     "deferredfunds",
     "accommodation",
+    "bonuses",
     "meals",
     "offences",
 ]

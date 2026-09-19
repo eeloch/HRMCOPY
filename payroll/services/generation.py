@@ -43,6 +43,7 @@ def generate_payroll_for_period(period, *, actor=None):
         # excess, offence punishments, PPE) land here, in that month's salary. Deferred
         # imports: meals and offences import payroll at module load.
         from advances.services import AdvanceService
+        from bonuses.services import BonusService
         from deferredfunds.services import DeferredFundService
         from meals.services import MealService
         from offences.services import OffenceService
@@ -53,6 +54,7 @@ def generate_payroll_for_period(period, *, actor=None):
             + OffenceService.apply_approved_offences_for_period(period)
             + PPEDeductionService.apply_approved_for_period(period)
             + AdvanceService.apply_for_period(period)
+            + BonusService.apply_for_period(period)
             + DeferredFundService.apply_for_period(period)
         )
 

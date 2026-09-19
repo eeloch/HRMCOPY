@@ -63,6 +63,7 @@ const menu: MenuItem[] = [
     children: [
       { label: "Payslips", href: "/payslips" },
       { label: "Deferred Funds", href: "/deferred-funds" },
+      { label: "Bonuses", href: "/bonuses" },
     ],
   },
   {

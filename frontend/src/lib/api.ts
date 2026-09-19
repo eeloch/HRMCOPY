@@ -38,6 +38,9 @@ export type CurrentUser = {
     pay_deferred_withdrawal: boolean;
     view_accommodation: boolean;
     manage_accommodation: boolean;
+    view_bonuses: boolean;
+    record_bonus: boolean;
+    approve_bonus: boolean;
   };
 };
 
