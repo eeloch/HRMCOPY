@@ -28,9 +28,16 @@ class Building(models.Model):
         return self.name
 
 
+class RoomGender(models.TextChoices):
+    MALE = "male", "Male"
+    FEMALE = "female", "Female"
+
+
 class Room(models.Model):
     building = models.ForeignKey(Building, on_delete=models.PROTECT, related_name="rooms")
     name = models.CharField(max_length=60)
+    # Which floor the room is on: men's rooms and women's rooms are kept apart.
+    gender = models.CharField(max_length=10, choices=RoomGender.choices, blank=True, default="")
     # How many people the room takes. Empty means not known yet.
     capacity = models.PositiveSmallIntegerField(null=True, blank=True)
     capacity_estimated = models.BooleanField(default=False)

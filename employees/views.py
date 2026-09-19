@@ -622,7 +622,7 @@ class EmployeeImportAPIView(APIView):
 
         from accommodation.services import apply_import_placement
 
-        accommodation = {"inside": 0, "inside_no_bed": 0, "outside": 0, "none": 0, "vacated": 0}
+        accommodation = {"inside": 0, "inside_no_bed": 0, "unknown_room": 0, "gender_mismatch": 0, "outside": 0, "none": 0, "vacated": 0}
         for serializer in serializers:
             is_update = serializer.instance is not None
             employee = serializer.save()
@@ -635,10 +635,6 @@ class EmployeeImportAPIView(APIView):
             outcome = apply_import_placement(employee, placement, room_label, actor=request.user)
             if outcome:
                 accommodation[outcome] += 1
-        if any(accommodation.values()):
-            from accommodation.services import fill_room_sequence
-
-            fill_room_sequence()
 
         incomplete_employees = [
             employee

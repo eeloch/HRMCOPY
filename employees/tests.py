@@ -656,13 +656,17 @@ class SalaryVisibilityBulkImportTests(APITestCase):
 
 
 class BulkImportAccommodationTests(APITestCase):
-    """The Accommodation and ROOM ALLOCATED columns place people through the normal Bulk Import."""
+    """The Accommodation and ROOM ALLOCATED columns place people through the normal Bulk Import.
+    Rooms come from the accommodation tracker, so the import never creates one."""
 
     HEADER = "employee_id,first_name,last_name,status,accommodation,room allocated\n"
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="acc-importer", password="test-password")
         self.client.force_authenticate(user=self.user)
+        from accommodation.models import Building, Room
+        hostel = Building.objects.create(name="Main Hostel")
+        Room.objects.create(building=hostel, name="Room 301", capacity=4)
 
     def upload(self, rows, path="/api/employees/import/", **extra):
         payload = {"file": SimpleUploadedFile("staff.csv", (self.HEADER + rows).encode("utf-8"), content_type="text/csv"), **extra}
@@ -675,19 +679,25 @@ class BulkImportAccommodationTests(APITestCase):
             "000003,Chi,Three,active,NO,\n"
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
-        self.assertEqual(response.data["accommodation"], {"inside": 1, "inside_no_bed": 0, "outside": 1, "none": 1, "vacated": 0})
+        self.assertEqual(response.data["accommodation"], {"inside": 1, "inside_no_bed": 0, "unknown_room": 0, "gender_mismatch": 0, "outside": 1, "none": 1, "vacated": 0})
         one, two, three = (Employee.objects.get(employee_id=n) for n in ("000001", "000002", "000003"))
-        self.assertEqual((one.room_assignment.room.name, one.room_assignment.bed_number, one.room_assignment.room.building.name), ("Room 301", 1, "Main Hostel"))
+        self.assertEqual((one.room_assignment.room.name, one.room_assignment.bed_number), ("Room 301", 1))
         self.assertTrue(one.lives_in_company_hostel and not one.lives_in_external_accommodation)
         self.assertTrue(two.lives_in_external_accommodation and not two.lives_in_company_hostel)
         self.assertFalse(three.lives_in_company_hostel or three.lives_in_external_accommodation)
 
-    def test_someone_who_has_left_frees_their_bed_but_the_room_keeps_its_size(self):
+    def test_a_room_that_does_not_exist_is_not_created(self):
+        from accommodation.models import Room
+        response = self.upload("000001,Ada,One,active,YES,Room 999 - Bed 1\n")
+        self.assertEqual(response.data["accommodation"]["unknown_room"], 1)
+        self.assertFalse(Room.objects.filter(name="Room 999").exists())
+        self.assertTrue(Employee.objects.get(employee_id="000001").lives_in_company_hostel)
+
+    def test_someone_who_has_left_frees_their_bed(self):
+        from accommodation.models import RoomAssignment
         self.upload("000001,Ada,One,active,YES,Room 301 - Bed 1\n")
-        self.upload("000001,Ada,One,inactive,YES,Room 301 - Bed 1\n000009,Zed,Nine,inactive,YES,Room 301 - Bed 4\n", update_existing="true")
-        from accommodation.models import Room, RoomAssignment
+        self.upload("000001,Ada,One,inactive,YES,Room 301 - Bed 1\n", update_existing="true")
         self.assertFalse(RoomAssignment.objects.exists())
-        self.assertEqual(Room.objects.get(name="Room 301").capacity, 4)
 
     def test_a_sheet_without_accommodation_columns_leaves_placement_alone(self):
         self.upload("000001,Ada,One,active,YES,Room 301 - Bed 1\n")
@@ -704,6 +714,11 @@ class BulkImportAccommodationTests(APITestCase):
     def test_the_preview_says_what_will_happen_and_changes_nothing(self):
         response = self.upload("000001,Ada,One,active,YES,Room 301 - Bed 1\n000002,Bayo,Two,active,YES,\n", path="/api/employees/import/preview/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        placements = [row["data"]["accommodation_placement"] for row in response.data["results"]]
-        self.assertEqual(placements, ["inside", "outside"])
+        self.assertEqual([row["data"]["accommodation_placement"] for row in response.data["results"]], ["inside", "outside"])
         self.assertFalse(Employee.objects.exists())
+
+    def test_gender_column_is_saved_on_the_employee(self):
+        payload = {"file": SimpleUploadedFile("g.csv", b"employee_id,first_name,last_name,gender\n000001,Ada,One,Female\n000002,Bayo,Two,M\n", content_type="text/csv")}
+        self.assertEqual(self.client.post("/api/employees/import/", payload, format="multipart").status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Employee.objects.get(employee_id="000001").gender, "female")
+        self.assertEqual(Employee.objects.get(employee_id="000002").gender, "male")

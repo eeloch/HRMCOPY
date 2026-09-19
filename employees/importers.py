@@ -61,6 +61,10 @@ HEADER_ALIASES = {
     "mobile": "phone",
     "email": "email",
 
+    # Gender
+    "gender": "gender",
+    "sex": "gender",
+
     # Employment
     "employment_date": "employment_date",
     "employment_start_date": "employment_date",
@@ -1110,6 +1114,12 @@ def validate_employee_rows(
 
         if employment_type:
             cleaned["employment_type"] = employment_type
+
+        gender_value = normalize_value(row.get("gender")).lower()
+        if gender_value in ("male", "m"):
+            cleaned["gender"] = "male"
+        elif gender_value in ("female", "f"):
+            cleaned["gender"] = "female"
 
         results.append(
             {

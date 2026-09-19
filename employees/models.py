@@ -153,6 +153,18 @@ class Employee(models.Model):
         default="active",
     )
 
+    GENDER_CHOICES = [
+        ("male", "Male"),
+        ("female", "Female"),
+    ]
+
+    gender = models.CharField(
+        max_length=10,
+        choices=GENDER_CHOICES,
+        blank=True,
+        default="",
+    )
+
     lives_in_company_hostel = models.BooleanField(
         default=False,
     )

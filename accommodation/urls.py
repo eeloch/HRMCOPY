@@ -11,4 +11,5 @@ urlpatterns = [
     path("assign/", views.AssignAPIView.as_view(), name="accommodation-assign"),
     path("unassign/", views.UnassignAPIView.as_view(), name="accommodation-unassign"),
     path("import/", views.ImportAPIView.as_view(), name="accommodation-import"),
+    path("import-rooms/", views.RoomSetupImportAPIView.as_view(), name="accommodation-import-rooms"),
 ]

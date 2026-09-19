@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 from employees.models import Employee
 
 from .models import Building, Room, RoomAssignment
-from .services import AccommodationService, build_overview, import_workbook
+from .services import AccommodationService, build_overview, import_room_setup, import_workbook, split_room_name
 
 
 class CanViewAccommodation(BasePermission):
@@ -57,7 +57,7 @@ class PeopleAPIView(APIView):
                 continue
             if query and query not in f"{employee.full_name} {employee.employee_id} {place}".lower():
                 continue
-            results.append({"id": employee.pk, "employee_id": employee.employee_id, "name": employee.full_name, "department": employee.department.name if employee.department else None, "where": group, "place": place, "room": assignment.room_id if assignment else None})
+            results.append({"id": employee.pk, "employee_id": employee.employee_id, "name": employee.full_name, "department": employee.department.name if employee.department else None, "gender": employee.gender, "where": group, "place": place, "room": assignment.room_id if assignment else None})
         return Response({"count": len(results), "results": results})
 
 
@@ -75,17 +75,31 @@ class BuildingCreateAPIView(APIView):
 
 
 class RoomCreateAPIView(APIView):
+    """Add a room. `building` (id) or `building_name` (an existing or new company building), a name, and optionally
+    a gender ("male" / "female") and the number of beds."""
+
     permission_classes = [IsAuthenticated, CanManageAccommodation]
 
     def post(self, request):
-        building = get_object_or_404(Building, pk=request.data.get("building"))
         name = str(request.data.get("name", "")).strip()
         if not name:
             return fail("Give the room a name or number.")
+        gender = str(request.data.get("gender", "") or "").strip().lower()
+        if gender not in ("", "male", "female"):
+            return fail("Choose male or female for the room.")
+        capacity = request.data.get("capacity")
+        if capacity not in (None, "") and not (str(capacity).isdigit() and 0 < int(capacity) <= 100):
+            return fail("The number of beds must be a whole number from 1 to 100.")
+        if request.data.get("building"):
+            building = get_object_or_404(Building, pk=request.data.get("building"))
+        else:
+            building_name = str(request.data.get("building_name", "")).strip()
+            if not building_name:
+                building_name, name = split_room_name(name)
+            building = Building.objects.filter(name__iexact=building_name).first() or Building.objects.create(name=building_name, kind="company", sort_order=50)
         if Room.objects.filter(building=building, name__iexact=name).exists():
             return fail(f"{building.name} already has a room called {name}.")
-        capacity = request.data.get("capacity")
-        room = Room.objects.create(building=building, name=name, capacity=int(capacity) if str(capacity or "").isdigit() else None)
+        room = Room.objects.create(building=building, name=name, gender=gender, capacity=int(capacity) if capacity not in (None, "") else None)
         return Response({"id": room.pk}, status=status.HTTP_201_CREATED)
 
 
@@ -93,7 +107,7 @@ class RoomDetailAPIView(APIView):
     permission_classes = [IsAuthenticated, CanManageAccommodation]
 
     def patch(self, request, room_id):
-        room = get_object_or_404(Room, pk=room_id)
+        room = get_object_or_404(Room.objects.select_related("building"), pk=room_id)
         if "capacity" in request.data:
             value = request.data["capacity"]
             if value in (None, ""):
@@ -105,6 +119,21 @@ class RoomDetailAPIView(APIView):
             else:
                 return fail("Capacity must be a whole number between 1 and 100.")
             room.capacity_estimated = False
+        if "gender" in request.data:
+            gender = str(request.data["gender"] or "").lower()
+            if gender not in ("", "male", "female"):
+                return fail("Choose male or female for the room.")
+            wrong = [a.employee.full_name for a in room.assignments.select_related("employee") if gender and a.employee.gender and a.employee.gender != gender]
+            if wrong:
+                return fail(f"{', '.join(wrong[:3])} {'is' if len(wrong) == 1 else 'are'} in this room and not {gender}. Move them first.")
+            room.gender = gender
+        if "name" in request.data:
+            name = str(request.data["name"]).strip()
+            if not name:
+                return fail("The room needs a name.")
+            if Room.objects.filter(building=room.building, name__iexact=name).exclude(pk=room.pk).exists():
+                return fail(f"{room.building.name} already has a room called {name}.")
+            room.name = name
         if "active" in request.data:
             if not request.data["active"] and room.assignments.exists():
                 return fail("Move the people out of this room before closing it.")
@@ -113,6 +142,17 @@ class RoomDetailAPIView(APIView):
             room.notes = str(request.data["notes"])[:255]
         room.save()
         return Response({"id": room.pk})
+
+    def delete(self, request, room_id):
+        room = get_object_or_404(Room.objects.select_related("building"), pk=room_id)
+        count = room.assignments.count()
+        if count:
+            return fail(f"{count} {'person is' if count == 1 else 'people are'} still in {room.name}. Move them to another room first, then remove it.")
+        building = room.building
+        room.delete()
+        if not building.rooms.exists() and building.kind == "company":
+            building.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AssignAPIView(APIView):
@@ -153,4 +193,24 @@ class ImportAPIView(APIView):
             report = import_workbook(upload, dry_run=dry_run, actor=request.user)
         except ValueError as error:
             return fail(error)
+        return Response(report.as_dict())
+
+
+class RoomSetupImportAPIView(APIView):
+    """Upload the accommodation tracker (.xlsb or .xlsx). The rooms then match its Room Setup sheet. dry_run=true (default) only reports."""
+
+    permission_classes = [IsAuthenticated, CanManageAccommodation]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        upload = request.FILES.get("file")
+        if upload is None or not upload.name.lower().endswith((".xlsx", ".xlsb")):
+            return fail("Upload the accommodation tracker as an .xlsb or .xlsx file.")
+        dry_run = str(request.data.get("dry_run", "true")).lower() != "false"
+        try:
+            report = import_room_setup(upload, dry_run=dry_run, actor=request.user)
+        except ValueError as error:
+            return fail(error)
+        except Exception:
+            return fail("That file could not be read. Check it is the accommodation tracker workbook.")
         return Response(report.as_dict())

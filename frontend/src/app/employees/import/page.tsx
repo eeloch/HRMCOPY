@@ -352,6 +352,8 @@ export default function EmployeeImportPage() {
         const placed = (stay.inside ?? 0) + (stay.inside_no_bed ?? 0);
         const accommodationParts = [];
         if (placed) accommodationParts.push(`${placed} placed in rooms`);
+        if (stay.unknown_room) accommodationParts.push(`${stay.unknown_room} in company accommodation but in a room that is not on your room list`);
+        if (stay.gender_mismatch) accommodationParts.push(`${stay.gender_mismatch} in a room for the other gender (not placed)`);
         if (stay.outside) accommodationParts.push(`${stay.outside} living outside`);
         if (stay.none) accommodationParts.push(`${stay.none} with no accommodation`);
         if (stay.vacated) accommodationParts.push(`${stay.vacated} beds freed`);

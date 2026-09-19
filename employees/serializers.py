@@ -180,6 +180,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
             "phone",
             "email",
 
+            "gender",
             "date_of_birth",
             "employment_date",
             "exit_date",
@@ -268,6 +269,7 @@ class EmployeeCreateUpdateSerializer(
             "phone",
             "email",
 
+            "gender",
             "date_of_birth",
             "employment_date",
             "exit_date",
