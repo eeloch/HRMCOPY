@@ -17,10 +17,25 @@ from rest_framework.views import APIView
 
 from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
 
+from .models import MealCollection
 from .services import MealService
 
 
 FORBIDDEN_BIOMETRIC_FIELDS = {"image", "photo", "face", "fingerprint", "template", "signature", "base64"}
+
+
+def terminal_reply(result):
+    """What the meal terminal should show and do for one scan: allow (so its printer issues the
+    ticket) with a short line for the person, or deny with the reason. Whether an extra ticket is
+    charged is decided later by HR, so an extra or rest-day ticket is still handed over."""
+    if result.status in {"created", "duplicate"}:
+        collection = MealCollection.objects.filter(pk=result.collection_id).select_related("employee").first()
+        if collection is None:
+            return {"access": 1, "message": "Meal ticket"}
+        line = f"Ticket {collection.sequence_number} of {collection.entitlement_snapshot}" if collection.entitlement_snapshot else "Not entitled today"
+        return {"access": 1, "message": f"{collection.employee.full_name[:20]}: {line}"}
+    reasons = {"unmapped_employee": "Not enrolled for meals", "revoked_access": "No meal access", "unknown_device": "Device not registered"}
+    return {"access": 0, "message": reasons.get(result.status, "Scan not recognised")}
 
 
 class MealVendorGatewayPunchBridgeAPIView(APIView):
@@ -69,6 +84,6 @@ class MealVendorGatewayPunchBridgeAPIView(APIView):
         summary = MealService.ingest_many(record for _, record in valid)
         invalid = [(gateway_id, record) for gateway_id, record in normalized if "invalid" in record]
         summary.invalid += len(invalid)
-        results = [{"gateway_record_id": gateway_id, "status": result.status, "reason": result.reason} for (gateway_id, _), result in zip(valid, summary.results)]
-        results.extend({"gateway_record_id": gateway_id, "status": "invalid", "reason": record["invalid"]} for gateway_id, record in invalid)
+        results = [{"gateway_record_id": gateway_id, "status": result.status, "reason": result.reason, **terminal_reply(result)} for (gateway_id, _), result in zip(valid, summary.results)]
+        results.extend({"gateway_record_id": gateway_id, "status": "invalid", "reason": record["invalid"], "access": 0, "message": "Scan not recognised"} for gateway_id, record in invalid)
         return Response({"received": len(normalized), "created": summary.created, "duplicate": summary.duplicate, "unmapped_employee": summary.unmapped_employee, "unknown_device": summary.unknown_device, "revoked_access": summary.revoked_access, "invalid": summary.invalid, "results": results})

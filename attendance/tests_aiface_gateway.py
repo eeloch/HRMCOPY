@@ -208,3 +208,14 @@ class BuildDeviceCommandTests(SimpleTestCase):
     def test_unknown_command_type_raises(self):
         with self.assertRaises(ValueError):
             build_device_command("LF00000001", "reboot_device", {})
+
+
+class SendLogAckAccessTests(SimpleTestCase):
+    def test_attendance_terminals_get_the_same_reply_as_before(self):
+        ack = build_sendlog_ack(datetime(2026, 1, 1, 8, 0, 0), result=True, count=1, logindex=0)
+        self.assertNotIn("access", ack)
+        self.assertNotIn("message", ack)
+
+    def test_meal_terminals_can_be_told_to_allow_and_what_to_show(self):
+        ack = build_sendlog_ack(datetime(2026, 1, 1, 8, 0, 0), result=True, count=1, logindex=0, access=1, message="Ada: Ticket 1 of 1")
+        self.assertEqual((ack["access"], ack["message"]), (1, "Ada: Ticket 1 of 1"))

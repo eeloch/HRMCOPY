@@ -47,11 +47,19 @@ def build_senduser_ack(now: datetime) -> dict:
     return {"ret": "senduser", "result": True, "cloudtime": now.strftime("%Y-%m-%d %H:%M:%S")}
 
 
-def build_sendlog_ack(now: datetime, *, result: bool, count: int | None, logindex: int | None) -> dict:
+def build_sendlog_ack(now: datetime, *, result: bool, count: int | None, logindex: int | None, access: int | None = None, message: str | None = None) -> dict:
+    """The reply to a `sendlog`. `access`/`message` are for terminals in Servermode:
+    the terminal waits for `access` (1 = allow, 0 = deny) and shows `message`. A meal
+    terminal's ticket printer follows that allow decision, so it is only added for
+    meal terminals; attendance terminals get exactly the reply they always did."""
     ack: dict[str, Any] = {"ret": "sendlog", "result": result, "cloudtime": now.strftime("%Y-%m-%d %H:%M:%S")}
     if logindex is not None and logindex >= 0:
         ack["count"] = count
         ack["logindex"] = logindex
+    if access is not None:
+        ack["access"] = access
+    if message:
+        ack["message"] = message
     return ack
 
 

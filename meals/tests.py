@@ -1,6 +1,8 @@
 from datetime import date, datetime
 from decimal import Decimal
 
+from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
+
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.test import TestCase
@@ -1912,3 +1914,41 @@ class TicketDecisionBackfillTests(TestCase):
         old.refresh_from_db()
         self.assertEqual(old.status, MealExcessStatus.CANCELLED)
 
+
+
+class TerminalReplyTests(TestCase):
+    """The meal terminal is told to allow the scan (so its printer issues the ticket) and what to show."""
+
+    def setUp(self):
+        self.day = date(2026, 9, 7)
+        self.employee = Employee.objects.create(employee_id="000010", first_name="Ada", last_name="Obi")
+        EmployeeMealEntitlement.objects.create(employee=self.employee, tickets_per_work_day=1, effective_from=self.day, reason="test")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=self.day)
+        MealDevice.objects.create(name="Canteen", serial_number="MEAL001", active=True)
+        BiometricIdentity.objects.create(employee=self.employee, system=IDENTITY_SYSTEM, source_identifier="MEAL001", external_user_id="10")
+        shift = Shift.objects.create(name="Reply Test Day", start_time="07:00", end_time="19:00", is_overnight=False)
+        EmployeeRosterDay.objects.create(employee=self.employee, date=self.day, status=RosterDayStatus.WORK, shift=shift)
+
+    def post(self, enroll_id, event):
+        from django.test import override_settings
+        with override_settings(BIOMETRIC_BRIDGE_SECRET="s3cret", SECURE_SSL_REDIRECT=False):
+            return APIClient().post(
+                "/api/meals/integrations/vendor-gateway/punches/",
+                {"records": [{"gateway_record_id": event, "device_serial_number": "MEAL001", "enroll_id": enroll_id, "timestamp": "2026-09-07 12:00:00"}]},
+                format="json", HTTP_X_BIOMETRIC_BRIDGE_KEY="s3cret",
+            ).json()["results"][0]
+
+    def test_a_valid_scan_is_allowed_with_the_ticket_number(self):
+        result = self.post("10", 1)
+        self.assertEqual(result["access"], 1)
+        self.assertEqual(result["message"], "Ada Obi: Ticket 1 of 1")
+
+    def test_an_extra_ticket_is_still_handed_over_because_hr_decides_later(self):
+        self.post("10", 1)
+        result = self.post("10", 2)
+        self.assertEqual(result["access"], 1)
+        self.assertEqual(result["message"], "Ada Obi: Ticket 2 of 1")
+
+    def test_someone_not_enrolled_is_denied_with_a_reason(self):
+        result = self.post("999", 3)
+        self.assertEqual((result["access"], result["message"]), (0, "Not enrolled for meals"))
