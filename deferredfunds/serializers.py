@@ -4,6 +4,7 @@ from rest_framework import serializers
 
 from employees.models import Employee
 
+from .services import MIN_MONTHS_FOR_PARTIAL, MIN_NOTICE_MONTHS, PARTIAL_LIMIT_PERCENT, partial_eligible_from, partial_limit
 from .models import DeferredFundAccount, DeferredFundEntry, DeferredFundWithdrawal
 
 
@@ -20,13 +21,26 @@ class AccountSerializer(serializers.ModelSerializer):
     balance = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     available = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
     monthly_amount = serializers.SerializerMethodField()
+    saving_since = serializers.SerializerMethodField()
+    partial_eligible_from = serializers.SerializerMethodField()
+    partial_limit = serializers.SerializerMethodField()
+    partial_withdrawn = serializers.DecimalField(max_digits=14, decimal_places=2, read_only=True)
 
     class Meta:
         model = DeferredFundAccount
-        fields = ("id", "employee", "employee_name", "employee_number", "department_name", "position_name", "employee_active", "percent", "active", "enrolled_on", "balance", "available", "monthly_amount")
+        fields = ("saving_since", "partial_eligible_from", "partial_limit", "partial_withdrawn", "id", "employee", "employee_name", "employee_number", "department_name", "position_name", "employee_active", "percent", "active", "enrolled_on", "balance", "available", "monthly_amount")
 
     def get_employee_active(self, obj):
         return obj.employee.status == "active"
+
+    def get_saving_since(self, obj):
+        return obj.saving_start.isoformat()
+
+    def get_partial_eligible_from(self, obj):
+        return partial_eligible_from(obj).isoformat()
+
+    def get_partial_limit(self, obj):
+        return str(min(partial_limit(obj), obj.available))
 
     def get_monthly_amount(self, obj):
         return str((obj.employee.basic_salary * obj.percent / 100).quantize(Decimal("0.01")))
@@ -53,7 +67,7 @@ class WithdrawalSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DeferredFundWithdrawal
-        fields = ("id", "account", "employee_name", "employee_number", "balance", "kind", "kind_label", "amount", "reason", "status", "status_label", "recorded_by_name", "created_at", "decided_by_name", "decision_comment", "paid_by_name", "paid_on", "payment_reference")
+        fields = ("id", "account", "employee_name", "employee_number", "balance", "kind", "kind_label", "amount", "reason", "notice_given_on", "leaving_on", "rule_exceptions", "status", "status_label", "recorded_by_name", "created_at", "decided_by_name", "decision_comment", "paid_by_name", "paid_on", "payment_reference")
 
     def get_recorded_by_name(self, obj):
         return _name(obj.recorded_by)
@@ -69,6 +83,7 @@ class EnrolSerializer(serializers.Serializer):
     employee = serializers.PrimaryKeyRelatedField(queryset=Employee.objects.all())
     percent = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=Decimal("0.01"), max_value=Decimal("100"))
     opening_balance = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal("0"), required=False, default=Decimal("0"))
+    saving_since = serializers.DateField(required=False, allow_null=True)
 
 
 class PercentSerializer(serializers.Serializer):
@@ -85,9 +100,18 @@ class WithdrawalCreateSerializer(serializers.Serializer):
     kind = serializers.ChoiceField(choices=["partial", "final"])
     amount = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=Decimal("0.01"), required=False)
     reason = serializers.CharField(required=False, allow_blank=True)
+    notice_given_on = serializers.DateField(required=False, allow_null=True)
+    leaving_on = serializers.DateField(required=False, allow_null=True)
+
+
+class ForfeitSerializer(serializers.Serializer):
+    reason = serializers.CharField()
 
 
 class WithdrawalActionSerializer(serializers.Serializer):
     comment = serializers.CharField(required=False, allow_blank=True)
     paid_on = serializers.DateField(required=False)
     reference = serializers.CharField(required=False, allow_blank=True)
+
+
+POLICY = {"min_months_for_partial": MIN_MONTHS_FOR_PARTIAL, "partial_limit_percent": str(PARTIAL_LIMIT_PERCENT), "min_notice_months": MIN_NOTICE_MONTHS}

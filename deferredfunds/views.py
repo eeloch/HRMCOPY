@@ -14,7 +14,7 @@ from employees.models import Employee, EmploymentType
 from payroll.services.bank_upload import BANK_UPLOAD_NARRATION, bank_file, split_payable
 
 from .models import DeferredFundAccount, DeferredFundEntry, DeferredFundWithdrawal, WithdrawalKind, WithdrawalStatus
-from .serializers import AccountSerializer, AdjustSerializer, EnrolSerializer, EntrySerializer, PercentSerializer, WithdrawalActionSerializer, WithdrawalCreateSerializer, WithdrawalSerializer
+from .serializers import POLICY, ForfeitSerializer, AccountSerializer, AdjustSerializer, EnrolSerializer, EntrySerializer, PercentSerializer, WithdrawalActionSerializer, WithdrawalCreateSerializer, WithdrawalSerializer
 from .services import DeferredFundService
 
 PERMS = {
@@ -52,6 +52,7 @@ class OverviewAPIView(APIView):
         enrolled_ids = {account.employee_id for account in accounts}
         unenrolled = Employee.objects.filter(employment_type=EmploymentType.CONTRACT, status="active").exclude(pk__in=enrolled_ids).select_related("department", "position").order_by("employee_id")
         return Response({
+            "policy": POLICY,
             "total_held": str(held),
             "enrolled_count": sum(1 for account in accounts if account.active),
             "accounts": AccountSerializer(accounts, many=True).data,
@@ -109,6 +110,22 @@ class AdjustAPIView(APIView):
         return Response(AccountSerializer(accounts_queryset().get(pk=account_id)).data)
 
 
+class ForfeitAPIView(APIView):
+    """Management only: the company keeps the whole fund (dismissal for theft or serious misconduct)."""
+
+    permission_classes = [IsAuthenticated, allow("approve")]
+
+    def post(self, request, account_id):
+        serializer = ForfeitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        account = get_object_or_404(accounts_queryset(), pk=account_id)
+        try:
+            DeferredFundService.forfeit(account, actor=request.user, reason=serializer.validated_data["reason"])
+        except ValueError as error:
+            return fail(error)
+        return Response(AccountSerializer(accounts_queryset().get(pk=account_id)).data)
+
+
 def withdrawals_queryset():
     return DeferredFundWithdrawal.objects.select_related("account", "account__employee", "recorded_by", "decided_by", "paid_by")
 
@@ -125,7 +142,7 @@ class WithdrawalListCreateAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         try:
-            withdrawal = DeferredFundService.request_withdrawal(data["account"], kind=data["kind"], amount=data.get("amount"), reason=data.get("reason", ""), actor=request.user)
+            withdrawal = DeferredFundService.request_withdrawal(data["account"], kind=data["kind"], amount=data.get("amount"), reason=data.get("reason", ""), notice_given_on=data.get("notice_given_on"), leaving_on=data.get("leaving_on"), actor=request.user)
         except ValueError as error:
             return fail(error)
         return Response(WithdrawalSerializer(withdrawals_queryset().get(pk=withdrawal.pk)).data, status=status.HTTP_201_CREATED)

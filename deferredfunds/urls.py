@@ -7,6 +7,7 @@ urlpatterns = [
     path("accounts/", views.EnrolAPIView.as_view(), name="deferred-fund-enrol"),
     path("accounts/<int:account_id>/", views.AccountAPIView.as_view(), name="deferred-fund-account"),
     path("accounts/<int:account_id>/ledger/", views.LedgerAPIView.as_view(), name="deferred-fund-ledger"),
+    path("accounts/<int:account_id>/forfeit/", views.ForfeitAPIView.as_view(), name="deferred-fund-forfeit"),
     path("accounts/<int:account_id>/adjust/", views.AdjustAPIView.as_view(), name="deferred-fund-adjust"),
     path("withdrawals/", views.WithdrawalListCreateAPIView.as_view(), name="deferred-fund-withdrawals"),
     path("withdrawals/bank-upload/preview/", views.WithdrawalBankPreviewAPIView.as_view()),

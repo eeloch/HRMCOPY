@@ -20,6 +20,8 @@ class DeferredFundAccount(models.Model):
     percent = models.DecimalField(max_digits=5, decimal_places=2, validators=[MinValueValidator(Decimal("0.01")), MaxValueValidator(Decimal("100"))])
     active = models.BooleanField(default=True)
     enrolled_on = models.DateField(auto_now_add=True)
+    # When they started saving with the company (earlier than enrolment for people who saved before this system).
+    saving_since = models.DateField(null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -42,6 +44,20 @@ class DeferredFundAccount(models.Model):
         return total or Decimal("0.00")
 
     @property
+    def saving_start(self):
+        return self.saving_since or self.enrolled_on
+
+    @property
+    def partial_withdrawn(self):
+        """Paid out so far as partial withdrawals (a positive number)."""
+        return -(self.entries.filter(entry_type="withdrawal").aggregate(total=Sum("amount"))["total"] or Decimal("0.00"))
+
+    @property
+    def accumulated(self):
+        """Everything ever saved and still not forfeited or released: what the 30% policy is measured on."""
+        return self.balance + self.partial_withdrawn
+
+    @property
     def available(self):
         """What can still be asked for: the balance less requests already in progress."""
         return self.balance - self.pending_withdrawals
@@ -54,6 +70,7 @@ class EntryType(models.TextChoices):
     CONTRIBUTION = "contribution", "Monthly contribution"
     WITHDRAWAL = "withdrawal", "Withdrawal"
     RELEASE = "release", "Full release on exit"
+    FORFEITURE = "forfeiture", "Forfeited to the company"
     ADJUSTMENT = "adjustment", "Adjustment"
     OPENING = "opening", "Opening balance"
 
@@ -98,6 +115,11 @@ class DeferredFundWithdrawal(models.Model):
     # Partial: what was asked for. Final: left empty until paid, then the whole balance at that moment.
     amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     reason = models.TextField(blank=True)
+    # Full release: when notice was given and the last working day.
+    notice_given_on = models.DateField(null=True, blank=True)
+    leaving_on = models.DateField(null=True, blank=True)
+    # Policy checks this request does not meet, one per line. Management must give a reason to approve it anyway.
+    rule_exceptions = models.TextField(blank=True)
     status = models.CharField(max_length=20, choices=WithdrawalStatus.choices, default=WithdrawalStatus.REQUESTED)
     recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
