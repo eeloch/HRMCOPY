@@ -139,3 +139,52 @@ class AdvanceTests(TestCase):
         self.boss.user_permissions.add(Permission.objects.get(codename="view_salary"))
         client.force_authenticate(get_user_model().objects.get(pk=self.boss.pk))
         self.assertEqual(client.get("/api/advances/").json()["results"][0]["employee_basic_salary"], "100000.00")
+
+
+class AdvanceBankFileTests(TestCase):
+    def setUp(self):
+        self.finance = user_with("fin", "pay_salary_advance")
+        self.hr = user_with("hr2", "record_salary_advance")
+        self.boss = user_with("boss2", "approve_salary_advance")
+        self.client = APIClient()
+        self.client.force_authenticate(self.finance)
+
+    def approved(self, staff_id, amount, account="2252037955", code="000015"):
+        employee = Employee.objects.create(employee_id=staff_id, first_name="Ada", last_name=staff_id, basic_salary=Decimal("100000"), bank_name="Zenith", account_number=account, bank_code=code)
+        advance = AdvanceService.record(employee=employee, amount=Decimal(amount), repayment_months=1, actor=self.hr)
+        return AdvanceService.approve(advance, actor=self.boss)
+
+    def test_file_has_the_payroll_layout_and_only_approved_advances(self):
+        import io
+        from openpyxl import load_workbook
+        first, second = self.approved("000001", "20000", code="14"), self.approved("000002", "35000.50")
+        waiting = AdvanceService.record(employee=Employee.objects.create(employee_id="000003", first_name="X", last_name="Y", bank_name="B", account_number="2252037955", bank_code="000015"), amount=Decimal("500"), actor=self.hr)
+        response = self.client.post("/api/advances/bank-upload/", {"ids": [first.pk, second.pk, waiting.pk]}, format="json")
+        self.assertEqual(response.status_code, 200)
+        sheet = load_workbook(io.BytesIO(response.content)).active
+        self.assertEqual([c.value for c in sheet[1]], ["Account_Number", "Amount", "Bank_Codes", "Narration"])
+        self.assertEqual([c.value for c in sheet[2]], [2252037955, 20000, "000014", "Hello"])
+        self.assertEqual([c.value for c in sheet[3]], [2252037955, 35000.5, "000015", "Hello"])
+        self.assertEqual(sheet.max_row, 3)
+
+    def test_people_with_bad_bank_details_are_listed_not_silently_dropped(self):
+        good, bad = self.approved("000001", "1000"), self.approved("000002", "2000", account="", code="")
+        data = self.client.post("/api/advances/bank-upload/preview/", {"ids": [good.pk, bad.pk]}, format="json").json()
+        self.assertEqual(data["ready_count"], 1)
+        self.assertEqual([i["employee_id"] for i in data["issues"]], ["000002"])
+
+    def test_bulk_pay_marks_them_paid_and_needs_the_pay_permission(self):
+        one, two = self.approved("000001", "1000"), self.approved("000002", "2000")
+        self.client.force_authenticate(self.hr)
+        self.assertEqual(self.client.post("/api/advances/mark-paid/", {"ids": [one.pk]}, format="json").status_code, 403)
+        self.client.force_authenticate(self.finance)
+        self.assertEqual(self.client.post("/api/advances/mark-paid/", {"ids": [one.pk, two.pk], "reference": "BATCH1"}, format="json").json(), {"paid": 2})
+        one.refresh_from_db()
+        self.assertEqual((one.status, one.payment_reference), ("paid", "BATCH1"))
+        self.assertEqual(self.client.post("/api/advances/bank-upload/", {"ids": [one.pk]}, format="json").status_code, 400)
+
+    def test_bulk_pay_skips_people_who_were_not_in_the_bank_file(self):
+        good, bad = self.approved("000001", "1000"), self.approved("000002", "2000", account="", code="")
+        self.assertEqual(self.client.post("/api/advances/mark-paid/", {"ids": [good.pk, bad.pk]}, format="json").json(), {"paid": 1})
+        bad.refresh_from_db()
+        self.assertEqual(bad.status, "approved")

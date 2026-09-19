@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useEffectEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
+import { AdvancePaymentModal } from "@/components/advances/AdvancePaymentModal";
 import { AppCard, PageHeader, Section } from "@/components/ui";
 import { apiFetch, getAccessToken, getCurrentUser, type CurrentUser } from "@/lib/api";
 
@@ -82,6 +83,8 @@ export default function AdvancesPage() {
   const [query, setQuery] = useState("");
   const [form, setForm] = useState({ employee: "", amount: "", repayment_months: "1", reason: "", ...(() => { const d = nextMonthDefault(); return { deduct_from_year: d.year, deduct_from_month: d.month }; })() });
   const [action, setAction] = useState<Action | null>(null);
+  const [ticked, setTicked] = useState<number[]>([]);
+  const [paying, setPaying] = useState(false);
   const [actionText, setActionText] = useState("");
   const [actionDate, setActionDate] = useState(new Date().toISOString().slice(0, 10));
 
@@ -153,6 +156,8 @@ export default function AdvancesPage() {
     if (await send(`/advances/${advance.id}/${paths[kind]}/`, body, messages[kind])) { setAction(null); setActionText(""); }
   }
 
+  const payable = advances.filter((item) => item.status === "approved");
+  const chosen = ticked.filter((id) => payable.some((item) => item.id === id));
   const visible = advances.filter((item) => !tab || item.status === tab);
   const counts = (key: string) => advances.filter((item) => !key || item.status === key).length;
   const filteredEmployees = employees.filter((employee) => String(employee.id) === form.employee || `${employee.full_name} ${employee.employee_id}`.toLowerCase().includes(query.trim().toLowerCase()));
@@ -213,16 +218,25 @@ export default function AdvancesPage() {
           ))}
         </div>
 
+        {canPay && payable.length > 0 && (tab === "approved" || tab === "") && (
+          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-2xl border border-violet-200 bg-violet-50 p-4">
+            <p className="text-sm text-violet-900"><b>{payable.length}</b> approved advance{payable.length === 1 ? "" : "s"} waiting for payment. Tick the ones you are paying now.</p>
+            <button type="button" onClick={() => setTicked(chosen.length === payable.length ? [] : payable.map((item) => item.id))} className="rounded-xl border border-violet-300 bg-white px-3 py-2 text-sm font-semibold text-violet-800">{chosen.length === payable.length ? "Untick all" : "Tick all"}</button>
+            <button type="button" disabled={chosen.length === 0} onClick={() => setPaying(true)} className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:bg-violet-300">Pay Selected ({chosen.length}) - Bank File</button>
+          </div>
+        )}
+
         <Section title="Advances" subtitle={`${visible.length} shown`}>
           {loading ? <div className="h-40 animate-pulse bg-slate-100" /> : visible.length ? (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[980px] text-left">
                 <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  <tr><th className="px-5 py-3">Employee</th><th className="px-5 py-3">Advance</th><th className="px-5 py-3">Repayment</th><th className="px-5 py-3">Status</th><th className="px-5 py-3">Trail</th><th className="px-5 py-3" /></tr>
+                  <tr>{canPay && <th className="w-10 px-3 py-3" />}<th className="px-5 py-3">Employee</th><th className="px-5 py-3">Advance</th><th className="px-5 py-3">Repayment</th><th className="px-5 py-3">Status</th><th className="px-5 py-3">Trail</th><th className="px-5 py-3" /></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 align-top">
                   {visible.map((item) => (
                     <tr key={item.id} className="hover:bg-slate-50">
+                      {canPay && <td className="px-3 py-4">{item.status === "approved" && <input type="checkbox" checked={chosen.includes(item.id)} onChange={(event) => setTicked(event.target.checked ? [...chosen, item.id] : chosen.filter((id) => id !== item.id))} aria-label={`Select ${item.employee_name}`} />}</td>}
                       <td className="px-5 py-4">
                         <p className="font-semibold text-slate-900">{item.employee_name}</p>
                         <p className="text-sm text-slate-500">{item.employee_number}{item.department_name ? ` · ${item.department_name}` : ""}</p>
@@ -260,6 +274,8 @@ export default function AdvancesPage() {
             </div>
           ) : <p className="p-12 text-center text-slate-500">Nothing here.</p>}
         </Section>
+
+        {paying && <AdvancePaymentModal ids={chosen} onClose={() => setPaying(false)} onPaid={(count) => { setPaying(false); setTicked([]); setFeedback(`${count} advance${count === 1 ? "" : "s"} marked as paid. Repayment will come out of payroll automatically.`); void load(true); }} />}
 
         {action && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">

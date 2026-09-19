@@ -45,18 +45,18 @@ class BankUploadIssue:
     fixable: bool
 
 
-def prepare_bank_upload(period):
-    """Split a period's payroll into (rows ready to upload, issues) in staff-number order."""
+def split_payable(entries):
+    """Split (employee, amount) pairs into (rows ready to upload, issues), keeping the given order.
+
+    Shared by payroll and salary advances so both produce identical bank files."""
     rows, issues = [], []
-    payrolls = period.employee_payrolls.select_related("employee").order_by("employee__employee_id")
-    for payroll in payrolls:
-        employee = payroll.employee
+    for employee, amount in entries:
         common = dict(
-            employee_id=employee.employee_id, employee_name=employee.full_name, net_pay=payroll.net_pay,
+            employee_id=employee.employee_id, employee_name=employee.full_name, net_pay=amount,
             bank_name=employee.bank_name, account_number=employee.account_number, bank_code=employee.bank_code,
         )
-        if payroll.net_pay <= 0:
-            issues.append(BankUploadIssue(**common, reason=f"Net pay is {payroll.net_pay:,.2f} - nothing to pay", fixable=False))
+        if amount <= 0:
+            issues.append(BankUploadIssue(**common, reason=f"Net pay is {amount:,.2f} - nothing to pay", fixable=False))
             continue
         account, padded, account_problem = to_account_number(employee.account_number)
         code, code_problem = to_bank_code(employee.bank_code)
@@ -64,8 +64,14 @@ def prepare_bank_upload(period):
         if problems:
             issues.append(BankUploadIssue(**common, reason="; ".join(problems), fixable=True))
             continue
-        rows.append(BankUploadRow(employee.employee_id, employee.full_name, account, payroll.net_pay.quantize(Decimal("0.01")), code, padded))
+        rows.append(BankUploadRow(employee.employee_id, employee.full_name, account, amount.quantize(Decimal("0.01")), code, padded))
     return rows, issues
+
+
+def prepare_bank_upload(period):
+    """Split a period's payroll into (rows ready to upload, issues) in staff-number order."""
+    payrolls = period.employee_payrolls.select_related("employee").order_by("employee__employee_id")
+    return split_payable((payroll.employee, payroll.net_pay) for payroll in payrolls)
 
 
 def build_workbook(rows, sheet_title):
@@ -88,7 +94,10 @@ def build_workbook(rows, sheet_title):
 def bank_upload_download(period, rows, batch_size=None):
     """Return (filename, content_type, bytes): one .xlsx, or a .zip of "Batch N.xlsx" files
     when a batch size is given and there are more rows than fit in one."""
-    title = period.display_name
+    return bank_file(period.display_name, rows, batch_size)
+
+
+def bank_file(title, rows, batch_size=None):
     if not batch_size or len(rows) <= batch_size:
         return (
             f"{title} - Bank Upload.xlsx",

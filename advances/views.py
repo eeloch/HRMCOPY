@@ -1,10 +1,18 @@
+from decimal import Decimal
+
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import SalaryAdvance
+from audit.models import AuditSeverity
+from audit.services import AuditService
+from payroll.services.bank_upload import BANK_UPLOAD_NARRATION, bank_file, split_payable
+
+from .models import AdvanceStatus, SalaryAdvance
 from .serializers import AdvanceDecisionSerializer, SalaryAdvanceCreateSerializer, SalaryAdvanceSerializer
 from .services import AdvanceService
 
@@ -103,3 +111,87 @@ class AdvanceCancelAPIView(AdvanceActionAPIView):
 
 class AdvancePayAPIView(AdvanceActionAPIView):
     action, needs = "pay", ("pay",)
+
+
+class BulkAdvanceMixin(AdvanceQuerysetMixin):
+    """Shared by the bank file and bulk-pay endpoints: work on the ticked, approved advances."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        class CanPay(BasePermission):
+            def has_permission(self, request, view):
+                return _has_any(request.user, "pay")
+
+        return [IsAuthenticated(), CanPay()]
+
+    def selected(self, request):
+        ids = request.data.get("ids")
+        if not isinstance(ids, list) or not ids or not all(isinstance(item, int) for item in ids):
+            return None, Response({"detail": "Select at least one advance."}, status=status.HTTP_400_BAD_REQUEST)
+        advances = list(self.queryset().filter(pk__in=ids, status=AdvanceStatus.APPROVED).order_by("employee__employee_id", "id"))
+        if not advances:
+            return None, Response({"detail": "None of the selected advances is awaiting payment."}, status=status.HTTP_400_BAD_REQUEST)
+        return advances, None
+
+    @staticmethod
+    def payable(advances):
+        rows, issues = split_payable((advance.employee, advance.amount) for advance in advances)
+        return rows, issues
+
+
+class AdvanceBankPreviewAPIView(BulkAdvanceMixin, APIView):
+    def post(self, request):
+        advances, error = self.selected(request)
+        if error:
+            return error
+        rows, issues = self.payable(advances)
+        return Response({
+            "narration": BANK_UPLOAD_NARRATION,
+            "ready_count": len(rows),
+            "ready_total": str(sum((row.amount for row in rows), Decimal("0.00"))),
+            "padded": [{"employee_id": r.employee_id, "employee_name": r.employee_name, "account_number": r.account_number} for r in rows if r.padded],
+            "issues": [{**issue.__dict__, "net_pay": str(issue.net_pay)} for issue in issues],
+        })
+
+
+class AdvanceBankDownloadAPIView(BulkAdvanceMixin, APIView):
+    def post(self, request):
+        advances, error = self.selected(request)
+        if error:
+            return error
+        rows, issues = self.payable(advances)
+        if not rows:
+            return Response({"detail": "None of the selected people can be included yet - fix their bank details first."}, status=status.HTTP_400_BAD_REQUEST)
+        title = f"Salary Advances {timezone.localdate().strftime('%d %b %Y')}"
+        filename, content_type, content = bank_file(title, rows)
+        total = sum((row.amount for row in rows), Decimal("0.00"))
+        AuditService.log(
+            event_type="advance.bank_upload_exported", module="advances", actor=request.user, severity=AuditSeverity.INFO,
+            title="Salary advance bank file created", description=f"Bank file for {len(rows)} salary advance(s), {total:,.2f} total; {len(issues)} left out.",
+            metadata={"advance_ids": [advance.pk for advance in advances], "payments": len(rows), "total": str(total), "left_out": len(issues)},
+        )
+        response = HttpResponse(content, content_type=content_type)
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+
+class AdvanceBulkPayAPIView(BulkAdvanceMixin, APIView):
+    def post(self, request):
+        advances, error = self.selected(request)
+        if error:
+            return error
+        serializer = AdvanceDecisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        paid = 0
+        for advance in advances:
+            # Only people who were in the bank file: anyone left out (bad bank details) stays awaiting payment.
+            if not split_payable([(advance.employee, advance.amount)])[0]:
+                continue
+            try:
+                AdvanceService.pay(advance, actor=request.user, paid_on=data.get("paid_on"), reference=data.get("reference", ""))
+                paid += 1
+            except ValueError:
+                continue
+        return Response({"paid": paid})
