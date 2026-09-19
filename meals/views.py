@@ -435,12 +435,19 @@ class EmployeeMealsProfileAPIView(APIView):
             .first()
         )
 
+        today_date, today_roster = MealService.resolve_work_day(employee, timezone.now())
         return Response(
             {
                 "employee": {
                     "id": employee.pk,
                     "employee_id": employee.employee_id,
                     "name": employee.full_name,
+                },
+                # A scan only earns a ticket on a rostered WORK day, so show what today looks like.
+                "today": {
+                    "work_date": today_date,
+                    "roster_status": today_roster.status if today_roster else "none",
+                    "shift": today_roster.shift.name if today_roster and today_roster.shift else None,
                 },
                 "entitlement": {
                     "approved": approved_entitlement,
