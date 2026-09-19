@@ -100,6 +100,7 @@ urlpatterns = [
     ),
 
     path("api/advances/", include("advances.urls")),
+    path("api/deferred-funds/", include("deferredfunds.urls")),
     path(
         "api/ppe/",
         include("ppe.urls"),

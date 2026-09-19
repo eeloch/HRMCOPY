@@ -32,6 +32,10 @@ export type CurrentUser = {
     record_salary_advance: boolean;
     approve_salary_advance: boolean;
     pay_salary_advance: boolean;
+    view_deferred_funds: boolean;
+    manage_deferred_funds: boolean;
+    approve_deferred_withdrawal: boolean;
+    pay_deferred_withdrawal: boolean;
   };
 };
 

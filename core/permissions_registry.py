@@ -29,6 +29,10 @@ MANAGED_PERMISSIONS = [
     {"codename": "record_salary_advance", "app_label": "advances", "label": "Record salary advance requests", "group": "Salary Advances"},
     {"codename": "approve_salary_advance", "app_label": "advances", "label": "Approve or decline salary advances", "group": "Salary Advances"},
     {"codename": "pay_salary_advance", "app_label": "advances", "label": "Pay out approved salary advances", "group": "Salary Advances"},
+    {"codename": "view_deferred_funds", "app_label": "deferredfunds", "label": "View contract staff deferred funds", "group": "Deferred Funds"},
+    {"codename": "manage_deferred_funds", "app_label": "deferredfunds", "label": "Enrol staff, set percentages, record withdrawals", "group": "Deferred Funds"},
+    {"codename": "approve_deferred_withdrawal", "app_label": "deferredfunds", "label": "Approve or decline deferred fund withdrawals", "group": "Deferred Funds"},
+    {"codename": "pay_deferred_withdrawal", "app_label": "deferredfunds", "label": "Pay out deferred fund withdrawals", "group": "Deferred Funds"},
     {"codename": "view_documents", "app_label": "documents", "label": "View employee documents", "group": "Documents"},
     {"codename": "manage_documents", "app_label": "documents", "label": "Upload & delete employee documents", "group": "Documents"},
 ]
