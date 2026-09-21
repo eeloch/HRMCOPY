@@ -41,7 +41,7 @@ CLONE_TARGET_WAIT_SECONDS = 6
 CLONE_MAX_ATTEMPTS = 3
 
 COMMAND_POLL_INTERVAL_SECONDS = 2
-GATING_RECONCILE_EVERY_POLLS = 15  # every ~30 seconds
+GATING_RECONCILE_EVERY_POLLS = 3  # every ~6 seconds
 
 try:
     import websockets
@@ -152,6 +152,10 @@ class Command(BaseCommand):
             if poller_task is not None:
                 poller_task.cancel()
             self.stdout.write(f"[{peer}] disconnected (sn={sn})")
+            if sn:
+                # A switch on/off that was on the wire when the terminal dropped never got an answer: retry it
+                # straight away on the next connection instead of waiting for it to time out.
+                await asyncio.to_thread(self._requeue_lost_switches, sn)
             # A device that reconnected already has a newer socket registered under
             # this serial; only the current one may deregister/mark offline, or a
             # late-noticed dead connection would evict its replacement.
@@ -189,6 +193,10 @@ class Command(BaseCommand):
                 await asyncio.to_thread(self._mark_command_sent, command_id)
         except asyncio.CancelledError:
             pass
+
+    @staticmethod
+    def _requeue_lost_switches(serial_number):
+        DeviceCommand.objects.filter(device__serial_number=serial_number, command_type="set_user_enabled", status="sent").update(status="pending", sent_at=None)
 
     def _reconcile_meal_gating(self):
         try:

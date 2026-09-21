@@ -26,15 +26,16 @@ def gated_employees():
 def tickets_left_today(employee, now=None):
     """Tickets this person may still collect today (0 on a rest day, with no allocation, or once used up)."""
     now = now or timezone.now()
-    from .authorizations import extra_allowed
+    from .authorizations import extra_unused
 
     work_date, roster = MealService.resolve_work_day(employee, now)
     entitlement = 0
     if roster and roster.status == RosterDayStatus.WORK:
         entitlement = max(MealService.approved_entitlement(employee, work_date) - MealService.absence_penalty_reduction(employee, work_date), 0)
-    allowed = entitlement + extra_allowed(employee, work_date)  # extras a supervisor authorised count, even on a rest day
     used = MealCollection.objects.filter(employee=employee, work_date=work_date, voided_at__isnull=True).count()
-    return max(allowed - used, 0)
+    # What is left of the entitlement, plus extras a supervisor authorised that nobody has collected yet
+    # (that works on a rest day too). A used authorisation adds nothing more.
+    return max(entitlement - used, 0) + extra_unused(employee, work_date)
 
 
 def _meal_identities(employee):
@@ -66,7 +67,10 @@ def reconcile(*, release=False):
         wanted = tickets_left_today(employee) > 0
         for identity in _meal_identities(employee):
             state = MealTerminalUserState.objects.filter(employee=employee, device_serial=identity.source_identifier).first()
-            if state is None or state.enabled != wanted:
+            if state is None and wanted:
+                # Nobody has ever been switched off here: the terminal starts everyone enabled, so just remember that.
+                MealTerminalUserState.objects.update_or_create(employee=employee, device_serial=identity.source_identifier, defaults={"enabled": True})
+            elif state is None or state.enabled != wanted:
                 device = BiometricDevice.objects.get(serial_number=identity.source_identifier)
                 queued += _queue(device, employee, identity.external_user_id, wanted)
     return queued

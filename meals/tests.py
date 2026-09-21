@@ -1998,10 +1998,10 @@ class MealGatingTests(TestCase):
             DeviceCommand.objects.filter(pk=command.pk).update(status="acked")
 
     def test_only_the_listed_person_is_ever_switched_and_the_first_pass_records_their_state(self):
-        self.gating.reconcile()
-        self.assertEqual(self.commands(), [(7, True)])  # 8 (not listed) is untouched
-        self.confirm_all()
-        self.assertEqual(self.gating.reconcile(), 0)  # already right, nothing more to send
+        self.assertEqual(self.gating.reconcile(), 0)  # the terminal starts everyone enabled: nothing to send
+        self.assertEqual(self.commands(), [])
+        self.assertTrue(MealTerminalUserState.objects.get(employee=self.pilot).enabled)
+        self.assertFalse(MealTerminalUserState.objects.filter(employee=self.other).exists())  # 8 (not listed) is untouched
 
     def test_switched_off_after_the_last_ticket_and_back_on_when_one_is_voided(self):
         self.gating.reconcile(); self.confirm_all()
@@ -2023,9 +2023,10 @@ class MealGatingTests(TestCase):
         self.assertEqual(self.commands(), [(7, False)])
 
     def test_it_does_not_queue_the_same_switch_twice(self):
+        EmployeeRosterDay.objects.filter(employee=self.pilot).update(status=RosterDayStatus.REST, shift=None)
         self.gating.reconcile()
         self.gating.reconcile()
-        self.assertEqual(self.commands(), [(7, True)])
+        self.assertEqual(self.commands(), [(7, False)])
 
     def test_release_switches_back_on_everyone_that_was_switched_off(self):
         self.gating.reconcile(); self.confirm_all()
@@ -2037,6 +2038,18 @@ class MealGatingTests(TestCase):
             self.assertEqual(self.gating.reconcile(), 0)  # setting cleared: nothing new is decided
             self.assertEqual(self.gating.reconcile(release=True), 1)
         self.assertEqual(self.commands()[-1], (7, True))
+
+    def test_a_used_authorisation_does_not_keep_adding_an_allowance(self):
+        from meals.authorizations import authorise
+
+        boss = get_user_model().objects.create_user("gate-boss", password="p")
+        authorise(employee=self.pilot, quantity=1, pays="company", actor=boss)
+        self.assertEqual(self.gating.tickets_left_today(self.pilot), 3)  # 2 entitled + 1 authorised
+        self.scan(self.pilot, "x1"); self.scan(self.pilot, "x2"); self.scan(self.pilot, "x3")  # the third uses the authorisation
+        self.assertEqual(self.gating.tickets_left_today(self.pilot), 0)
+        for collection in MealCollection.objects.filter(employee=self.pilot):
+            MealService.void_collection(collection, boss, "test")
+        self.assertEqual(self.gating.tickets_left_today(self.pilot), 2)  # back to the plain entitlement, not 3
 
     def test_the_wire_message(self):
         from attendance.integrations.aiface_protocol import build_device_command
@@ -2108,6 +2121,10 @@ class ExtraTicketAuthorizationTests(TestCase):
 
         self.scan("a1")
         self.assertEqual(gating.tickets_left_today(self.person), 0)
+        gating.reconcile()  # what the bridge does after a scan: switches them off...
+        for command in DeviceCommand.objects.filter(command_type="set_user_enabled", status="pending"):
+            gating.record_state(command)  # ...and the terminal confirms
+            DeviceCommand.objects.filter(pk=command.pk).update(status="acked")
         self.authorise()
         self.assertEqual(gating.tickets_left_today(self.person), 1)
         self.assertEqual(DeviceCommand.objects.filter(command_type="set_user_enabled").order_by("-id").first().payload["enabled"], True)

@@ -532,6 +532,7 @@ class DeviceCommand(models.Model):
     # close enough that a retry right after the UI times out isn't still
     # blocked by the very row that just failed.
     STALE_AFTER = timedelta(seconds=60)
+    SWITCH_STALE_AFTER = timedelta(seconds=10)  # a one-line switch that isn't answered quickly was lost in a reconnect
     CLONE_STALE_AFTER = timedelta(minutes=5)
 
     class Meta:
@@ -558,8 +559,9 @@ class DeviceCommand(models.Model):
         """
         now = timezone.now()
         stale = cls.objects.filter(status="sent").filter(
-            (~Q(command_type="clone_enrollment") & Q(sent_at__lt=now - cls.STALE_AFTER))
+            (~Q(command_type__in=["clone_enrollment", "set_user_enabled"]) & Q(sent_at__lt=now - cls.STALE_AFTER))
             | Q(command_type="clone_enrollment", sent_at__lt=now - cls.CLONE_STALE_AFTER)
+            | Q(command_type="set_user_enabled", sent_at__lt=now - cls.SWITCH_STALE_AFTER)
         )
         if device is not None:
             stale = stale.filter(device=device)

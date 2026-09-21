@@ -18,6 +18,11 @@ def extra_allowed(employee, work_date):
     return sum(a.quantity for a in active_on(employee, work_date))
 
 
+def extra_unused(employee, work_date):
+    """Authorised extra tickets nobody has collected yet."""
+    return sum(max(a.quantity - a.used, 0) for a in active_on(employee, work_date))
+
+
 def status_of(authorization, today=None):
     today = today or timezone.localdate()
     if authorization.cancelled_at:
