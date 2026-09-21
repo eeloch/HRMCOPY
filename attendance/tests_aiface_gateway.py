@@ -219,3 +219,15 @@ class SendLogAckAccessTests(SimpleTestCase):
     def test_meal_terminals_can_be_told_to_allow_and_what_to_show(self):
         ack = build_sendlog_ack(datetime(2026, 1, 1, 8, 0, 0), result=True, count=1, logindex=0, access=1, message="Ada: Ticket 1 of 1")
         self.assertEqual((ack["access"], ack["message"]), (1, "Ada: Ticket 1 of 1"))
+
+
+class MinimalRegAckTests(SimpleTestCase):
+    def test_a_meal_terminal_gets_only_the_documented_reply(self):
+        from attendance.integrations.aiface_protocol import build_reg_ack
+        ack = build_reg_ack(datetime(2026, 1, 1, 8, 0, 0), minimal=True)
+        self.assertEqual(set(ack), {"ret", "result", "cloudtime"})
+
+    def test_the_standard_reply_is_unchanged_for_attendance_terminals(self):
+        from attendance.integrations.aiface_protocol import build_reg_ack
+        ack = build_reg_ack(datetime(2026, 1, 1, 8, 0, 0))
+        self.assertTrue(ack["nosenduser"] and ack["nosendimage"])

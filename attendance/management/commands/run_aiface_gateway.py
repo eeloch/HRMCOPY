@@ -123,7 +123,9 @@ class Command(BaseCommand):
                     self._connections[sn] = ws
                     await asyncio.to_thread(self._mark_device_online, sn, peer[0] if peer else None)
                     await asyncio.to_thread(self._recover_interrupted_clones, sn)
-                    await ws.send(json.dumps(build_reg_ack(datetime.now())))
+                    minimal = await asyncio.to_thread(self._minimal_reg_for_device, sn)
+                    self.stdout.write(f"[{sn}] reg ack: {'minimal (vendor demo style)' if minimal else 'standard'}")
+                    await ws.send(json.dumps(build_reg_ack(datetime.now(), minimal=minimal)))
                     if poller_task is None:
                         poller_task = asyncio.create_task(self._poll_commands(ws, sn))
                 elif cmd == "sendlog":
@@ -295,8 +297,8 @@ class Command(BaseCommand):
             try:
                 response = await asyncio.to_thread(self._post_to_bridge, target_url, secret, gateway_records)
                 self.stdout.write(f"[{sn}] sendlog enroll_ids={enroll_ids} -> {target_url}: {response}")
-                if target_url == meal_bridge_url:
-                    # Meal terminals wait for allow/deny + a line to show; that allow is what makes the printer issue the ticket.
+                if target_url == meal_bridge_url and getattr(settings, "MEAL_TERMINAL_REPLY_MODE", "minimal") != "minimal":
+                    # Optional: allow/deny + a line to show on the terminal (see MEAL_TERMINAL_REPLY_MODE).
                     replies = [item for item in response.get("results", []) if "access" in item]
                     if replies:
                         access = 1 if all(item["access"] == 1 for item in replies) else 0
@@ -306,6 +308,13 @@ class Command(BaseCommand):
                 result = False
 
         await ws.send(json.dumps(build_sendlog_ack(datetime.now(), result=result, count=count, logindex=logindex, access=access, message=terminal_message)))
+
+    @staticmethod
+    def _minimal_reg_for_device(serial_number):
+        """Meal-ticket terminals get the same bare handshake reply the vendor's own demo server sends."""
+        if getattr(settings, "MEAL_TERMINAL_REPLY_MODE", "minimal") == "extended":
+            return False
+        return BiometricDevice.objects.filter(serial_number=serial_number, purpose="meal_ticket").exists()
 
     @staticmethod
     def _mark_device_online(serial_number, ip_address):

@@ -242,6 +242,11 @@ DOCUMENTS_USE_X_ACCEL_REDIRECT = os.environ.get("DOCUMENTS_USE_X_ACCEL_REDIRECT"
 # Machine-to-machine secret for the vendor gateway; never fall back to a default.
 BIOMETRIC_BRIDGE_SECRET = os.environ.get("BIOMETRIC_BRIDGE_SECRET", "")
 
+# How much the AiFace gateway says to a meal-ticket terminal. "minimal" answers exactly like the
+# vendor's own demo server (which is what lets the terminal's printer print); "message" adds the
+# ticket line shown on the terminal screen; "extended" is the older, chattier reply.
+MEAL_TERMINAL_REPLY_MODE = os.environ.get("MEAL_TERMINAL_REPLY_MODE", "minimal")
+
 
 LOGGING = {
     "version": 1,

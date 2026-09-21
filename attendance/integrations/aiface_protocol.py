@@ -23,14 +23,17 @@ from typing import Any, Mapping
 IDENTITY_SYSTEM = "vendor_flask_gateway"
 
 
-def build_reg_ack(now: datetime) -> dict:
-    """Response to the device's `reg` handshake.
+def build_reg_ack(now: datetime, *, minimal: bool = False) -> dict:
+    """Response to the device's `reg` handshake. `minimal` is exactly what the vendor's demo server sends
+    (nothing beyond the documented reply), used for meal terminals whose printer only works that way.
 
     ``nosenduser``/``nosendimage`` are requests (the device may ignore them)
     asking it to skip enrollment sync and photo attachments — the ingestion
     pipeline strips biometric payload fields anyway, so there is no reason to
     have the device spend bandwidth sending them.
     """
+    if minimal:
+        return {"ret": "reg", "result": True, "cloudtime": now.strftime("%Y-%m-%d %H:%M:%S")}
     return {
         "ret": "reg",
         "result": True,
