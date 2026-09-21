@@ -161,3 +161,22 @@ def translate_sendlog_record(device_serial_number: str, record: Mapping[str, Any
         "event": record.get("event"),
         "temperature": round(temp / 10, 1) if temp is not None else None,
     }
+
+
+def choose_terminal_reply(mode: str, results) -> tuple[int | None, str | None]:
+    """What (access, message) to add to a meal terminal's `sendlog` reply.
+
+    minimal  - nothing: the bare vendor-style reply (the terminal prints every verified scan itself).
+    message  - allow everything and show a line on the screen.
+    extended - same as message (older name).
+    gated    - allow only entitled scans, deny the rest with a reason. For a terminal set to Server
+               approval = Yes, denying is what stops the printer for someone who is not entitled.
+    """
+    replies = [item for item in results if "access" in item]
+    if mode == "minimal" or not replies:
+        return None, None
+    message = replies[-1].get("message")
+    if mode == "gated":
+        allowed = all(item.get("access") == 1 and item.get("entitled") for item in replies)
+        return (1 if allowed else 0), message
+    return (1 if all(item.get("access") == 1 for item in replies) else 0), message

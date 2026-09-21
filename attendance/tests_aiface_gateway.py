@@ -231,3 +231,25 @@ class MinimalRegAckTests(SimpleTestCase):
         from attendance.integrations.aiface_protocol import build_reg_ack
         ack = build_reg_ack(datetime(2026, 1, 1, 8, 0, 0))
         self.assertTrue(ack["nosenduser"] and ack["nosendimage"])
+
+
+class ChooseTerminalReplyTests(SimpleTestCase):
+    entitled = [{"access": 1, "entitled": True, "message": "Ticket 1 of 2 - Ada"}]
+    extra = [{"access": 1, "entitled": False, "message": "Not entitled - Ada"}]
+    unknown = [{"access": 0, "entitled": False, "message": "Not enrolled for meals"}]
+
+    def test_minimal_adds_nothing(self):
+        from attendance.integrations.aiface_protocol import choose_terminal_reply
+        self.assertEqual(choose_terminal_reply("minimal", self.entitled), (None, None))
+        self.assertEqual(choose_terminal_reply("gated", []), (None, None))
+
+    def test_message_mode_allows_everyone_recognised_and_shows_the_line(self):
+        from attendance.integrations.aiface_protocol import choose_terminal_reply
+        self.assertEqual(choose_terminal_reply("message", self.extra), (1, "Not entitled - Ada"))
+        self.assertEqual(choose_terminal_reply("message", self.unknown), (0, "Not enrolled for meals"))
+
+    def test_gated_mode_only_allows_entitled_scans(self):
+        from attendance.integrations.aiface_protocol import choose_terminal_reply
+        self.assertEqual(choose_terminal_reply("gated", self.entitled), (1, "Ticket 1 of 2 - Ada"))
+        self.assertEqual(choose_terminal_reply("gated", self.extra), (0, "Not entitled - Ada"))
+        self.assertEqual(choose_terminal_reply("gated", self.unknown), (0, "Not enrolled for meals"))

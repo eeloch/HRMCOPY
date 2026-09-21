@@ -17,7 +17,7 @@ from rest_framework.views import APIView
 
 from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
 
-from .models import MealCollection
+from .models import MealCollection, MealCollectionStatus
 from .services import MealService
 
 
@@ -31,13 +31,15 @@ def terminal_reply(result):
     if result.status in {"created", "duplicate"}:
         collection = MealCollection.objects.filter(pk=result.collection_id).select_related("employee").first()
         if collection is None:
-            return {"access": 1, "message": "Meal ticket"}
+            return {"access": 1, "entitled": True, "message": "Meal ticket"}
         # The terminal's screen only fits about 28 characters, so lead with the ticket and keep the name short.
         first = (collection.employee.first_name or collection.employee.full_name).split()[0][:12]
-        line = f"Ticket {collection.sequence_number} of {collection.entitlement_snapshot}" if collection.entitlement_snapshot else "No ticket today"
-        return {"access": 1, "message": f"{line} - {first}"}
+        entitled = collection.status == MealCollectionStatus.WITHIN
+        line = f"Ticket {collection.sequence_number} of {collection.entitlement_snapshot}" if entitled else "Not entitled"
+        # access stays 1 (the scan is always recorded and decided later); `entitled` is what the gated mode uses.
+        return {"access": 1, "entitled": entitled, "message": f"{line} - {first}"}
     reasons = {"unmapped_employee": "Not enrolled for meals", "revoked_access": "No meal access", "unknown_device": "Device not registered"}
-    return {"access": 0, "message": reasons.get(result.status, "Scan not recognised")}
+    return {"access": 0, "entitled": False, "message": reasons.get(result.status, "Scan not recognised")}
 
 
 class MealVendorGatewayPunchBridgeAPIView(APIView):
@@ -87,5 +89,5 @@ class MealVendorGatewayPunchBridgeAPIView(APIView):
         invalid = [(gateway_id, record) for gateway_id, record in normalized if "invalid" in record]
         summary.invalid += len(invalid)
         results = [{"gateway_record_id": gateway_id, "status": result.status, "reason": result.reason, **terminal_reply(result)} for (gateway_id, _), result in zip(valid, summary.results)]
-        results.extend({"gateway_record_id": gateway_id, "status": "invalid", "reason": record["invalid"], "access": 0, "message": "Scan not recognised"} for gateway_id, record in invalid)
+        results.extend({"gateway_record_id": gateway_id, "status": "invalid", "reason": record["invalid"], "access": 0, "entitled": False, "message": "Scan not recognised"} for gateway_id, record in invalid)
         return Response({"received": len(normalized), "created": summary.created, "duplicate": summary.duplicate, "unmapped_employee": summary.unmapped_employee, "unknown_device": summary.unknown_device, "revoked_access": summary.revoked_access, "invalid": summary.invalid, "results": results})

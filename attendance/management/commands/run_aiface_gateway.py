@@ -30,6 +30,7 @@ from attendance.integrations.aiface_protocol import (
     build_getuserinfo_command,
     build_reg_ack,
     build_sendlog_ack,
+    choose_terminal_reply,
     build_senduser_ack,
     build_setuserinfo_command,
     translate_sendlog_record,
@@ -297,12 +298,8 @@ class Command(BaseCommand):
             try:
                 response = await asyncio.to_thread(self._post_to_bridge, target_url, secret, gateway_records)
                 self.stdout.write(f"[{sn}] sendlog enroll_ids={enroll_ids} -> {target_url}: {response}")
-                if target_url == meal_bridge_url and getattr(settings, "MEAL_TERMINAL_REPLY_MODE", "minimal") != "minimal":
-                    # Optional: allow/deny + a line to show on the terminal (see MEAL_TERMINAL_REPLY_MODE).
-                    replies = [item for item in response.get("results", []) if "access" in item]
-                    if replies:
-                        access = 1 if all(item["access"] == 1 for item in replies) else 0
-                        terminal_message = replies[-1].get("message")
+                if target_url == meal_bridge_url:
+                    access, terminal_message = choose_terminal_reply(getattr(settings, "MEAL_TERMINAL_REPLY_MODE", "minimal"), response.get("results", []))
             except (urllib.error.URLError, ValueError) as error:
                 self.stderr.write(f"[{sn}] bridge post failed, asking device to retry: {error}")
                 result = False

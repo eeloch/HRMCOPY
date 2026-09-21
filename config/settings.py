@@ -244,7 +244,8 @@ BIOMETRIC_BRIDGE_SECRET = os.environ.get("BIOMETRIC_BRIDGE_SECRET", "")
 
 # How much the AiFace gateway says to a meal-ticket terminal. "minimal" answers exactly like the
 # vendor's own demo server (which is what lets the terminal's printer print); "message" adds the
-# ticket line shown on the terminal screen; "extended" is the older, chattier reply.
+# ticket line shown on the terminal screen; "gated" also refuses (no printing) anyone who is not entitled -
+# use it with the terminal's Server approval set to Yes; "extended" is the older, chattier reply.
 MEAL_TERMINAL_REPLY_MODE = os.environ.get("MEAL_TERMINAL_REPLY_MODE", "minimal")
 
 
