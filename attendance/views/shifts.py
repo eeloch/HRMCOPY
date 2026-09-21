@@ -175,7 +175,7 @@ class ShiftPlanAssignAPIView(APIView):
         from django.utils import timezone
 
         from attendance.models import ShiftPlan, ShiftPlanAssignment
-        from attendance.services.shift_plans import assign_plan
+        from attendance.services.shift_plans import assign_plan, split_groups
         from employees.models import Employee
 
         plan = get_object_or_404(ShiftPlan, pk=request.data.get("plan"))
@@ -199,13 +199,14 @@ class ShiftPlanAssignAPIView(APIView):
             return Response({"detail": "The start date is not valid."}, status=status.HTTP_400_BAD_REQUEST)
         group = str(request.data.get("group", "")).upper()
         if request.data.get("dry_run"):
-            split = {"A": len(people[::2]), "B": len(people[1::2])} if group == "SPLIT" else None
+            split = {"A": len(split_groups(people)[0]), "B": len(split_groups(people)[1])} if group == "SPLIT" else None
             return Response({"people": len(people), "split": split, "sample": [e.full_name for e in people[:5]]})
         with transaction.atomic():
             try:
                 if plan.kind == "rotation" and group == "SPLIT":
-                    _, first = assign_plan(people[::2], plan, group="A", start_date=start, actor=request.user.get_username())
-                    _, second = assign_plan(people[1::2], plan, group="B", start_date=start, actor=request.user.get_username()) if people[1::2] else (None, None)
+                    group_a, group_b = split_groups(people)
+                    _, first = assign_plan(group_a, plan, group="A", start_date=start, actor=request.user.get_username())
+                    _, second = assign_plan(group_b, plan, group="B", start_date=start, actor=request.user.get_username()) if group_b else (None, None)
                     summary = {"created": first.created + (second.created if second else 0), "updated": first.updated + (second.updated if second else 0)}
                 else:
                     _, done = assign_plan(people, plan, group=group, start_date=start, actor=request.user.get_username())

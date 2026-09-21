@@ -132,6 +132,19 @@ class ShiftPlanApiTests(PlanTestCase):
         self.assertEqual(EmployeeRosterDay.objects.get(employee=a, date=MONDAY).shift, self.day)
         self.assertEqual(EmployeeRosterDay.objects.get(employee=b, date=MONDAY).shift, self.night)
 
+    def test_the_split_is_balanced_inside_every_department(self):
+        from .services.shift_plans import split_groups
+
+        other = Department.objects.create(name="Scrap")
+        more = [Employee.objects.create(employee_id=f"S{i:03d}", first_name="S", last_name=str(i), department=other) for i in range(4)]
+        group_a, group_b = split_groups(self.people + more)
+        for dept in (self.dept, other):
+            in_a = sum(1 for e in group_a if e.department_id == dept.pk)
+            in_b = sum(1 for e in group_b if e.department_id == dept.pk)
+            self.assertLessEqual(abs(in_a - in_b), 1)
+        self.assertEqual(len(group_a) + len(group_b), 9)
+        self.assertLessEqual(abs(len(group_a) - len(group_b)), 1)  # the odd leftovers alternate, so the whole is balanced too
+
     def test_the_list_shows_who_is_on_days_this_week_and_the_counts(self):
         self.client.post("/api/attendance/shift-plans/assign/", {"plan": self.rotation.pk, "group": "A", "department_ids": [self.dept.pk]}, format="json")
         data = self.client.get("/api/attendance/shift-plans/").json()

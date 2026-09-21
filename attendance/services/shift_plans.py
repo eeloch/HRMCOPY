@@ -88,6 +88,21 @@ def sync_rosters(assignments, start, end):
     return summary
 
 
+def split_groups(people):
+    """Divide people between Group A and Group B, evenly within each department (by staff number), so every
+    department has both a day team and a night team. Odd leftovers alternate between the groups."""
+    a, b = [], []
+    shift = 0
+    departments = {}
+    for person in sorted(people, key=lambda e: e.employee_id):
+        departments.setdefault(person.department_id, []).append(person)
+    for members in departments.values():
+        for index, person in enumerate(members):
+            (a if (index + shift) % 2 == 0 else b).append(person)
+        shift += len(members) % 2
+    return a, b
+
+
 def assign_plan(employees, plan, *, group="", start_date=None, actor=""):
     """Put these people on a plan from start_date. A person's earlier assignment is closed the day before, and the
     generated roster from start_date on is rewritten to follow the new plan (manual days are kept)."""
