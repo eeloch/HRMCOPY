@@ -1142,3 +1142,29 @@ class InactiveStaffTests(TestCase):
         _, wire = Command._next_command_to_send("AYTK14145399")
         self.assertEqual(wire["cmd"], "getuserids")
 
+
+
+class LostSwitchCommandTests(TestCase):
+    """A meal-terminal switch that gets no answer is retried straight away, not left for the next 5-minute check."""
+
+    def setUp(self):
+        self.device = BiometricDevice.objects.create(name="Canteen", serial_number="SWITCH1", purpose="meal_ticket")
+
+    def sent(self, attempts=0):
+        from datetime import timedelta as delta
+
+        from django.utils import timezone as tz
+
+        return DeviceCommand.objects.create(device=self.device, command_type="set_user_enabled", payload={"enrollid": 5, "enabled": False, "employee_id": 1, "attempts": attempts}, status="sent", sent_at=tz.now() - delta(seconds=30))
+
+    def test_an_unanswered_switch_goes_back_to_pending_with_a_retry_counted(self):
+        command = self.sent()
+        DeviceCommand.expire_stale()
+        command.refresh_from_db()
+        self.assertEqual((command.status, command.payload["attempts"], command.sent_at), ("pending", 1, None))
+
+    def test_it_gives_up_after_six_tries(self):
+        command = self.sent(attempts=5)
+        DeviceCommand.expire_stale()
+        command.refresh_from_db()
+        self.assertEqual(command.status, "failed")

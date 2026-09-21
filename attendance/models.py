@@ -571,6 +571,7 @@ class DeviceCommand(models.Model):
     # close enough that a retry right after the UI times out isn't still
     # blocked by the very row that just failed.
     STALE_AFTER = timedelta(seconds=60)
+    SWITCH_MAX_ATTEMPTS = 6
     SWITCH_STALE_AFTER = timedelta(seconds=10)  # a one-line switch that isn't answered quickly was lost in a reconnect
     CLONE_STALE_AFTER = timedelta(minutes=5)
 
@@ -597,10 +598,20 @@ class DeviceCommand(models.Model):
         by a dropped connection would block that device's queue forever.
         """
         now = timezone.now()
+        # A switch on/off that was lost (the terminal reconnected before answering) is retried at once, a few times,
+        # instead of being left for the next 5-minute check.
+        lost = cls.objects.filter(status="sent", command_type="set_user_enabled", sent_at__lt=now - cls.SWITCH_STALE_AFTER)
+        if device is not None:
+            lost = lost.filter(device=device)
+        for command in lost:
+            attempts = int(command.payload.get("attempts", 0)) + 1
+            if attempts >= cls.SWITCH_MAX_ATTEMPTS:
+                cls.objects.filter(pk=command.pk).update(status="failed", result={"detail": f"No answer from the device after {attempts} tries."}, completed_at=now)
+            else:
+                cls.objects.filter(pk=command.pk).update(status="pending", sent_at=None, payload={**command.payload, "attempts": attempts})
         stale = cls.objects.filter(status="sent").filter(
             (~Q(command_type__in=["clone_enrollment", "set_user_enabled"]) & Q(sent_at__lt=now - cls.STALE_AFTER))
             | Q(command_type="clone_enrollment", sent_at__lt=now - cls.CLONE_STALE_AFTER)
-            | Q(command_type="set_user_enabled", sent_at__lt=now - cls.SWITCH_STALE_AFTER)
         )
         if device is not None:
             stale = stale.filter(device=device)
