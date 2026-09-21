@@ -159,3 +159,35 @@ class ShiftPlanApiTests(PlanTestCase):
         outsider = APIClient()
         outsider.force_authenticate(get_user_model().objects.create_user("nobody", password="pw"))
         self.assertEqual(outsider.post("/api/attendance/shift-plans/assign/", {"plan": self.rotation.pk, "group": "A", "everyone": True}, format="json").status_code, 403)
+
+
+class LiveDashboardTests(TestCase):
+    """Punches show on the Workforce Operations dashboard the same day, and nobody is 'absent' while their shift is still running."""
+
+    def setUp(self):
+        from django.utils import timezone as tz
+
+        from .models import AttendanceEvent, BiometricDevice
+        from .services.processing import process_attendance_for_date
+
+        self.tz, self.AttendanceEvent, self.process = tz, AttendanceEvent, process_attendance_for_date
+        today = tz.localdate()
+        self.always = Shift.objects.create(name="All Day", start_time=time(0, 0), end_time=time(23, 59))  # covers "right now" whenever this runs
+        self.device = BiometricDevice.objects.create(name="Gate", serial_number="LIVE1", purpose="attendance", is_online=True)
+        self.people = [Employee.objects.create(employee_id=f"L{i}", first_name="L", last_name=str(i)) for i in range(3)]
+        for person in self.people:
+            EmployeeRosterDay.objects.create(employee=person, date=today, status="work", shift=self.always)
+        self.today = today
+
+    def test_a_punch_shows_as_present_and_the_others_as_not_in_yet_not_absent(self):
+        from .services.dashboard import DashboardService
+
+        self.AttendanceEvent.objects.create(employee=self.people[0], device=self.device, timestamp=self.tz.now())
+        self.process(self.today)
+        data = DashboardService.get_dashboard()
+        self.assertEqual(data["summary"]["present"] + data["summary"]["late"], 1)
+        self.assertEqual(data["summary"]["absent"], 0)  # the shift has not ended
+        self.assertEqual((data["summary"]["expected"], data["summary"]["not_yet_in"]), (3, 2))
+        self.assertEqual(data["recent_events"][0]["employee_number"], "L0")
+        self.assertEqual(data["recent_events"][0]["device"], "Gate")
+        self.assertEqual(data["device_status"][0]["name"], "Gate")

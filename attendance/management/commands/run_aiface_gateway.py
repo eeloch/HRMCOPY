@@ -41,6 +41,7 @@ CLONE_TARGET_WAIT_SECONDS = 6
 CLONE_MAX_ATTEMPTS = 3
 
 COMMAND_POLL_INTERVAL_SECONDS = 2
+ATTENDANCE_REFRESH_SECONDS = 300  # turn punches into attendance records this often (today and yesterday)
 ROSTER_EXTEND_CHECK_SECONDS = 3600  # once an hour we check whether today's roster extension has run
 GATING_FULL_CHECK_SECONDS = 300  # everyone is re-checked this often; a person's own scan re-checks them at once
 
@@ -101,6 +102,7 @@ class Command(BaseCommand):
 
     _last_gating_check = float("-inf")
     _last_roster_check = float("-inf")
+    _last_attendance_refresh = float("-inf")
     _roster_extended_on = None
 
     async def _serve(self, host, port, bridge_url, meal_bridge_url, secret):
@@ -186,6 +188,9 @@ class Command(BaseCommand):
                     # gateway that was down). Claim the slot first so the other terminals' loops skip it.
                     self._last_gating_check = now
                     await asyncio.to_thread(self._reconcile_meal_gating)
+                if now - self._last_attendance_refresh >= ATTENDANCE_REFRESH_SECONDS:
+                    self._last_attendance_refresh = now
+                    await asyncio.to_thread(self._refresh_attendance)
                 if now - self._last_roster_check >= ROSTER_EXTEND_CHECK_SECONDS:
                     self._last_roster_check = now
                     await asyncio.to_thread(self._extend_rosters_daily)
@@ -205,6 +210,20 @@ class Command(BaseCommand):
     @staticmethod
     def _requeue_lost_switches(serial_number):
         DeviceCommand.objects.filter(device__serial_number=serial_number, command_type="set_user_enabled", status="sent").update(status="pending", sent_at=None)
+
+    def _refresh_attendance(self):
+        """Keep attendance records live: punches become records within minutes, not the next morning. While a shift
+        is still running nobody is called absent; a finished day is judged in full (see process_employee_attendance)."""
+        try:
+            from datetime import timedelta
+
+            from attendance.services.processing import process_attendance_for_date
+
+            today = timezone.localdate()
+            total = sum(len(process_attendance_for_date(day)) for day in (today - timedelta(days=1), today))
+            self.stdout.write(f"attendance refresh: {total} record(s) up to date")
+        except Exception as error:  # never let this take the gateway down
+            self.stderr.write(f"attendance refresh failed: {error}")
 
     def _extend_rosters_daily(self):
         """Once a day, write everyone's planned roster for the coming weeks so the weekly Day/Night swap needs no one."""

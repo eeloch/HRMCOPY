@@ -7,7 +7,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from attendance.models import AttendanceEvent, AttendanceException, DailyAttendance, ShiftAssignment
+from attendance.models import AttendanceEvent, AttendanceException, DailyAttendance, EmployeeRosterDay, ShiftAssignment
 from attendance.services.leave import approved_leave_employee_ids
 from attendance.services.roster import get_employee_roster_day
 from audit.models import AuditSeverity
@@ -130,8 +130,14 @@ def _log_attendance_changes(attendance, previous):
         )
 
 
-def process_employee_attendance(employee, work_date):
-    """Process one employee's assigned shift date without duplicating facts."""
+def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None):
+    """Process one employee's assigned shift date without duplicating facts.
+
+    While the shift is still open (until the punch-capture window after it ends) nobody is marked absent and no
+    missing-punch or early-departure exception is raised: a person who has punched is simply present or late.
+    Once the shift and its capture window are over the day is judged in full. Running it again is always safe.
+    """
+    now = now or timezone.now()
     roster_day = get_employee_roster_day(employee, work_date)
     existing_attendance = DailyAttendance.objects.filter(employee=employee, date=work_date).first()
     # A date-level rest day prevents automated absence creation. Raw punches are
@@ -150,11 +156,19 @@ def process_employee_attendance(employee, work_date):
         timestamp__lte=scheduled_end + timedelta(hours=CAPTURE_WINDOW_HOURS),
     ).order_by("timestamp")
 
-    has_leave = employee.pk in set(approved_leave_employee_ids(work_date))
+    has_leave = employee.pk in (leave_ids if leave_ids is not None else set(approved_leave_employee_ids(work_date)))
+    shift_open = now < scheduled_end + timedelta(hours=CAPTURE_WINDOW_HOURS)
 
     # Leave stays an operational overlay. Do not create an absence row or punch
     # facts for a leave-only shift; existing facts remain untouched when no events exist.
     if not events.exists() and has_leave:
+        return existing_attendance
+
+    # Shift still open and nobody has punched yet: there is nothing to record (and nobody to call absent yet).
+    if shift_open and not events.exists():
+        if existing_attendance is not None and existing_attendance.status == "absent":
+            existing_attendance.delete()  # an absence written by an earlier run, before the shift had finished
+            return None
         return existing_attendance
 
     with transaction.atomic():
@@ -179,7 +193,18 @@ def process_employee_attendance(employee, work_date):
         attendance.scheduled_end = scheduled_end
         event_count = events.count()
 
-        if event_count == 0:
+        if shift_open:
+            # Punched during the shift: in from their first punch. The clock-out waits for the end of the shift.
+            first_punch = events.first().timestamp
+            attendance.actual_clock_in = first_punch
+            attendance.actual_clock_out = None
+            missing_clock_in = missing_clock_out = False
+            attendance.late_minutes = max(0, int((first_punch - scheduled_start).total_seconds() // 60))
+            attendance.early_departure_minutes = 0
+            attendance.worked_minutes = 0
+            attendance.overtime_minutes = 0
+            attendance.status = "late" if attendance.late_minutes else "present"
+        elif event_count == 0:
             attendance.actual_clock_in = None
             attendance.actual_clock_out = None
             attendance.late_minutes = 0
@@ -268,26 +293,28 @@ def process_employee_attendance(employee, work_date):
     return attendance
 
 
-def process_attendance_for_date(work_date, employee=None):
-    """Process every employee assigned on a date, or one supplied employee."""
+def process_attendance_for_date(work_date, employee=None, *, now=None):
+    """Process every employee expected on a date (rostered to work, or on an active shift assignment), or one employee."""
+    now = now or timezone.now()
     if employee is not None:
         employees = [employee] if (get_active_shift_assignment(employee, work_date) or get_employee_roster_day(employee, work_date)) else []
     else:
-        employees = [
-            assignment.employee
-            for assignment in ShiftAssignment.objects.filter(start_date__lte=work_date)
+        by_id = {}
+        for row in EmployeeRosterDay.objects.filter(date=work_date, status="work", employee__status="active").select_related("employee", "shift"):
+            by_id[row.employee_id] = row.employee
+        for assignment in (
+            ShiftAssignment.objects.filter(start_date__lte=work_date)
             .filter(Q(end_date__isnull=True) | Q(end_date__gte=work_date))
             .select_related("employee", "shift")
             .order_by("employee_id", "-start_date")
-        ]
+        ):
+            by_id.setdefault(assignment.employee_id, assignment.employee)
+        employees = list(by_id.values())
 
+    leave_ids = set(approved_leave_employee_ids(work_date))
     results = []
-    seen_employee_ids = set()
     for assigned_employee in employees:
-        if assigned_employee.pk in seen_employee_ids:
-            continue
-        seen_employee_ids.add(assigned_employee.pk)
-        attendance = process_employee_attendance(assigned_employee, work_date)
+        attendance = process_employee_attendance(assigned_employee, work_date, now=now, leave_ids=leave_ids)
         if attendance is not None:
             results.append(attendance)
     return results

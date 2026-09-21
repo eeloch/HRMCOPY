@@ -14,6 +14,23 @@ type DashboardSummary = {
   night_shift: number;
   overtime: number;
   conflicts: number;
+  expected: number;
+  not_yet_in: number;
+};
+
+type RecentPunch = {
+  employee_number: string;
+  employee_name: string;
+  department: string | null;
+  device: string | null;
+  timestamp: string;
+};
+
+type DeviceStatus = {
+  name: string;
+  purpose: string;
+  online: boolean;
+  last_sync_at: string | null;
 };
 
 type WorkforceEmployee = {
@@ -47,6 +64,8 @@ type AttendanceDashboard = {
   workforce_action_center: WorkforceEmployee[];
   department_readiness: DepartmentReadiness[];
   hostel_absentees: HostelAbsentee[];
+  recent_events: RecentPunch[];
+  device_status: DeviceStatus[];
 };
 
 const summaryCards: {
@@ -56,10 +75,22 @@ const summaryCards: {
   accent: string;
 }[] = [
   {
+    key: "expected",
+    label: "Expected Now",
+    detail: "Rostered and their shift has started",
+    accent: "bg-slate-100 text-slate-700 ring-slate-200",
+  },
+  {
     key: "present",
     label: "Present",
-    detail: "Clocked in today",
+    detail: "Clocked in (on time or late)",
     accent: "bg-emerald-50 text-emerald-700 ring-emerald-100",
+  },
+  {
+    key: "not_yet_in",
+    label: "Not In Yet",
+    detail: "Expected but no punch so far",
+    accent: "bg-orange-50 text-orange-700 ring-orange-100",
   },
   {
     key: "absent",
@@ -379,6 +410,52 @@ export default function AttendancePage() {
                 <div className="p-10 text-center text-slate-500">
                   No hostel residents are absent today.
                 </div>
+              )}
+            </section>
+
+            <section className="mt-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex flex-col gap-2 border-b border-slate-200 px-5 py-5 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900">Recent Punches</h2>
+                  <p className="mt-1 text-sm text-slate-500">The latest scans from the attendance terminals, as they arrive. Attendance records update every few minutes.</p>
+                </div>
+                {!loading && (
+                  <div className="flex flex-wrap gap-2">
+                    {dashboard?.device_status.map((device) => (
+                      <span key={device.name} className={`rounded-full px-3 py-1 text-xs font-semibold ${device.online ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                        {device.name}: {device.online ? "online" : "offline"}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {loading ? (
+                <TableSkeleton />
+              ) : dashboard?.recent_events.length ? (
+                <div className="max-h-[420px] overflow-auto">
+                  <table className="w-full min-w-[600px] text-left">
+                    <thead className="sticky top-0 bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      <tr>
+                        <th className="px-5 py-3">Time</th>
+                        <th className="px-5 py-3">Employee</th>
+                        <th className="px-5 py-3">Department</th>
+                        <th className="px-5 py-3">Terminal</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {dashboard.recent_events.map((punch, index) => (
+                        <tr key={`${punch.employee_number}-${punch.timestamp}-${index}`}>
+                          <td className="px-5 py-3 text-sm tabular-nums text-slate-600">{new Date(punch.timestamp).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" })}</td>
+                          <td className="px-5 py-3"><span className="font-semibold text-slate-900">{punch.employee_name}</span> <span className="text-xs text-slate-500">{punch.employee_number}</span></td>
+                          <td className="px-5 py-3 text-sm text-slate-600">{punch.department || "-"}</td>
+                          <td className="px-5 py-3 text-sm text-slate-600">{punch.device || "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="p-10 text-center text-slate-500">No punches yet.</div>
               )}
             </section>
           </>

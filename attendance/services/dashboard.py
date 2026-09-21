@@ -1,10 +1,14 @@
-from datetime import date
+from datetime import timedelta
+
+from django.db.models import Q
+from django.utils import timezone
 
 from attendance.models import (
     DailyAttendance,
     AttendanceException,
     AttendanceEvent,
     BiometricDevice,
+    EmployeeRosterDay,
 )
 
 from employees.models import Department
@@ -17,8 +21,16 @@ class DashboardService:
     """
 
     @staticmethod
+    def live_records(today):
+        """Today's records plus last night's overnight shift while it is still running."""
+        now = timezone.now()
+        return DailyAttendance.objects.filter(
+            Q(date=today) | Q(date=today - timedelta(days=1), shift__is_overnight=True, scheduled_end__gt=now)
+        )
+
+    @staticmethod
     def get_dashboard():
-        today = date.today()
+        today = timezone.localdate()
 
         return {
             "summary": DashboardService.get_summary(today),
@@ -33,11 +45,7 @@ class DashboardService:
 
     @staticmethod
     def get_summary(today):
-        attendance = DailyAttendance.objects.select_related(
-            "shift"
-        ).filter(
-            date=today
-        )
+        attendance = DashboardService.live_records(today).select_related("shift")
 
         leave_employee_ids = set(approved_leave_employee_ids(today))
         conflict_employee_ids = set(AttendanceException.objects.filter(attendance__date=today, exception_type="leave_punch_conflict").values_list("attendance__employee_id", flat=True))
@@ -65,10 +73,25 @@ class DashboardService:
                 shift__is_overnight=True
             ).count(),
 
+            **DashboardService.expected_now(today, attendance, leave_employee_ids),
+
             "overtime": attendance.filter(
                 overtime_minutes__gt=0
             ).count(),
         }
+    @staticmethod
+    def expected_now(today, attendance, leave_employee_ids):
+        """Who is rostered to be at work right now, and who of them has not punched in yet."""
+        now = timezone.localtime()
+        clock = now.time()
+        started = EmployeeRosterDay.objects.filter(status="work", employee__status="active", shift__isnull=False).filter(
+            Q(date=today, shift__start_time__lte=clock)
+            | Q(date=today - timedelta(days=1), shift__is_overnight=True, shift__end_time__gt=clock)
+        ).values_list("employee_id", flat=True)
+        expected = set(started) - set(leave_employee_ids)
+        in_ids = set(attendance.filter(status__in=["present", "late", "incomplete"]).values_list("employee_id", flat=True))
+        return {"expected": len(expected), "not_yet_in": len(expected - in_ids)}
+
     @staticmethod
     def get_absent_employees(today):
 
@@ -129,10 +152,9 @@ class DashboardService:
         for department in departments:
 
             present = (
-                DailyAttendance.objects.filter(
-                    date=today,
+                DashboardService.live_records(today).filter(
                     employee__department=department,
-                    status="present",
+                    status__in=["present", "late"],
                 ).count()
             )
 
@@ -214,8 +236,22 @@ class DashboardService:
 
     @staticmethod
     def get_recent_events():
-        return []
+        """The latest punches, newest first, so a test at the terminal shows up straight away."""
+        events = AttendanceEvent.objects.select_related("employee", "employee__department", "device").order_by("-timestamp")[:20]
+        return [
+            {
+                "employee_number": e.employee.employee_id,
+                "employee_name": e.employee.full_name,
+                "department": e.employee.department.name if e.employee.department else None,
+                "device": e.device.name if e.device else None,
+                "timestamp": e.timestamp,
+            }
+            for e in events
+        ]
 
     @staticmethod
     def get_device_status():
-        return []
+        return [
+            {"name": d.name, "purpose": d.purpose, "online": d.is_online, "last_sync_at": d.last_sync_at}
+            for d in BiometricDevice.objects.order_by("name")
+        ]

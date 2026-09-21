@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 
 from attendance.models import AttendanceEvent, AttendanceException, BiometricDevice, DailyAttendance, EmployeeRosterDay, OvertimeRecord, Shift, ShiftAssignment
 from attendance.integrations import BiometricIngestionService, NormalizedBiometricPunch
-from attendance.services.processing import process_employee_attendance
+from attendance.services.processing import process_attendance_for_date, process_employee_attendance
 from attendance.services.roster import IncompleteRosterError, expected_attendance_days, generate_roster, roster_completeness
 from attendance.services.overtime import approve_overtime, reject_overtime, sync_overtime_for_date
 from audit.models import AuditEvent
@@ -177,6 +177,8 @@ class BiometricEventFeedTests(TestCase):
 
 class AttendanceProcessingTests(TestCase):
     work_date = date(2026, 10, 15)
+    # "Now" for these tests is well after the shift and its punch-capture window: the day is judged in full.
+    after = timezone.make_aware(datetime(2026, 10, 17, 12, 0))
 
     def setUp(self):
         self.day_shift, _ = Shift.objects.get_or_create(
@@ -209,12 +211,52 @@ class AttendanceProcessingTests(TestCase):
             ),
         )
 
+    def test_while_the_shift_is_open_a_punch_means_present_and_nobody_is_called_absent(self):
+        during = timezone.make_aware(datetime(2026, 10, 15, 10, 0))
+        punched = self.employee_with_shift("OPEN1")
+        quiet = self.employee_with_shift("OPEN2")
+        self.add_event(punched, self.work_date, 7, 5)
+        record = process_employee_attendance(punched, self.work_date, now=during)
+        self.assertEqual((record.status, record.late_minutes), ("late", 5))
+        self.assertIsNone(record.actual_clock_out)
+        self.assertFalse(AttendanceException.objects.filter(attendance=record, exception_type__in=["missing_clock_out", "early_departure", "absence"]).exists())
+        self.assertIsNone(process_employee_attendance(quiet, self.work_date, now=during))  # nothing recorded, so not absent
+        self.assertFalse(DailyAttendance.objects.filter(employee=quiet).exists())
+
+    def test_the_same_day_is_judged_in_full_once_it_is_over(self):
+        during = timezone.make_aware(datetime(2026, 10, 15, 10, 0))
+        quiet = self.employee_with_shift("OPEN3")
+        process_employee_attendance(quiet, self.work_date, now=during)
+        self.assertEqual(process_employee_attendance(quiet, self.work_date, now=self.after).status, "absent")
+        one_punch = self.employee_with_shift("OPEN4")
+        self.add_event(one_punch, self.work_date, 7)
+        self.assertEqual(process_employee_attendance(one_punch, self.work_date, now=during).status, "present")
+        self.assertEqual(process_employee_attendance(one_punch, self.work_date, now=self.after).status, "incomplete")  # now flagged: no clock-out
+
+    def test_a_night_shift_is_not_judged_at_one_in_the_morning(self):
+        one_am = timezone.make_aware(datetime(2026, 10, 16, 1, 0))
+        night = self.employee_with_shift("NIGHTOPEN", self.night_shift)
+        self.add_event(night, self.work_date, 19, 0)
+        record = process_employee_attendance(night, self.work_date, now=one_am)
+        self.assertEqual(record.status, "present")
+        self.assertFalse(AttendanceException.objects.filter(attendance=record, exception_type="missing_clock_out").exists())
+
+    def test_the_roster_decides_who_is_processed_not_only_shift_assignments(self):
+        from attendance.models import EmployeeRosterDay
+
+        person = Employee.objects.create(employee_id="ATT-ROSTER", first_name="Roster", last_name="Only")  # no ShiftAssignment at all
+        EmployeeRosterDay.objects.create(employee=person, date=self.work_date, status="work", shift=self.day_shift)
+        self.add_event(person, self.work_date, 7)
+        self.add_event(person, self.work_date, 19)
+        results = process_attendance_for_date(self.work_date, now=self.after)
+        self.assertIn(person.pk, [r.employee_id for r in results])
+
     def test_day_shift_on_time(self):
         employee = self.employee_with_shift("ONTIME")
         self.add_event(employee, self.work_date, 7)
         self.add_event(employee, self.work_date, 19)
 
-        attendance = process_employee_attendance(employee, self.work_date)
+        attendance = process_employee_attendance(employee, self.work_date, now=self.after)
 
         self.assertEqual(attendance.status, "present")
         self.assertEqual(attendance.worked_minutes, 720)
@@ -224,7 +266,7 @@ class AttendanceProcessingTests(TestCase):
         late_employee = self.employee_with_shift("LATE")
         self.add_event(late_employee, self.work_date, 7, 17)
         self.add_event(late_employee, self.work_date, 18, 45)
-        late_attendance = process_employee_attendance(late_employee, self.work_date)
+        late_attendance = process_employee_attendance(late_employee, self.work_date, now=self.after)
         self.assertEqual(late_attendance.status, "late")
         self.assertEqual(late_attendance.late_minutes, 17)
         self.assertEqual(late_attendance.early_departure_minutes, 15)
@@ -247,7 +289,7 @@ class AttendanceProcessingTests(TestCase):
         overtime_employee = self.employee_with_shift("OVERTIME")
         self.add_event(overtime_employee, self.work_date, 7)
         self.add_event(overtime_employee, self.work_date, 19, 30)
-        overtime_attendance = process_employee_attendance(overtime_employee, self.work_date)
+        overtime_attendance = process_employee_attendance(overtime_employee, self.work_date, now=self.after)
         self.assertEqual(overtime_attendance.overtime_minutes, 30)
         self.assertEqual(overtime_attendance.worked_minutes, 750)
 
@@ -255,7 +297,7 @@ class AttendanceProcessingTests(TestCase):
         employee = self.employee_with_shift("SINGLE")
         self.add_event(employee, self.work_date, 7, 5)
 
-        attendance = process_employee_attendance(employee, self.work_date)
+        attendance = process_employee_attendance(employee, self.work_date, now=self.after)
 
         self.assertEqual(attendance.status, "incomplete")
         self.assertIsNotNone(attendance.actual_clock_in)
@@ -272,7 +314,7 @@ class AttendanceProcessingTests(TestCase):
         employee = self.employee_with_shift("MISSING-IN")
         self.add_event(employee, self.work_date, 19, 30)
 
-        attendance = process_employee_attendance(employee, self.work_date)
+        attendance = process_employee_attendance(employee, self.work_date, now=self.after)
 
         self.assertEqual(attendance.status, "incomplete")
         self.assertIsNone(attendance.actual_clock_in)
@@ -288,7 +330,7 @@ class AttendanceProcessingTests(TestCase):
     def test_no_punch_is_absent(self):
         employee = self.employee_with_shift("ABSENT")
 
-        attendance = process_employee_attendance(employee, self.work_date)
+        attendance = process_employee_attendance(employee, self.work_date, now=self.after)
 
         self.assertEqual(attendance.status, "absent")
         self.assertTrue(
@@ -316,7 +358,7 @@ class AttendanceProcessingTests(TestCase):
             approved_days=1,
         )
 
-        attendance = process_employee_attendance(employee, self.work_date)
+        attendance = process_employee_attendance(employee, self.work_date, now=self.after)
 
         self.assertIsNone(attendance)
         self.assertFalse(DailyAttendance.objects.filter(employee=employee, date=self.work_date).exists())
@@ -326,7 +368,7 @@ class AttendanceProcessingTests(TestCase):
         self.add_event(employee, self.work_date, 19, 10)
         self.add_event(employee, date(2026, 10, 16), 6, 50)
 
-        attendance = process_employee_attendance(employee, self.work_date)
+        attendance = process_employee_attendance(employee, self.work_date, now=self.after)
 
         self.assertEqual(attendance.status, "late")
         self.assertEqual(attendance.late_minutes, 10)
@@ -338,14 +380,14 @@ class AttendanceProcessingTests(TestCase):
         self.add_event(employee, self.work_date, 7, 15)
         self.add_event(employee, self.work_date, 19)
 
-        attendance = process_employee_attendance(employee, self.work_date)
+        attendance = process_employee_attendance(employee, self.work_date, now=self.after)
         late_exception = AttendanceException.objects.get(attendance=attendance, exception_type="late")
         late_exception.status = "approved"
         late_exception.minutes_affected = 999
         late_exception.save()
         audit_count = AuditEvent.objects.filter(employee=employee).count()
 
-        processed_again = process_employee_attendance(employee, self.work_date)
+        processed_again = process_employee_attendance(employee, self.work_date, now=self.after)
         late_exception.refresh_from_db()
 
         self.assertEqual(processed_again.pk, attendance.pk)
