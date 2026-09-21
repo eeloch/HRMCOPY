@@ -32,8 +32,10 @@ def terminal_reply(result):
         collection = MealCollection.objects.filter(pk=result.collection_id).select_related("employee").first()
         if collection is None:
             return {"access": 1, "message": "Meal ticket"}
-        line = f"Ticket {collection.sequence_number} of {collection.entitlement_snapshot}" if collection.entitlement_snapshot else "Not entitled today"
-        return {"access": 1, "message": f"{collection.employee.full_name[:20]}: {line}"}
+        # The terminal's screen only fits about 28 characters, so lead with the ticket and keep the name short.
+        first = (collection.employee.first_name or collection.employee.full_name).split()[0][:12]
+        line = f"Ticket {collection.sequence_number} of {collection.entitlement_snapshot}" if collection.entitlement_snapshot else "No ticket today"
+        return {"access": 1, "message": f"{line} - {first}"}
     reasons = {"unmapped_employee": "Not enrolled for meals", "revoked_access": "No meal access", "unknown_device": "Device not registered"}
     return {"access": 0, "message": reasons.get(result.status, "Scan not recognised")}
 

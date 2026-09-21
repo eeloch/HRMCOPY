@@ -1941,13 +1941,13 @@ class TerminalReplyTests(TestCase):
     def test_a_valid_scan_is_allowed_with_the_ticket_number(self):
         result = self.post("10", 1)
         self.assertEqual(result["access"], 1)
-        self.assertEqual(result["message"], "Ada Obi: Ticket 1 of 1")
+        self.assertEqual(result["message"], "Ticket 1 of 1 - Ada")
 
     def test_an_extra_ticket_is_still_handed_over_because_hr_decides_later(self):
         self.post("10", 1)
         result = self.post("10", 2)
         self.assertEqual(result["access"], 1)
-        self.assertEqual(result["message"], "Ada Obi: Ticket 2 of 1")
+        self.assertEqual(result["message"], "Ticket 2 of 1 - Ada")
 
     def test_someone_not_enrolled_is_denied_with_a_reason(self):
         result = self.post("999", 3)
