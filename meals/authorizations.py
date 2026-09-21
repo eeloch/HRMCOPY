@@ -45,7 +45,7 @@ def authorise(*, employee, quantity, pays, reason="", actor, work_date=None):
     with transaction.atomic():
         authorization = MealExtraAuthorization.objects.create(employee=employee, work_date=work_date, quantity=quantity, pays=pays, reason=reason.strip(), authorised_by=actor)
         AuditService.log(event_type="meals.extra_authorised", module="meals", employee=employee, actor=actor, object=authorization, severity=AuditSeverity.INFO, title="Extra meal ticket authorised", description=f"{quantity} extra ticket(s) authorised for {employee.full_name} on {work_date}; {'employee pays' if pays == 'employee' else 'company pays'}.", metadata={"quantity": quantity, "pays": pays, "reason": reason})
-    _refresh_terminal()
+    _refresh_terminal(employee)
     return authorization
 
 
@@ -60,7 +60,7 @@ def cancel(authorization, *, actor):
             authorization.cancelled_at = timezone.now()
         authorization.save()
         AuditService.log(event_type="meals.extra_authorisation_cancelled", module="meals", employee=authorization.employee, actor=actor, object=authorization, severity=AuditSeverity.WARNING, title="Extra meal ticket authorisation withdrawn", description=f"The unused extra ticket authorisation for {authorization.employee.full_name} on {authorization.work_date} was withdrawn.")
-    _refresh_terminal()
+    _refresh_terminal(authorization.employee)
     return authorization
 
 
@@ -101,11 +101,8 @@ def apply_to_new_excess(collection):
         return authorization
 
 
-def _refresh_terminal():
-    """Switch the person on at the terminal now rather than at the next 30-second check."""
-    try:
-        from .gating import reconcile
+def _refresh_terminal(employee):
+    """Switch the person on (or off) at the terminal now rather than at the next full check."""
+    from .gating import refresh
 
-        reconcile()
-    except Exception:
-        pass
+    refresh(employee)

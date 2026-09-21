@@ -2051,6 +2051,27 @@ class MealGatingTests(TestCase):
             MealService.void_collection(collection, boss, "test")
         self.assertEqual(self.gating.tickets_left_today(self.pilot), 2)  # back to the plain entitlement, not 3
 
+    def test_a_star_means_everyone_enrolled_on_the_meal_terminal_and_a_scan_only_rechecks_that_person(self):
+        from django.test import override_settings
+
+        third = Employee.objects.create(employee_id="NOTERM1", first_name="No", last_name="Terminal")  # not enrolled: never managed
+        with override_settings(MEAL_GATING_EMPLOYEE_IDS=["*"]):
+            self.assertEqual({e.employee_id for e in self.gating.gated_employees()}, {"PILOT1", "OTHER1"})
+            self.assertFalse(self.gating.gated_employees().filter(pk=third.pk).exists())
+            EmployeeRosterDay.objects.filter(employee__in=[self.pilot, self.other]).update(status=RosterDayStatus.REST, shift=None)
+            self.assertEqual(self.gating.reconcile(employees=[self.pilot.pk]), 1)  # only the person asked about
+            self.assertEqual(self.commands(), [(7, False)])
+            self.assertEqual(self.gating.reconcile(), 1)  # a full pass then picks up the other one (the first is already queued)
+            self.assertEqual(self.commands(), [(7, False), (8, False)])
+
+    def test_voiding_a_ticket_switches_the_person_back_on_straight_away(self):
+        self.gating.reconcile()
+        self.scan(self.pilot, "v1"); self.scan(self.pilot, "v2")
+        self.gating.reconcile(); self.confirm_all()
+        self.assertFalse(MealTerminalUserState.objects.get(employee=self.pilot).enabled)
+        MealService.void_collection(MealCollection.objects.filter(employee=self.pilot).order_by("-id").first(), get_user_model().objects.create_user("v2u", password="p"), "test")
+        self.assertEqual(self.commands()[-1], (7, True))  # no waiting for the next full check
+
     def test_the_wire_message(self):
         from attendance.integrations.aiface_protocol import build_device_command
         self.assertEqual(build_device_command("SN1", "set_user_enabled", {"enrollid": 7, "enabled": False}), {"cmd": "enableuser", "sn": "SN1", "enrollid": 7, "enflag": 0})

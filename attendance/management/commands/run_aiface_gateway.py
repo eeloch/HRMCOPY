@@ -41,7 +41,7 @@ CLONE_TARGET_WAIT_SECONDS = 6
 CLONE_MAX_ATTEMPTS = 3
 
 COMMAND_POLL_INTERVAL_SECONDS = 2
-GATING_RECONCILE_EVERY_POLLS = 3  # every ~6 seconds
+GATING_FULL_CHECK_SECONDS = 300  # everyone is re-checked this often; a person's own scan re-checks them at once
 
 try:
     import websockets
@@ -97,6 +97,8 @@ class Command(BaseCommand):
             asyncio.run(self._serve(host, port, bridge_url, meal_bridge_url, secret))
         except KeyboardInterrupt:
             self.stdout.write("\nStopped.")
+
+    _last_gating_check = float("-inf")
 
     async def _serve(self, host, port, bridge_url, meal_bridge_url, secret):
         async def handler(websocket):
@@ -173,13 +175,13 @@ class Command(BaseCommand):
         device.
         """
         try:
-            polls = 0
             while True:
                 await asyncio.sleep(COMMAND_POLL_INTERVAL_SECONDS)
-                polls += 1
-                if polls % GATING_RECONCILE_EVERY_POLLS == 0:
-                    # Keeps the few people covered by MEAL_GATING_EMPLOYEE_IDS in step with their tickets
-                    # (day rollover, roster changes, voided tickets). A no-op when nobody is listed.
+                now = asyncio.get_running_loop().time()
+                if now - self._last_gating_check >= GATING_FULL_CHECK_SECONDS:
+                    # Safety net for everyone covered by MEAL_GATING_EMPLOYEE_IDS (day rollover, roster changes, a
+                    # gateway that was down). Claim the slot first so the other terminals' loops skip it.
+                    self._last_gating_check = now
                     await asyncio.to_thread(self._reconcile_meal_gating)
                 next_command = await asyncio.to_thread(self._next_command_to_send, sn)
                 if next_command is None:

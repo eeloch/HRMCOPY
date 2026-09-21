@@ -649,6 +649,9 @@ class MealService:
             ticket.save(update_fields=["voided_at", "voided_by", "void_reason"])
         exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.DECLINED, actor, now, reason
         exception.save()
+        from .gating import refresh
+
+        refresh(exception.employee_id)
         AuditService.log(event_type="meals.excess_declined", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.WARNING, title="Meal excess declined", description=f"{len(excess_tickets)} ticket(s) beyond entitlement declined; vendor not billed, no deduction.", metadata={"exception": exception.pk, "reason": reason, "tickets_voided": [t.pk for t in excess_tickets]})
         for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_declined", title="Meal excess declined", message=f"{exception.employee.full_name}: {reason or 'No reason given'}", severity="warning", employee=exception.employee, related_url="/meals")
         return exception
@@ -685,6 +688,9 @@ class MealService:
                 exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.CANCELLED, actor, timezone.now(), f"Ticket voided: {reason}" if reason else "Ticket voided"
                 exception.save()
         AuditService.log(event_type="meals.ticket_voided", module="meals", employee=collection.employee, actor=actor, object=collection, severity=AuditSeverity.WARNING, title="Meal ticket voided", description=f"Meal ticket for {collection.work_date} voided.", metadata={"collection": collection.pk, "reason": reason, "rate": str(collection.rate_snapshot)})
+        from .gating import refresh
+
+        refresh(collection.employee_id)  # a voided ticket may free one: switch them back on at the terminal
         return collection
 
     @staticmethod

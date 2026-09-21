@@ -89,7 +89,10 @@ class MealVendorGatewayPunchBridgeAPIView(APIView):
         try:
             from .gating import reconcile
 
-            reconcile()  # e.g. switch someone off at the terminal the moment they have had their last ticket
+            scanned = {r.collection_id for r in summary.results if getattr(r, "collection_id", None)}
+            people = set(MealCollection.objects.filter(pk__in=scanned).values_list("employee_id", flat=True)) if scanned else set()
+            if people:
+                reconcile(employees=people)  # e.g. switch someone off at the terminal the moment they have had their last ticket
         except Exception:  # a problem here must never lose a scan
             pass
         invalid = [(gateway_id, record) for gateway_id, record in normalized if "invalid" in record]

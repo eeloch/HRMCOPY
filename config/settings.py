@@ -250,7 +250,7 @@ MEAL_TERMINAL_REPLY_MODE = os.environ.get("MEAL_TERMINAL_REPLY_MODE", "minimal")
 
 # Staff numbers (comma separated) whose access to the meal terminal follows their meal entitlement: switched
 # off at the terminal once they have had today's tickets, or when they have none today, so they get no
-# printed receipt. Empty = nobody. Used to pilot the idea on a few people before everyone.
+# printed receipt. Empty = nobody; a single "*" means every active employee enrolled on a meal terminal.
 MEAL_GATING_EMPLOYEE_IDS = [item.strip() for item in os.environ.get("MEAL_GATING_EMPLOYEE_IDS", "").split(",") if item.strip()]
 
 

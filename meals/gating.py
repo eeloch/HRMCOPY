@@ -19,8 +19,22 @@ from .services import MealService
 COMMAND_TYPE = "set_user_enabled"
 
 
-def gated_employees():
-    return Employee.objects.filter(employee_id__in=list(getattr(settings, "MEAL_GATING_EMPLOYEE_IDS", [])), status="active")
+def _meal_serials():
+    return list(BiometricDevice.objects.filter(purpose="meal_ticket").values_list("serial_number", flat=True))
+
+
+def gated_employees(only=None):
+    """The people whose terminal access follows their tickets: those named in MEAL_GATING_EMPLOYEE_IDS, or, when the
+    list holds "*", every active employee who is enrolled on a meal terminal. `only` narrows it to some employee ids."""
+    ids = list(getattr(settings, "MEAL_GATING_EMPLOYEE_IDS", []))
+    employees = Employee.objects.filter(status="active")
+    if "*" in ids:
+        employees = employees.filter(biometric_identities__system=IDENTITY_SYSTEM, biometric_identities__is_active=True, biometric_identities__source_identifier__in=_meal_serials()).distinct()
+    else:
+        employees = employees.filter(employee_id__in=ids)
+    if only is not None:
+        employees = employees.filter(pk__in=list(only))
+    return employees
 
 
 def tickets_left_today(employee, now=None):
@@ -52,8 +66,9 @@ def _queue(device, employee, enrollid, enabled):
     return False
 
 
-def reconcile(*, release=False):
+def reconcile(*, release=False, employees=None):
     """Queue the switches needed so each managed person's terminal state matches their tickets left today.
+    `employees` (ids) limits it to those people, which is what a scan does; without it everyone managed is checked.
     `release` switches everyone this has ever switched off back on, whatever the setting says (a safety valve).
     Returns the number of commands queued."""
     queued = 0
@@ -63,17 +78,33 @@ def reconcile(*, release=False):
                 device = BiometricDevice.objects.get(serial_number=identity.source_identifier)
                 queued += _queue(device, state.employee, identity.external_user_id, True)
         return queued
-    for employee in gated_employees():
+    managed = list(gated_employees(only=employees))
+    if not managed:
+        return 0
+    serials = _meal_serials()
+    identities = {}
+    for identity in BiometricIdentity.objects.filter(employee__in=managed, system=IDENTITY_SYSTEM, is_active=True, source_identifier__in=serials):
+        identities.setdefault(identity.employee_id, []).append(identity)
+    states = {(s.employee_id, s.device_serial): s for s in MealTerminalUserState.objects.filter(employee__in=managed)}
+    devices = {d.serial_number: d for d in BiometricDevice.objects.filter(serial_number__in=serials)}
+    for employee in managed:
         wanted = tickets_left_today(employee) > 0
-        for identity in _meal_identities(employee):
-            state = MealTerminalUserState.objects.filter(employee=employee, device_serial=identity.source_identifier).first()
+        for identity in identities.get(employee.pk, []):
+            state = states.get((employee.pk, identity.source_identifier))
             if state is None and wanted:
                 # Nobody has ever been switched off here: the terminal starts everyone enabled, so just remember that.
                 MealTerminalUserState.objects.update_or_create(employee=employee, device_serial=identity.source_identifier, defaults={"enabled": True})
             elif state is None or state.enabled != wanted:
-                device = BiometricDevice.objects.get(serial_number=identity.source_identifier)
-                queued += _queue(device, employee, identity.external_user_id, wanted)
+                queued += _queue(devices[identity.source_identifier], employee, identity.external_user_id, wanted)
     return queued
+
+
+def refresh(employee):
+    """Re-check one person right now (after a scan, an authorisation, a voided ticket...). Never raises."""
+    try:
+        return reconcile(employees=[employee.pk if hasattr(employee, "pk") else employee])
+    except Exception:
+        return 0
 
 
 def record_state(command):
