@@ -137,6 +137,13 @@ def build_setuserinfo_command(sn: str, enrollid: int, name: str, biometric_type:
     }
 
 
+def build_enableuser_command(sn: str, enrollid: int, enabled: bool) -> dict:
+    """Server -> device: switch one enrolled person on or off. A person who is off is refused at the terminal
+    (no verification, so no printed receipt). The vendor doc's Disable example spells the key "enrolled";
+    both examples use the same `enableuser` command, and `enrollid` is the documented key for Enable."""
+    return {"cmd": "enableuser", "sn": sn, "enrollid": enrollid, "enflag": 1 if enabled else 0}
+
+
 def build_device_command(sn: str, command_type: str, payload: Mapping[str, Any]) -> dict:
     """Translate a DeviceCommand row's (command_type, payload) into the wire message to send."""
     if command_type == "enroll_user":
@@ -145,6 +152,8 @@ def build_device_command(sn: str, command_type: str, payload: Mapping[str, Any])
         return build_deleteuser_command(sn, payload["enrollid"])
     if command_type == "refresh_enrolled_ids":
         return build_getuserids_command(sn)
+    if command_type == "set_user_enabled":
+        return build_enableuser_command(sn, payload["enrollid"], bool(payload["enabled"]))
     raise ValueError(f"Unknown command_type: {command_type!r}")
 
 

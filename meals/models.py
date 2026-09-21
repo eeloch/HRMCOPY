@@ -226,3 +226,15 @@ class MealVendorPayment(models.Model):
 
     def __str__(self):
         return f"{self.payroll_period} - {self.amount}"
+
+class MealTerminalUserState(models.Model):
+    """Whether a person is currently switched on at a meal terminal, as last confirmed by the terminal.
+    Only people covered by MEAL_GATING_EMPLOYEE_IDS ever appear here."""
+
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="meal_terminal_states")
+    device_serial = models.CharField(max_length=100)
+    enabled = models.BooleanField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["employee", "device_serial"], name="one_terminal_state_per_person_per_device")]

@@ -41,6 +41,7 @@ CLONE_TARGET_WAIT_SECONDS = 6
 CLONE_MAX_ATTEMPTS = 3
 
 COMMAND_POLL_INTERVAL_SECONDS = 2
+GATING_RECONCILE_EVERY_POLLS = 15  # every ~30 seconds
 
 try:
     import websockets
@@ -168,8 +169,14 @@ class Command(BaseCommand):
         device.
         """
         try:
+            polls = 0
             while True:
                 await asyncio.sleep(COMMAND_POLL_INTERVAL_SECONDS)
+                polls += 1
+                if polls % GATING_RECONCILE_EVERY_POLLS == 0:
+                    # Keeps the few people covered by MEAL_GATING_EMPLOYEE_IDS in step with their tickets
+                    # (day rollover, roster changes, voided tickets). A no-op when nobody is listed.
+                    await asyncio.to_thread(self._reconcile_meal_gating)
                 next_command = await asyncio.to_thread(self._next_command_to_send, sn)
                 if next_command is None:
                     continue
@@ -182,6 +189,16 @@ class Command(BaseCommand):
                 await asyncio.to_thread(self._mark_command_sent, command_id)
         except asyncio.CancelledError:
             pass
+
+    def _reconcile_meal_gating(self):
+        try:
+            from meals.gating import reconcile
+
+            queued = reconcile()
+            if queued:
+                self.stdout.write(f"meal gating: queued {queued} terminal switch(es)")
+        except Exception as error:  # never let this take the gateway down
+            self.stderr.write(f"meal gating failed: {error}")
 
     def _lock_for(self, sn):
         return self._locks.setdefault(sn, asyncio.Lock())
@@ -432,6 +449,10 @@ class Command(BaseCommand):
             Command._link_biometric_identity(command)
         elif command.command_type in ("delete_user", "purge_user"):
             Command._unlink_biometric_identity(command)
+        elif command.command_type == "set_user_enabled":
+            from meals.gating import record_state
+
+            record_state(command)
 
     @staticmethod
     def _link_biometric_identity(command):

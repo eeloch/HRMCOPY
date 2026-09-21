@@ -502,6 +502,7 @@ class DeviceCommand(models.Model):
         ("refresh_enrolled_ids", "Refresh Enrolled IDs"),
         ("clone_enrollment", "Clone Enrollment To Other Devices"),
         ("purge_user", "Remove Inactive User From Device"),
+        ("set_user_enabled", "Enable Or Disable User On Terminal"),
     ]
 
     # Bulk background jobs: they must neither lock a device's admin panel while a

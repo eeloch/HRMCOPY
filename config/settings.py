@@ -248,6 +248,11 @@ BIOMETRIC_BRIDGE_SECRET = os.environ.get("BIOMETRIC_BRIDGE_SECRET", "")
 # use it with the terminal's Server approval set to Yes; "extended" is the older, chattier reply.
 MEAL_TERMINAL_REPLY_MODE = os.environ.get("MEAL_TERMINAL_REPLY_MODE", "minimal")
 
+# Staff numbers (comma separated) whose access to the meal terminal follows their meal entitlement: switched
+# off at the terminal once they have had today's tickets, or when they have none today, so they get no
+# printed receipt. Empty = nobody. Used to pilot the idea on a few people before everyone.
+MEAL_GATING_EMPLOYEE_IDS = [item.strip() for item in os.environ.get("MEAL_GATING_EMPLOYEE_IDS", "").split(",") if item.strip()]
+
 
 LOGGING = {
     "version": 1,

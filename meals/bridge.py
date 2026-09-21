@@ -86,6 +86,12 @@ class MealVendorGatewayPunchBridgeAPIView(APIView):
 
         valid = [(gateway_id, record) for gateway_id, record in normalized if "invalid" not in record]
         summary = MealService.ingest_many(record for _, record in valid)
+        try:
+            from .gating import reconcile
+
+            reconcile()  # e.g. switch someone off at the terminal the moment they have had their last ticket
+        except Exception:  # a problem here must never lose a scan
+            pass
         invalid = [(gateway_id, record) for gateway_id, record in normalized if "invalid" in record]
         summary.invalid += len(invalid)
         results = [{"gateway_record_id": gateway_id, "status": result.status, "reason": result.reason, **terminal_reply(result)} for (gateway_id, _), result in zip(valid, summary.results)]

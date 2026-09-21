@@ -11,6 +11,7 @@ from rest_framework.test import APIClient
 
 from attendance.models import (
     BiometricDevice,
+    DeviceCommand,
     AttendanceException,
     DailyAttendance,
     EmployeeRosterDay,
@@ -20,6 +21,7 @@ from attendance.models import (
 from audit.models import AuditEvent
 from employees.models import BiometricIdentity, Employee
 from meals.models import (
+    MealTerminalUserState,
     MealAbsencePenalty,
     MealAbsencePenaltyStatus,
     MealAbsencePenaltyType,
@@ -1954,3 +1956,88 @@ class TerminalReplyTests(TestCase):
     def test_someone_not_enrolled_is_denied_with_a_reason(self):
         result = self.post("999", 3)
         self.assertEqual((result["access"], result["message"]), (0, "Not enrolled for meals"))
+
+
+class MealGatingTests(TestCase):
+    """People listed in MEAL_GATING_EMPLOYEE_IDS are switched off at the terminal once they have had today's
+    tickets (or have none today) and back on when a ticket is free again. Nobody else is ever touched."""
+
+    def setUp(self):
+        from django.test import override_settings
+        from meals import gating
+
+        self.gating = gating
+        self.override = override_settings(MEAL_GATING_EMPLOYEE_IDS=["PILOT1"])
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.today = timezone.localdate()
+        self.pilot = Employee.objects.create(employee_id="PILOT1", first_name="Pilot", last_name="One")
+        self.other = Employee.objects.create(employee_id="OTHER1", first_name="Other", last_name="One")
+        self.device = BiometricDevice.objects.create(name="Canteen", serial_number="MEALGATE1", purpose="meal_ticket")
+        MealDevice.objects.create(name="Canteen", serial_number="MEALGATE1", active=True)
+        for number, employee in ((7, self.pilot), (8, self.other)):
+            BiometricIdentity.objects.create(employee=employee, system=IDENTITY_SYSTEM, source_identifier="MEALGATE1", external_user_id=str(number))
+            EmployeeMealEntitlement.objects.create(employee=employee, tickets_per_work_day=2, effective_from=self.today, reason="test")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=self.today)
+        self.shift = Shift.objects.create(name="Gate Day", start_time="07:00", end_time="19:00", is_overnight=False)
+        for employee in (self.pilot, self.other):
+            EmployeeRosterDay.objects.create(employee=employee, date=self.today, status=RosterDayStatus.WORK, shift=self.shift)
+
+    def scan(self, employee, event):
+        MealService.ingest(system=IDENTITY_SYSTEM, source_identifier="MEALGATE1", device_serial_number="MEALGATE1", external_user_id=str({self.pilot: 7, self.other: 8}[employee]), external_event_id=event, timestamp=timezone.now())
+
+    def commands(self):
+        return [(c.payload["enrollid"], c.payload["enabled"]) for c in DeviceCommand.objects.filter(command_type="set_user_enabled").order_by("id")]
+
+    def confirm_all(self):
+        from meals.gating import record_state
+
+        for command in DeviceCommand.objects.filter(command_type="set_user_enabled", status="pending"):
+            record_state(command)
+            DeviceCommand.objects.filter(pk=command.pk).update(status="acked")
+
+    def test_only_the_listed_person_is_ever_switched_and_the_first_pass_records_their_state(self):
+        self.gating.reconcile()
+        self.assertEqual(self.commands(), [(7, True)])  # 8 (not listed) is untouched
+        self.confirm_all()
+        self.assertEqual(self.gating.reconcile(), 0)  # already right, nothing more to send
+
+    def test_switched_off_after_the_last_ticket_and_back_on_when_one_is_voided(self):
+        self.gating.reconcile(); self.confirm_all()
+        self.scan(self.pilot, "g1")
+        self.assertEqual(self.gating.reconcile(), 0)  # one of two collected: still on
+        self.scan(self.pilot, "g2")
+        self.gating.reconcile()
+        self.assertEqual(self.commands()[-1], (7, False))
+        self.confirm_all()
+        collection = MealCollection.objects.filter(employee=self.pilot).order_by("-id").first()
+        MealService.void_collection(collection, get_user_model().objects.create_user("v", password="p"), "test")
+        self.gating.reconcile()
+        self.assertEqual(self.commands()[-1], (7, True))
+
+    def test_off_on_a_rest_day_and_with_no_allocation(self):
+        EmployeeRosterDay.objects.filter(employee=self.pilot).update(status=RosterDayStatus.REST, shift=None)
+        self.assertEqual(self.gating.tickets_left_today(self.pilot), 0)
+        self.gating.reconcile()
+        self.assertEqual(self.commands(), [(7, False)])
+
+    def test_it_does_not_queue_the_same_switch_twice(self):
+        self.gating.reconcile()
+        self.gating.reconcile()
+        self.assertEqual(self.commands(), [(7, True)])
+
+    def test_release_switches_back_on_everyone_that_was_switched_off(self):
+        self.gating.reconcile(); self.confirm_all()
+        self.scan(self.pilot, "g1"); self.scan(self.pilot, "g2")
+        self.gating.reconcile(); self.confirm_all()
+        self.assertFalse(MealTerminalUserState.objects.get(employee=self.pilot).enabled)
+        from django.test import override_settings
+        with override_settings(MEAL_GATING_EMPLOYEE_IDS=[]):
+            self.assertEqual(self.gating.reconcile(), 0)  # setting cleared: nothing new is decided
+            self.assertEqual(self.gating.reconcile(release=True), 1)
+        self.assertEqual(self.commands()[-1], (7, True))
+
+    def test_the_wire_message(self):
+        from attendance.integrations.aiface_protocol import build_device_command
+        self.assertEqual(build_device_command("SN1", "set_user_enabled", {"enrollid": 7, "enabled": False}), {"cmd": "enableuser", "sn": "SN1", "enrollid": 7, "enflag": 0})
+        self.assertEqual(build_device_command("SN1", "set_user_enabled", {"enrollid": 7, "enabled": True})["enflag"], 1)
