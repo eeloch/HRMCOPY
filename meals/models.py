@@ -238,3 +238,27 @@ class MealTerminalUserState(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["employee", "device_serial"], name="one_terminal_state_per_person_per_device")]
+
+
+class MealExtraAuthorization(models.Model):
+    """A supervisor lets someone collect extra ticket(s) today, beyond their entitlement, deciding in advance who pays.
+
+    The person is switched on at the meal terminal for them (see meals.gating) and the extra ticket is decided
+    the moment it is scanned: the employee pays (accepted - deducted from that month's pay) or the company
+    pays (waived - no deduction, the vendor is still paid). Unused authorisations simply lapse at the end of the day.
+    """
+
+    PAYS_CHOICES = [("employee", "Employee pays (deducted from pay)"), ("company", "Company pays (no deduction)")]
+
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name="meal_extra_authorizations")
+    work_date = models.DateField()
+    quantity = models.PositiveSmallIntegerField()
+    used = models.PositiveSmallIntegerField(default=0)
+    pays = models.CharField(max_length=10, choices=PAYS_CHOICES)
+    reason = models.CharField(max_length=255, blank=True)
+    authorised_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-work_date", "-created_at"]

@@ -26,12 +26,15 @@ def gated_employees():
 def tickets_left_today(employee, now=None):
     """Tickets this person may still collect today (0 on a rest day, with no allocation, or once used up)."""
     now = now or timezone.now()
+    from .authorizations import extra_allowed
+
     work_date, roster = MealService.resolve_work_day(employee, now)
-    if not (roster and roster.status == RosterDayStatus.WORK):
-        return 0
-    entitlement = max(MealService.approved_entitlement(employee, work_date) - MealService.absence_penalty_reduction(employee, work_date), 0)
+    entitlement = 0
+    if roster and roster.status == RosterDayStatus.WORK:
+        entitlement = max(MealService.approved_entitlement(employee, work_date) - MealService.absence_penalty_reduction(employee, work_date), 0)
+    allowed = entitlement + extra_allowed(employee, work_date)  # extras a supervisor authorised count, even on a rest day
     used = MealCollection.objects.filter(employee=employee, work_date=work_date, voided_at__isnull=True).count()
-    return max(entitlement - used, 0)
+    return max(allowed - used, 0)
 
 
 def _meal_identities(employee):

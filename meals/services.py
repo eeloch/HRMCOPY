@@ -564,7 +564,11 @@ class MealService:
             rate = cls.rate_for(work_date)
             sequence = MealCollection.objects.select_for_update().filter(employee=identity.employee, work_date=work_date, voided_at__isnull=True).count() + 1
             collection = MealCollection.objects.create(event=event, employee=identity.employee, work_date=work_date, shift=roster.shift if roster else None, sequence_number=sequence, entitlement_snapshot=entitlement, rate_snapshot=rate.amount, status=MealCollectionStatus.WITHIN if sequence <= entitlement else (MealCollectionStatus.REST_DAY if entitlement == 0 else MealCollectionStatus.EXCESS))
-            if sequence > entitlement: cls._cover_excess_ticket(collection, entitlement, rate.amount)
+            if sequence > entitlement:
+                cls._cover_excess_ticket(collection, entitlement, rate.amount)
+                from .authorizations import apply_to_new_excess
+
+                apply_to_new_excess(collection)  # decided at once when a supervisor authorised it in advance
             return collection, True
 
     @classmethod

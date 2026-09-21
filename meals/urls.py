@@ -2,6 +2,8 @@ from django.urls import path
 
 from .bridge import MealVendorGatewayPunchBridgeAPIView
 from .views import (
+    MealExtraAuthorizationCancelAPIView,
+    MealExtraAuthorizationListCreateAPIView,
     EmployeeMealsProfileAPIView,
     MealDeviceListAPIView,
     MealEntitlementListCreateAPIView,
@@ -84,6 +86,8 @@ urlpatterns = [
         MealExcessCancelAPIView.as_view(),
         name="meal-excess-cancel",
     ),
+    path("extra-authorizations/", MealExtraAuthorizationListCreateAPIView.as_view(), name="meal-extra-authorizations"),
+    path("extra-authorizations/<int:pk>/cancel/", MealExtraAuthorizationCancelAPIView.as_view(), name="meal-extra-authorization-cancel"),
     path(
         "vendor/payments/",
         MealVendorPaymentListCreateAPIView.as_view(),

@@ -21,6 +21,7 @@ from attendance.models import (
 from audit.models import AuditEvent
 from employees.models import BiometricIdentity, Employee
 from meals.models import (
+    MealExtraAuthorization,
     MealTerminalUserState,
     MealAbsencePenalty,
     MealAbsencePenaltyStatus,
@@ -2041,3 +2042,95 @@ class MealGatingTests(TestCase):
         from attendance.integrations.aiface_protocol import build_device_command
         self.assertEqual(build_device_command("SN1", "set_user_enabled", {"enrollid": 7, "enabled": False}), {"cmd": "enableuser", "sn": "SN1", "enrollid": 7, "enflag": 0})
         self.assertEqual(build_device_command("SN1", "set_user_enabled", {"enrollid": 7, "enabled": True})["enflag"], 1)
+
+
+class ExtraTicketAuthorizationTests(TestCase):
+    """A supervisor authorises an extra ticket and says who pays; it is decided the moment it is scanned, and the
+    person is switched on at the terminal for it."""
+
+    def setUp(self):
+        from django.test import override_settings
+
+        self.override = override_settings(MEAL_GATING_EMPLOYEE_IDS=["AUTH1"])
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.today = timezone.localdate()
+        self.boss = get_user_model().objects.create_user("meal-boss", password="pw")
+        self.boss.user_permissions.add(Permission.objects.get(codename="review_meal_excess"), Permission.objects.get(codename="record_meal_operations"))
+        self.person = Employee.objects.create(employee_id="AUTH1", first_name="Auth", last_name="One", status="active")
+        BiometricDevice.objects.create(name="Canteen", serial_number="MEALAUTH1", purpose="meal_ticket")
+        MealDevice.objects.create(name="Canteen", serial_number="MEALAUTH1", active=True)
+        BiometricIdentity.objects.create(employee=self.person, system=IDENTITY_SYSTEM, source_identifier="MEALAUTH1", external_user_id="9")
+        EmployeeMealEntitlement.objects.create(employee=self.person, tickets_per_work_day=1, effective_from=self.today, reason="test")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=self.today)
+        shift = Shift.objects.create(name="Auth Day", start_time="07:00", end_time="19:00", is_overnight=False)
+        EmployeeRosterDay.objects.create(employee=self.person, date=self.today, status=RosterDayStatus.WORK, shift=shift)
+        self.period = PayrollPeriod.objects.create(year=self.today.year, month=self.today.month)
+        self.client = APIClient()
+        self.client.force_authenticate(self.boss)
+
+    def scan(self, event):
+        collection, _ = MealService.ingest(system=IDENTITY_SYSTEM, source_identifier="MEALAUTH1", device_serial_number="MEALAUTH1", external_user_id="9", external_event_id=event, timestamp=timezone.now())
+        collection.refresh_from_db()
+        return collection
+
+    def authorise(self, pays="employee", quantity=1, reason="Double shift"):
+        return self.client.post("/api/meals/extra-authorizations/", {"employee": self.person.pk, "quantity": quantity, "pays": pays, "reason": reason}, format="json")
+
+    def test_an_authorised_extra_ticket_is_decided_the_moment_it_is_scanned_and_the_employee_pays(self):
+        self.scan("a1")  # the one they are entitled to
+        self.assertEqual(self.authorise().status_code, 201)
+        extra = self.scan("a2")
+        self.assertEqual(extra.status, "excess")
+        self.assertIn(extra.excess_exception.status, ("approved", "deducted"))
+        self.assertEqual(MealExtraAuthorization.objects.get().used, 1)
+
+    def test_when_the_company_pays_the_extra_is_waived_but_the_ticket_stands(self):
+        self.scan("a1")
+        self.authorise(pays="company")
+        extra = self.scan("a2")
+        self.assertEqual(extra.excess_exception.status, "cancelled")
+        self.assertIsNone(extra.voided_at)  # still counts towards what the vendor is owed
+
+    def test_only_the_authorised_number_is_covered_the_next_one_waits_for_a_person(self):
+        self.scan("a1")
+        self.authorise(quantity=1)
+        self.scan("a2")
+        third = self.scan("a3")
+        self.assertEqual(third.excess_exception.status, "pending")
+
+    def test_without_authorisation_an_extra_ticket_stays_pending(self):
+        self.scan("a1")
+        self.assertEqual(self.scan("a2").excess_exception.status, "pending")
+
+    def test_authorising_switches_the_person_on_at_the_terminal_and_the_extra_is_counted(self):
+        from meals import gating
+
+        self.scan("a1")
+        self.assertEqual(gating.tickets_left_today(self.person), 0)
+        self.authorise()
+        self.assertEqual(gating.tickets_left_today(self.person), 1)
+        self.assertEqual(DeviceCommand.objects.filter(command_type="set_user_enabled").order_by("-id").first().payload["enabled"], True)
+        self.scan("a2")
+        self.assertEqual(gating.tickets_left_today(self.person), 0)
+
+    def test_it_works_on_a_rest_day_and_can_be_withdrawn_before_use(self):
+        from meals import gating
+
+        EmployeeRosterDay.objects.filter(employee=self.person).update(status=RosterDayStatus.REST, shift=None)
+        self.assertEqual(gating.tickets_left_today(self.person), 0)
+        authorization_id = self.authorise().json()["id"]
+        self.assertEqual(gating.tickets_left_today(self.person), 1)
+        self.assertEqual(self.client.post(f"/api/meals/extra-authorizations/{authorization_id}/cancel/").status_code, 200)
+        self.assertEqual(gating.tickets_left_today(self.person), 0)
+        self.assertEqual(self.client.post(f"/api/meals/extra-authorizations/{authorization_id}/cancel/").status_code, 400)
+
+    def test_permissions_and_validation(self):
+        self.assertEqual(self.authorise(pays="nobody").status_code, 400)
+        self.assertEqual(self.authorise(quantity=99).status_code, 400)
+        viewer = get_user_model().objects.create_user("meal-viewer", password="pw")
+        viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        client = APIClient()
+        client.force_authenticate(viewer)
+        self.assertEqual(client.get("/api/meals/extra-authorizations/").status_code, 200)
+        self.assertEqual(client.post("/api/meals/extra-authorizations/", {"employee": self.person.pk, "quantity": 1, "pays": "employee"}, format="json").status_code, 403)

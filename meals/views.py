@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.db.models import Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -525,3 +527,57 @@ class EmployeeMealsProfileAPIView(APIView):
                 ],
             }
         )
+
+
+class MealExtraAuthorizationListCreateAPIView(APIView):
+    """Extra tickets a supervisor has authorised. Anyone who can see meal operations can list; authorising needs the review permission."""
+
+    def get_permissions(self):
+        return [IsAuthenticated(), CanReviewMealExcess() if self.request.method == "POST" else CanViewMealOperations()]
+
+    @staticmethod
+    def _row(authorization, today):
+        from .authorizations import status_of
+
+        return {
+            "id": authorization.pk, "employee": authorization.employee_id, "employee_name": authorization.employee.full_name, "employee_number": authorization.employee.employee_id,
+            "work_date": authorization.work_date, "quantity": authorization.quantity, "used": authorization.used, "pays": authorization.pays,
+            "pays_label": "Employee pays" if authorization.pays == "employee" else "Company pays", "reason": authorization.reason, "status": status_of(authorization, today),
+            "authorised_by": (authorization.authorised_by.get_full_name() or authorization.authorised_by.username) if authorization.authorised_by else None, "created_at": authorization.created_at,
+        }
+
+    def get(self, request):
+        from .models import MealExtraAuthorization
+
+        today = timezone.localdate()
+        rows = MealExtraAuthorization.objects.select_related("employee", "authorised_by").filter(work_date__gte=today - timedelta(days=7))[:100]
+        return Response({"today": today, "results": [self._row(a, today) for a in rows]})
+
+    def post(self, request):
+        from .authorizations import authorise
+
+        employee = get_object_or_404(Employee, pk=request.data.get("employee"))
+        try:
+            quantity = int(request.data.get("quantity", 1))
+        except (TypeError, ValueError):
+            return Response({"detail": "The number of tickets must be a whole number."}, status=400)
+        try:
+            authorization = authorise(employee=employee, quantity=quantity, pays=str(request.data.get("pays", "")), reason=str(request.data.get("reason", "")), actor=request.user)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=400)
+        return Response(self._row(authorization, timezone.localdate()), status=201)
+
+
+class MealExtraAuthorizationCancelAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanReviewMealExcess]
+
+    def post(self, request, pk):
+        from .authorizations import cancel
+        from .models import MealExtraAuthorization
+
+        authorization = get_object_or_404(MealExtraAuthorization, pk=pk)
+        try:
+            cancel(authorization, actor=request.user)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=400)
+        return Response({"id": authorization.pk})
