@@ -11,7 +11,7 @@ from attendance.models import (
     EmployeeRosterDay,
 )
 
-from employees.models import Department
+from employees.models import Department, Employee
 from attendance.services.leave import approved_leave_employee_ids
 
 
@@ -36,8 +36,7 @@ class DashboardService:
             "summary": DashboardService.get_summary(today),
             "department_readiness": DashboardService.get_department_readiness(today),
             "workforce_action_center": DashboardService.get_absent_employees(today),
-            "late_employees": DashboardService.get_late_employees(today),
-            "attendance_exceptions": DashboardService.get_exceptions(today),
+            "not_yet_in_by_department": DashboardService.get_not_yet_in_by_department(today),
             "recent_events": DashboardService.get_recent_events(),
             "device_status": DashboardService.get_device_status(),
             "hostel_absentees": DashboardService.get_hostel_absentees(today),
@@ -80,15 +79,41 @@ class DashboardService:
             ).count(),
         }
     @staticmethod
-    def expected_now(today, attendance, leave_employee_ids):
-        """Who is rostered to be at work right now, and who of them has not punched in yet."""
-        now = timezone.localtime()
-        clock = now.time()
+    def expected_ids(today, leave_employee_ids):
+        """Employees rostered to be at work right now (their shift has started and not yet ended)."""
+        clock = timezone.localtime().time()
         started = EmployeeRosterDay.objects.filter(status="work", employee__status="active", shift__isnull=False).filter(
             Q(date=today, shift__start_time__lte=clock)
             | Q(date=today - timedelta(days=1), shift__is_overnight=True, shift__end_time__gt=clock)
         ).values_list("employee_id", flat=True)
-        expected = set(started) - set(leave_employee_ids)
+        return set(started) - set(leave_employee_ids)
+
+    @staticmethod
+    def get_not_yet_in_by_department(today):
+        """Per department: how many are expected now, how many are in, how many still to come."""
+        leave_ids = set(approved_leave_employee_ids(today))
+        expected = DashboardService.expected_ids(today, leave_ids)
+        in_ids = set(
+            DashboardService.live_records(today)
+            .filter(status__in=["present", "late", "incomplete"])
+            .values_list("employee_id", flat=True)
+        )
+        names = dict(Employee.objects.filter(id__in=expected).values_list("id", "department__name"))
+        rows = {}
+        for employee_id in expected:
+            name = names.get(employee_id) or "No department"
+            row = rows.setdefault(name, {"department": name, "expected": 0, "in": 0, "not_yet_in": 0})
+            row["expected"] += 1
+            if employee_id in in_ids:
+                row["in"] += 1
+            else:
+                row["not_yet_in"] += 1
+        return sorted(rows.values(), key=lambda r: (-r["not_yet_in"], r["department"]))
+
+    @staticmethod
+    def expected_now(today, attendance, leave_employee_ids):
+        """Who is rostered to be at work right now, and who of them has not punched in yet."""
+        expected = DashboardService.expected_ids(today, leave_employee_ids)
         in_ids = set(attendance.filter(status__in=["present", "late", "incomplete"]).values_list("employee_id", flat=True))
         return {"expected": len(expected), "not_yet_in": len(expected - in_ids)}
 
@@ -146,6 +171,10 @@ class DashboardService:
     def get_department_readiness(today):
 
         departments = Department.objects.all().order_by("name")
+        expected = DashboardService.expected_ids(today, set(approved_leave_employee_ids(today)))
+        expected_by_department = {}
+        for department_id in Employee.objects.filter(id__in=expected).values_list("department_id", flat=True):
+            expected_by_department[department_id] = expected_by_department.get(department_id, 0) + 1
 
         results = []
 
@@ -158,7 +187,8 @@ class DashboardService:
                 ).count()
             )
 
-            required = department.required_staff
+            # Departments with no target set are measured against who the roster expects at work right now.
+            required = department.required_staff or expected_by_department.get(department.id, 0)
 
             short = max(required - present, 0)
 
@@ -225,14 +255,6 @@ class DashboardService:
 
         return results
 
-
-    @staticmethod
-    def get_late_employees(today):
-        return []
-
-    @staticmethod
-    def get_exceptions(today):
-        return []
 
     @staticmethod
     def get_recent_events():

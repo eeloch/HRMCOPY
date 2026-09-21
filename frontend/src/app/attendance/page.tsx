@@ -59,8 +59,16 @@ type HostelAbsentee = {
   room: string;
 };
 
+type NotYetInRow = {
+  department: string;
+  expected: number;
+  in: number;
+  not_yet_in: number;
+};
+
 type AttendanceDashboard = {
   summary: DashboardSummary;
+  not_yet_in_by_department: NotYetInRow[];
   workforce_action_center: WorkforceEmployee[];
   department_readiness: DepartmentReadiness[];
   hostel_absentees: HostelAbsentee[];
@@ -228,6 +236,44 @@ export default function AttendancePage() {
                       accent={card.accent}
                     />
                   ))}
+            </section>
+
+            <section className="mt-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+              <div className="border-b border-slate-200 px-5 py-5">
+                <h2 className="text-lg font-bold text-slate-900">Expected Now</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Everyone whose shift is running right now, by department. People are only marked absent once their
+                  shift and its 3-hour punch window are over, so until then they show here as still to come.
+                </p>
+              </div>
+              {loading ? (
+                <TableSkeleton />
+              ) : dashboard?.not_yet_in_by_department?.length ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[520px] text-left">
+                    <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      <tr>
+                        <th className="px-5 py-3">Department</th>
+                        <th className="px-5 py-3">Expected</th>
+                        <th className="px-5 py-3">In</th>
+                        <th className="px-5 py-3">Still to come</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {dashboard.not_yet_in_by_department.map((row) => (
+                        <tr key={row.department} className="hover:bg-slate-50/80">
+                          <td className="px-5 py-3 font-medium text-slate-900">{row.department}</td>
+                          <td className="px-5 py-3 text-sm text-slate-600">{row.expected}</td>
+                          <td className="px-5 py-3 text-sm text-emerald-700">{row.in}</td>
+                          <td className="px-5 py-3 text-sm font-semibold text-amber-700">{row.not_yet_in}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="p-10 text-center text-slate-500">Nobody is rostered to be at work right now.</div>
+              )}
             </section>
 
             <section className="mt-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
