@@ -70,6 +70,45 @@ class ShiftAssignment(models.Model):
         return f"{self.employee.employee_id} - {self.shift.name}"
 
 
+class ShiftPlan(models.Model):
+    """How a group of people work across the weeks, so nobody has to be moved by hand each week.
+
+    fixed    - always the same shift on the chosen weekdays (Permanent Day, Permanent Night, Admin...).
+    rotation - the Rotic weekly Day/Night rotation. Group A is on Day in the anchor week and on Night the week
+               after, and so on; Group B is the opposite. In a Day week people work Monday to Saturday on Day and
+               start the Night shift on Sunday 19:00; in a Night week they work Monday to Saturday nights and rest
+               on Sunday (Sunday 07:00 to Monday 07:00), then they are back on Day.
+    """
+
+    KIND_CHOICES = [("fixed", "Fixed shift"), ("rotation", "Weekly Day / Night rotation")]
+
+    name = models.CharField(max_length=120, unique=True)
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES)
+    description = models.CharField(max_length=255, blank=True)
+    shift = models.ForeignKey(Shift, null=True, blank=True, on_delete=models.PROTECT, related_name="+")
+    working_weekdays = models.JSONField(default=list, blank=True)  # 0 = Monday ... 6 = Sunday (fixed plans)
+    day_shift = models.ForeignKey(Shift, null=True, blank=True, on_delete=models.PROTECT, related_name="+")
+    night_shift = models.ForeignKey(Shift, null=True, blank=True, on_delete=models.PROTECT, related_name="+")
+    anchor_monday = models.DateField(null=True, blank=True)
+    active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.name
+
+
+class ShiftPlanAssignment(models.Model):
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="shift_plan_assignments")
+    plan = models.ForeignKey(ShiftPlan, on_delete=models.PROTECT, related_name="assignments")
+    group = models.CharField(max_length=1, blank=True)  # "A" or "B" for a rotation plan
+    start_date = models.DateField()
+    end_date = models.DateField(null=True, blank=True)
+    assigned_by = models.CharField(max_length=150, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-start_date", "-id"]
+
+
 class RosterDayStatus(models.TextChoices):
     WORK = "work", "Work"
     REST = "rest", "Rest"

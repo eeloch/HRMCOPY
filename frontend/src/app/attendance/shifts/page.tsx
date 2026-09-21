@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
+import { ShiftPlans } from "@/components/shifts/ShiftPlans";
 import { ShiftAssignmentModal } from "@/components/shifts/ShiftAssignmentModal";
 import type { Shift, ShiftAssignment, ShiftEmployee } from "@/components/shifts/types";
 import { AppCard, PageHeader, Section } from "@/components/ui";
@@ -146,6 +147,8 @@ export default function ShiftManagementPage() {
             </select>
           </div>
         </AppCard>
+
+        <ShiftPlans />
 
         <Section className="mb-6" title="Shift Definitions" subtitle="Active shift windows used by assignments and roster dates.">
           <div className="overflow-x-auto">

@@ -41,6 +41,7 @@ CLONE_TARGET_WAIT_SECONDS = 6
 CLONE_MAX_ATTEMPTS = 3
 
 COMMAND_POLL_INTERVAL_SECONDS = 2
+ROSTER_EXTEND_CHECK_SECONDS = 3600  # once an hour we check whether today's roster extension has run
 GATING_FULL_CHECK_SECONDS = 300  # everyone is re-checked this often; a person's own scan re-checks them at once
 
 try:
@@ -99,6 +100,8 @@ class Command(BaseCommand):
             self.stdout.write("\nStopped.")
 
     _last_gating_check = float("-inf")
+    _last_roster_check = float("-inf")
+    _roster_extended_on = None
 
     async def _serve(self, host, port, bridge_url, meal_bridge_url, secret):
         async def handler(websocket):
@@ -183,6 +186,9 @@ class Command(BaseCommand):
                     # gateway that was down). Claim the slot first so the other terminals' loops skip it.
                     self._last_gating_check = now
                     await asyncio.to_thread(self._reconcile_meal_gating)
+                if now - self._last_roster_check >= ROSTER_EXTEND_CHECK_SECONDS:
+                    self._last_roster_check = now
+                    await asyncio.to_thread(self._extend_rosters_daily)
                 next_command = await asyncio.to_thread(self._next_command_to_send, sn)
                 if next_command is None:
                     continue
@@ -199,6 +205,20 @@ class Command(BaseCommand):
     @staticmethod
     def _requeue_lost_switches(serial_number):
         DeviceCommand.objects.filter(device__serial_number=serial_number, command_type="set_user_enabled", status="sent").update(status="pending", sent_at=None)
+
+    def _extend_rosters_daily(self):
+        """Once a day, write everyone's planned roster for the coming weeks so the weekly Day/Night swap needs no one."""
+        try:
+            today = timezone.localdate()
+            if self._roster_extended_on == today:
+                return
+            from attendance.services.shift_plans import extend_rosters
+
+            summary = extend_rosters(today)
+            self._roster_extended_on = today
+            self.stdout.write(f"roster extension: created {summary.created}, changed {summary.updated}")
+        except Exception as error:  # never let this take the gateway down
+            self.stderr.write(f"roster extension failed: {error}")
 
     def _reconcile_meal_gating(self):
         try:

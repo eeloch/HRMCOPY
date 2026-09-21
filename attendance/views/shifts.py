@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django.db import transaction
+from django.shortcuts import get_object_or_404
 
 from rest_framework import status
 from rest_framework.permissions import BasePermission, IsAuthenticated
@@ -126,3 +127,106 @@ class ShiftAssignmentChangeAPIView(APIView):
             assignment = assignment_serializer.save(assigned_by=request.user.get_username())
 
         return Response(ShiftAssignmentSerializer(assignment).data, status=status.HTTP_201_CREATED)
+
+
+class ShiftPlanListAPIView(APIView):
+    """The shift plans, how many people are on each, and which rotation group is on Day this week."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from datetime import timedelta
+
+        from django.db.models import Count, Q
+        from django.utils import timezone
+
+        from attendance.models import ShiftPlan, ShiftPlanAssignment
+        from attendance.services.shift_plans import day_group_for_week, monday_of
+
+        today = timezone.localdate()
+        current = ShiftPlanAssignment.objects.filter(employee__status="active", start_date__lte=today).filter(Q(end_date__isnull=True) | Q(end_date__gte=today))
+        counts = {row["plan"]: row for row in current.values("plan").annotate(total=Count("id"), a=Count("id", filter=Q(group="A")), b=Count("id", filter=Q(group="B")))}
+        results = []
+        for plan in ShiftPlan.objects.select_related("shift", "day_shift", "night_shift").order_by("id"):
+            row = counts.get(plan.pk, {})
+            item = {"id": plan.pk, "name": plan.name, "kind": plan.kind, "description": plan.description, "active": plan.active,
+                    "members": row.get("total", 0), "group_a": row.get("a", 0), "group_b": row.get("b", 0),
+                    "shift": plan.shift.name if plan.shift else None, "working_weekdays": plan.working_weekdays}
+            if plan.kind == "rotation" and plan.anchor_monday:
+                monday = monday_of(today)
+                item["this_week"] = {"monday": monday, "day_group": day_group_for_week(plan, monday), "next_monday": monday + timedelta(days=7), "next_day_group": day_group_for_week(plan, monday + timedelta(days=7))}
+            results.append(item)
+        from employees.models import Employee
+
+        on_a_plan = current.values("employee").distinct().count()
+        return Response({"results": results, "active_employees": Employee.objects.filter(status="active").count(), "on_a_plan": on_a_plan})
+
+
+class ShiftPlanAssignAPIView(APIView):
+    """Put many people on a plan at once. Pick them by department and/or by the plan they are on now, or list their ids.
+    For a rotation choose group A, group B, or "split" to divide them evenly between the two."""
+
+    permission_classes = [IsAuthenticated, CanManageShifts]
+
+    def post(self, request):
+        from datetime import date
+
+        from django.db.models import Q
+        from django.utils import timezone
+
+        from attendance.models import ShiftPlan, ShiftPlanAssignment
+        from attendance.services.shift_plans import assign_plan
+        from employees.models import Employee
+
+        plan = get_object_or_404(ShiftPlan, pk=request.data.get("plan"))
+        employees = Employee.objects.filter(status="active").order_by("employee_id")
+        if request.data.get("employee_ids"):
+            employees = employees.filter(pk__in=request.data["employee_ids"])
+        if request.data.get("department_ids"):
+            employees = employees.filter(department_id__in=request.data["department_ids"])
+        today = timezone.localdate()
+        if request.data.get("current_plan"):
+            on_plan = ShiftPlanAssignment.objects.filter(plan_id=request.data["current_plan"], start_date__lte=today).filter(Q(end_date__isnull=True) | Q(end_date__gte=today)).values_list("employee_id", flat=True)
+            employees = employees.filter(pk__in=list(on_plan))
+        if not (request.data.get("employee_ids") or request.data.get("department_ids") or request.data.get("current_plan") or request.data.get("everyone")):
+            return Response({"detail": "Choose who to assign: a department, people on another plan, or everyone."}, status=status.HTTP_400_BAD_REQUEST)
+        people = list(employees)
+        if not people:
+            return Response({"detail": "Nobody matches that selection."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            start = date.fromisoformat(request.data["start_date"]) if request.data.get("start_date") else today
+        except ValueError:
+            return Response({"detail": "The start date is not valid."}, status=status.HTTP_400_BAD_REQUEST)
+        group = str(request.data.get("group", "")).upper()
+        if request.data.get("dry_run"):
+            split = {"A": len(people[::2]), "B": len(people[1::2])} if group == "SPLIT" else None
+            return Response({"people": len(people), "split": split, "sample": [e.full_name for e in people[:5]]})
+        with transaction.atomic():
+            try:
+                if plan.kind == "rotation" and group == "SPLIT":
+                    _, first = assign_plan(people[::2], plan, group="A", start_date=start, actor=request.user.get_username())
+                    _, second = assign_plan(people[1::2], plan, group="B", start_date=start, actor=request.user.get_username()) if people[1::2] else (None, None)
+                    summary = {"created": first.created + (second.created if second else 0), "updated": first.updated + (second.updated if second else 0)}
+                else:
+                    _, done = assign_plan(people, plan, group=group, start_date=start, actor=request.user.get_username())
+                    summary = {"created": done.created, "updated": done.updated}
+            except ValueError as error:
+                return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"people": len(people), "roster_days_created": summary["created"], "roster_days_changed": summary["updated"], "start_date": start})
+
+
+class ShiftPlanFlipAPIView(APIView):
+    """Swap which rotation group is on Day (moves the reference week on by one)."""
+
+    permission_classes = [IsAuthenticated, CanManageShifts]
+
+    def post(self, request, plan_id):
+        from attendance.models import ShiftPlan
+        from attendance.services.shift_plans import flip_rotation_week
+
+        plan = get_object_or_404(ShiftPlan, pk=plan_id)
+        try:
+            summary = flip_rotation_week(plan)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"roster_days_changed": summary.updated + summary.created})
