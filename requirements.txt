@@ -7,3 +7,5 @@ openpyxl==3.1.5
 xlrd==2.0.1
 websockets==17.1
 pyxlsb==1.0.10
+python-pptx==1.0.2
+Pillow==12.3.0

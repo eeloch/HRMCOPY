@@ -83,6 +83,10 @@ const menu: MenuItem[] = [
     href: "/offences",
   },
   {
+    label: "Reports",
+    href: "/reports",
+  },
+  {
     label: "Activity",
     href: "/activity",
   },
