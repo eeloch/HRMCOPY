@@ -77,6 +77,8 @@ def build_template_workbook():
         ])
     for column, width in zip("ABCDEFGH", (12, 26, 20, 24, 12, 24, 14, 24)):
         sheet.column_dimensions[column].width = width
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:H{row_count + 1}"
 
     reference = workbook.create_sheet("Plans (reference)")
     reference.append(["Plan Name", "Kind"])
