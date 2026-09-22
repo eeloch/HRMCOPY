@@ -84,6 +84,19 @@ class LeaveApprovalService:
             )
             return leave_request
 
+    @classmethod
+    def cancel(cls, request_id, acting_user):
+        """Withdraw a pending request - by the person who asked for it, or by anyone who can approve leave.
+        Unlike a rejection this is not a decision on the merits, so no reason is required."""
+        with transaction.atomic():
+            leave_request = cls._lock_pending_request(request_id)
+            is_owner = leave_request.requested_by_id == getattr(acting_user, "id", None)
+            can_manage = acting_user.has_perm("leave.approve_leave")
+            if not (is_owner or can_manage):
+                raise LeaveApprovalError("You can only cancel your own leave requests.")
+            cls._apply_decision(leave_request, acting_user, status=LeaveStatus.CANCELLED)
+            return leave_request
+
     @staticmethod
     def _lock_pending_request(request_id):
         try:

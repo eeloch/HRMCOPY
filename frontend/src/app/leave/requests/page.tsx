@@ -15,6 +15,8 @@ export default function LeaveRequestsPage() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
+  const [cancellingId, setCancellingId] = useState<number | null>(null);
+  const [actionError, setActionError] = useState("");
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -36,6 +38,22 @@ export default function LeaveRequestsPage() {
       setError(loadError instanceof Error ? loadError.message : "Unable to load leave requests.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function cancelRequest(request: LeaveRequest) {
+    if (!window.confirm(`Cancel ${request.request_number} (${request.employee_name})? This cannot be undone.`)) return;
+    setCancellingId(request.id);
+    setActionError("");
+    try {
+      const response = await apiFetch(`/leave/requests/${request.id}/cancel/`, { method: "POST", body: JSON.stringify({}) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Unable to cancel this request.");
+      await loadRequests();
+    } catch (cancelError) {
+      setActionError(cancelError instanceof Error ? cancelError.message : "Unable to cancel this request.");
+    } finally {
+      setCancellingId(null);
     }
   }
 
@@ -63,8 +81,9 @@ export default function LeaveRequestsPage() {
               {statuses.map((item) => <option key={item} value={item}>{item.replace(/_/g, " ")}</option>)}
             </select>
           </div>
+          {actionError && <p className="mx-5 mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{actionError}</p>}
           {loading ? <TableSkeleton /> : filteredRequests.length ? (
-            <div className="overflow-x-auto"><table className="w-full min-w-[880px] text-left"><thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500"><tr><th className="px-5 py-3">Request Number</th><th className="px-5 py-3">Employee</th><th className="px-5 py-3">Leave Type</th><th className="px-5 py-3">Dates</th><th className="px-5 py-3">Days</th><th className="px-5 py-3">Status</th></tr></thead><tbody className="divide-y divide-slate-100">{filteredRequests.map((request) => <tr key={request.id} className="hover:bg-slate-50"><td className="px-5 py-4 font-mono text-sm font-semibold text-slate-800">{request.request_number}</td><td className="px-5 py-4"><p className="font-semibold text-slate-900">{request.employee_name}</p><p className="text-sm text-slate-500">{request.employee_id}</p></td><td className="px-5 py-4 text-sm text-slate-700">{request.leave_type_name}</td><td className="px-5 py-4 text-sm text-slate-700">{formatDate(request.start_date)} - {formatDate(request.end_date)}</td><td className="px-5 py-4 text-sm text-slate-700">{request.total_days}</td><td className="px-5 py-4"><StatusBadge status={request.status} /></td></tr>)}</tbody></table></div>
+            <div className="overflow-x-auto"><table className="w-full min-w-[980px] text-left"><thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500"><tr><th className="px-5 py-3">Request Number</th><th className="px-5 py-3">Employee</th><th className="px-5 py-3">Leave Type</th><th className="px-5 py-3">Dates</th><th className="px-5 py-3">Days</th><th className="px-5 py-3">Status</th><th className="px-5 py-3" /></tr></thead><tbody className="divide-y divide-slate-100">{filteredRequests.map((request) => <tr key={request.id} className="hover:bg-slate-50"><td className="px-5 py-4 font-mono text-sm font-semibold text-slate-800">{request.request_number}</td><td className="px-5 py-4"><p className="font-semibold text-slate-900">{request.employee_name}</p><p className="text-sm text-slate-500">{request.employee_id}</p></td><td className="px-5 py-4 text-sm text-slate-700">{request.leave_type_name}</td><td className="px-5 py-4 text-sm text-slate-700">{formatDate(request.start_date)} - {formatDate(request.end_date)}</td><td className="px-5 py-4 text-sm text-slate-700">{request.total_days}</td><td className="px-5 py-4"><StatusBadge status={request.status} /></td><td className="px-5 py-4 text-right">{request.status === "pending" && <button type="button" disabled={cancellingId === request.id} onClick={() => void cancelRequest(request)} className="text-sm font-semibold text-red-600 hover:text-red-700 disabled:text-red-300">{cancellingId === request.id ? "Cancelling..." : "Cancel"}</button>}</td></tr>)}</tbody></table></div>
           ) : <p className="p-10 text-center text-slate-500">No leave requests found.</p>}
         </Section>
       )}

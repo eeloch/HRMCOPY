@@ -3,6 +3,7 @@ from django.urls import path
 from leave.views import (
     LeaveBalanceAPIView,
     LeaveApproveAPIView,
+    LeaveCancelAPIView,
     LeavePartialApproveAPIView,
     LeavePolicyMatrixAPIView,
     LeavePolicySetAPIView,
@@ -35,4 +36,5 @@ urlpatterns = [
     path("requests/<int:request_id>/approve/", LeaveApproveAPIView.as_view(), name="leave-request-approve"),
     path("requests/<int:request_id>/partial-approve/", LeavePartialApproveAPIView.as_view(), name="leave-request-partial-approve"),
     path("requests/<int:request_id>/reject/", LeaveRejectAPIView.as_view(), name="leave-request-reject"),
+    path("requests/<int:request_id>/cancel/", LeaveCancelAPIView.as_view(), name="leave-request-cancel"),
 ]

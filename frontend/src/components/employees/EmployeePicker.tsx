@@ -7,7 +7,11 @@ import { apiFetch } from "@/lib/api";
 export type EmployeeOption = { id: number; employee_id: string; full_name: string; department_name: string | null };
 
 /** A searchable employee combobox (name or staff number), replacing a raw numeric ID field wherever one
- * employee needs to be chosen. Only searches active employees. */
+ * employee needs to be chosen. Only searches active employees.
+ *
+ * The container (and its outside-click listener) stay mounted in both the "searching" and "selected"
+ * states, so there is exactly one persistent field on screen - selecting someone fills it in, the same as
+ * typing would, rather than swapping in a different element that could read as the selection vanishing. */
 export function EmployeePicker({
   value,
   onChange,
@@ -21,6 +25,7 @@ export function EmployeePicker({
   const [results, setResults] = useState<EmployeeOption[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
   // A slower, earlier request resolving after a newer one must never overwrite it - so every request is
   // numbered, and a response is only applied if it is still the most recent one issued.
@@ -29,18 +34,24 @@ export function EmployeePicker({
   useEffect(() => {
     if (!term.trim()) {
       setResults([]);
+      setError("");
       return;
     }
     const timer = window.setTimeout(async () => {
       const requestId = ++latestRequestId.current;
       setLoading(true);
+      setError("");
       try {
         const response = await apiFetch(`/employees/?search=${encodeURIComponent(term.trim())}&status=active`);
         if (requestId !== latestRequestId.current) return; // a newer search has since started; discard this one
-        if (response.ok) {
-          const data = await response.json();
-          if (requestId !== latestRequestId.current) return;
-          setResults((data.results || []).slice(0, 20));
+        if (!response.ok) throw new Error("Unable to search employees.");
+        const data = await response.json();
+        if (requestId !== latestRequestId.current) return;
+        setResults((data.results || []).slice(0, 20));
+      } catch {
+        if (requestId === latestRequestId.current) {
+          setResults([]);
+          setError("Unable to search right now. Check your connection and try again.");
         }
       } finally {
         if (requestId === latestRequestId.current) setLoading(false);
@@ -57,57 +68,73 @@ export function EmployeePicker({
     return () => document.removeEventListener("mousedown", onClickOutside);
   }, []);
 
-  if (value) {
-    return (
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3">
-        <div className="flex items-center gap-2.5">
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-xs font-bold text-white">✓</span>
-          <div>
-            <p className="font-semibold text-slate-900">{value.full_name}</p>
-            <p className="text-sm text-slate-500">{value.employee_id}{value.department_name ? ` · ${value.department_name}` : ""}</p>
-          </div>
-        </div>
-        {/* Deliberately spaced away from the name and its own bordered button, not an inline text link right
-         * next to the selection, so a stray click right after picking someone can't silently reset it. */}
-        <button
-          type="button"
-          onClick={() => { onChange(null); setTerm(""); }}
-          className="ml-4 shrink-0 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-        >
-          Change employee
-        </button>
-      </div>
-    );
+  function clearSelection() {
+    onChange(null);
+    setTerm("");
+    setResults([]);
+    setOpen(false);
+  }
+
+  function selectResult(employee: EmployeeOption) {
+    onChange(employee);
+    setOpen(false);
+    setTerm("");
+    setResults([]);
   }
 
   return (
     <div ref={containerRef} className="relative">
-      <input
-        type="text"
-        value={term}
-        onChange={(event) => { setTerm(event.target.value); setOpen(true); }}
-        onFocus={() => setOpen(true)}
-        onKeyDown={(event) => {
-          // Enter must never fall through to submit the surrounding form while still searching; pick the
-          // top match instead, the same as clicking it.
-          if (event.key === "Enter") {
-            event.preventDefault();
-            if (results[0]) { onChange(results[0]); setOpen(false); setTerm(""); }
-          }
-        }}
-        placeholder={placeholder}
-        className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500"
-      />
-      {open && term.trim() && (
+      {value ? (
+        // Same size and shape as the search input below, so picking someone reads as "this field is now
+        // filled in", not as a different box replacing it.
+        <div className="flex w-full items-center justify-between gap-3 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-xs font-bold text-white">✓</span>
+            <div className="min-w-0">
+              <p className="truncate font-semibold text-slate-900">{value.full_name}</p>
+              <p className="truncate text-sm text-slate-500">{value.employee_id}{value.department_name ? ` · ${value.department_name}` : ""}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={clearSelection}
+            title="Choose a different employee"
+            aria-label="Choose a different employee"
+            className="shrink-0 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+          >
+            Change
+          </button>
+        </div>
+      ) : (
+        <input
+          type="text"
+          value={term}
+          onChange={(event) => { setTerm(event.target.value); setOpen(true); }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={(event) => {
+            // Enter must never fall through to submit the surrounding form while still searching; pick the
+            // top match instead, the same as clicking it.
+            if (event.key === "Enter") {
+              event.preventDefault();
+              if (results[0]) selectResult(results[0]);
+            }
+          }}
+          placeholder={placeholder}
+          className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500"
+        />
+      )}
+      {!value && open && term.trim() && (
         <div className="absolute z-20 mt-1 max-h-72 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg">
           {loading ? (
             <p className="p-4 text-sm text-slate-500">Searching...</p>
+          ) : error ? (
+            <p className="p-4 text-sm text-red-600">{error}</p>
           ) : results.length ? (
             results.map((employee) => (
               <button
                 type="button"
                 key={employee.id}
-                onClick={() => { onChange(employee); setOpen(false); setTerm(""); }}
+                onClick={() => selectResult(employee)}
                 className="block w-full px-4 py-2.5 text-left hover:bg-slate-50"
               >
                 <span className="block font-semibold text-slate-900">{employee.full_name}</span>

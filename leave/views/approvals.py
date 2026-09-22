@@ -45,6 +45,7 @@ class LeaveDecisionAPIView(APIView):
             LeaveStatus.APPROVED: ("leave.approved", AuditSeverity.SUCCESS, "Leave approved"),
             LeaveStatus.PARTIALLY_APPROVED: ("leave.partially_approved", AuditSeverity.SUCCESS, "Leave partially approved"),
             LeaveStatus.REJECTED: ("leave.rejected", AuditSeverity.WARNING, "Leave rejected"),
+            LeaveStatus.CANCELLED: ("leave.cancelled", AuditSeverity.INFO, "Leave request cancelled"),
         }[leave_request.status]
         metadata = {
             "request_number": leave_request.request_number,
@@ -57,7 +58,8 @@ class LeaveDecisionAPIView(APIView):
             "approved_end_date": leave_request.approved_end_date.isoformat() if leave_request.approved_end_date else None,
         }
         AuditService.log(event_type=event_type, module="leave", employee=leave_request.employee, actor=actor, object=leave_request, severity=severity, title=title, description=f"{leave_request.leave_type.name} request {leave_request.request_number} was {leave_request.get_status_display().lower()}.", metadata=metadata)
-        if leave_request.requested_by:
+        # Don't notify someone about their own action (e.g. withdrawing their own request).
+        if leave_request.requested_by and leave_request.requested_by_id != getattr(actor, "id", None):
             NotificationService.create(recipient=leave_request.requested_by, event_type=event_type, title=f"{leave_request.leave_type.name} {leave_request.get_status_display()}", message=f"Your leave request {leave_request.request_number} was {leave_request.get_status_display().lower()}.", severity=NotificationSeverity.WARNING if leave_request.status == LeaveStatus.REJECTED else NotificationSeverity.SUCCESS, employee=leave_request.employee, related_url="/leave/requests", metadata=metadata)
 
 
@@ -84,3 +86,17 @@ class LeaveRejectAPIView(LeaveDecisionAPIView):
 
     def decide(self, request_id, user, validated_data):
         return LeaveApprovalService.reject(request_id, user, **validated_data)
+
+
+class LeaveCancelAPIView(LeaveDecisionAPIView):
+    """Withdraw a pending request. Open to the person who asked for it (not just leave.approve_leave
+    holders) - the object-level check happens in the service, not here."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get_input_serializer(self, *args, **kwargs):
+        from rest_framework import serializers
+        return serializers.Serializer(*args, **kwargs)
+
+    def decide(self, request_id, user, validated_data):
+        return LeaveApprovalService.cancel(request_id, user)

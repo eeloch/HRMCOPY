@@ -5,7 +5,7 @@ from .requests import (
     LeaveRequestListAPIView,
     PendingLeaveRequestListAPIView,
 )
-from .approvals import LeaveApproveAPIView, LeavePartialApproveAPIView, LeaveRejectAPIView
+from .approvals import LeaveApproveAPIView, LeaveCancelAPIView, LeavePartialApproveAPIView, LeaveRejectAPIView
 from .policies import LeavePolicyMatrixAPIView, LeavePolicySetAPIView
 
 __all__ = [
@@ -16,6 +16,7 @@ __all__ = [
     "LeaveTypeListAPIView",
     "PendingLeaveRequestListAPIView",
     "LeaveApproveAPIView",
+    "LeaveCancelAPIView",
     "LeavePartialApproveAPIView",
     "LeaveRejectAPIView",
     "LeavePolicyMatrixAPIView",

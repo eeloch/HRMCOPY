@@ -6,7 +6,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from employees.models import Employee, EmploymentType
-from leave.models import LeaveDuration, LeavePolicy, LeaveType
+from leave.models import LeaveDuration, LeavePolicy, LeaveStatus, LeaveType
 from leave.services.request import LeaveRequestService
 
 
@@ -161,3 +161,66 @@ class LeavePolicyMatrixTests(TestCase):
     def test_invalid_employment_type_rejected(self):
         response = self.client.post("/api/leave/policies/set/", {"leave_type": self.leave_type.pk, "employment_type": "made-up", "allocated_days": "5"}, format="json")
         self.assertEqual(response.status_code, 400)
+
+
+class LeaveCancelTests(TestCase):
+    """Withdrawing a pending request - by its requester, or by anyone who can approve leave."""
+
+    def setUp(self):
+        from django.contrib.auth.models import Permission
+
+        self.employee = Employee.objects.create(employee_id="CANCEL-001", first_name="Can", last_name="Cel", employment_type=EmploymentType.PERMANENT)
+        self.leave_type = LeaveType.objects.create(name="Cancel Annual", code="CANCEL-ANNUAL")
+        LeavePolicy.objects.create(leave_type=self.leave_type, employment_type=EmploymentType.PERMANENT, allocated_days=Decimal("15.00"))
+
+        self.requester = get_user_model().objects.create_user(username="cancel-requester", password="pw")
+        self.manager = get_user_model().objects.create_user(username="cancel-manager", password="pw")
+        self.manager.user_permissions.add(Permission.objects.get(codename="approve_leave"))
+        self.bystander = get_user_model().objects.create_user(username="cancel-bystander", password="pw")
+
+        self.request = LeaveRequestService.create_request(
+            employee=self.employee, leave_type=self.leave_type, start_date=date(2026, 11, 2), end_date=date(2026, 11, 3),
+            reason="Testing cancellation.", requested_by=self.requester,
+        )["leave_request"]
+
+    def test_requester_can_cancel_their_own_request(self):
+        client = APIClient()
+        client.force_authenticate(self.requester)
+        response = client.post(f"/api/leave/requests/{self.request.pk}/cancel/", {}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.request.refresh_from_db()
+        self.assertEqual(self.request.status, LeaveStatus.CANCELLED)
+        self.assertEqual(self.request.approved_by, self.requester)
+
+    def test_a_leave_manager_can_cancel_anyones_request(self):
+        client = APIClient()
+        client.force_authenticate(self.manager)
+        response = client.post(f"/api/leave/requests/{self.request.pk}/cancel/", {}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.request.refresh_from_db()
+        self.assertEqual(self.request.status, LeaveStatus.CANCELLED)
+
+    def test_an_unrelated_user_cannot_cancel_it(self):
+        client = APIClient()
+        client.force_authenticate(self.bystander)
+        response = client.post(f"/api/leave/requests/{self.request.pk}/cancel/", {}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.request.refresh_from_db()
+        self.assertEqual(self.request.status, LeaveStatus.PENDING)
+
+    def test_an_already_decided_request_cannot_be_cancelled(self):
+        from leave.services.approval import LeaveApprovalService
+
+        LeaveApprovalService.approve(self.request.pk, self.manager)
+        client = APIClient()
+        client.force_authenticate(self.requester)
+        response = client.post(f"/api/leave/requests/{self.request.pk}/cancel/", {}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_cancelling_does_not_notify_the_person_who_cancelled_it(self):
+        from notifications.models import Notification
+
+        client = APIClient()
+        client.force_authenticate(self.requester)
+        client.post(f"/api/leave/requests/{self.request.pk}/cancel/", {}, format="json")
+        self.assertFalse(Notification.objects.filter(recipient=self.requester, event_type="leave.cancelled").exists())
