@@ -59,13 +59,22 @@ export function EmployeePicker({
 
   if (value) {
     return (
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-300 bg-slate-50 px-4 py-3">
-        <div>
-          <p className="font-semibold text-slate-900">{value.full_name}</p>
-          <p className="text-sm text-slate-500">{value.employee_id}{value.department_name ? ` · ${value.department_name}` : ""}</p>
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3">
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-xs font-bold text-white">✓</span>
+          <div>
+            <p className="font-semibold text-slate-900">{value.full_name}</p>
+            <p className="text-sm text-slate-500">{value.employee_id}{value.department_name ? ` · ${value.department_name}` : ""}</p>
+          </div>
         </div>
-        <button type="button" onClick={() => { onChange(null); setTerm(""); }} className="text-sm font-semibold text-blue-700 hover:text-blue-800">
-          Change
+        {/* Deliberately spaced away from the name and its own bordered button, not an inline text link right
+         * next to the selection, so a stray click right after picking someone can't silently reset it. */}
+        <button
+          type="button"
+          onClick={() => { onChange(null); setTerm(""); }}
+          className="ml-4 shrink-0 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+        >
+          Change employee
         </button>
       </div>
     );
@@ -78,6 +87,14 @@ export function EmployeePicker({
         value={term}
         onChange={(event) => { setTerm(event.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}
+        onKeyDown={(event) => {
+          // Enter must never fall through to submit the surrounding form while still searching; pick the
+          // top match instead, the same as clicking it.
+          if (event.key === "Enter") {
+            event.preventDefault();
+            if (results[0]) { onChange(results[0]); setOpen(false); setTerm(""); }
+          }
+        }}
         placeholder={placeholder}
         className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500"
       />
