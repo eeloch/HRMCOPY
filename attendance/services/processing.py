@@ -4,10 +4,9 @@ from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 
-from attendance.models import AttendanceEvent, AttendanceException, DailyAttendance, EmployeeRosterDay, ShiftAssignment
+from attendance.models import AttendanceEvent, AttendanceException, DailyAttendance, EmployeeRosterDay
 from attendance.services.leave import approved_leave_employee_ids
 from attendance.services.roster import get_employee_roster_day
 from audit.models import AuditSeverity
@@ -16,16 +15,6 @@ from audit.services import AuditService
 
 CAPTURE_WINDOW_HOURS = 3
 PENDING_EXCEPTION_STATUS = "pending"
-
-
-def get_active_shift_assignment(employee, work_date):
-    return (
-        ShiftAssignment.objects.filter(employee=employee, start_date__lte=work_date)
-        .filter(Q(end_date__isnull=True) | Q(end_date__gte=work_date))
-        .select_related("shift")
-        .order_by("-start_date")
-        .first()
-    )
 
 
 def combine_date_and_time(work_date, shift_time):
@@ -144,8 +133,7 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
     # intentionally left untouched for a future rest-day/overtime policy.
     if roster_day and roster_day.status == "rest":
         return existing_attendance
-    assignment = get_active_shift_assignment(employee, work_date)
-    shift = roster_day.shift if roster_day else (assignment.shift if assignment else None)
+    shift = roster_day.shift if roster_day else None
     if not shift:
         return None
 
@@ -294,21 +282,19 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
 
 
 def process_attendance_for_date(work_date, employee=None, *, now=None):
-    """Process every employee expected on a date (rostered to work, or on an active shift assignment), or one employee."""
+    """Process every employee the roster expects to work on a date, or one employee.
+
+    The roster (EmployeeRosterDay) is the sole source of truth for who is expected to work: there is no
+    fallback to any other, older record of an employee's shift. A person with no roster day for this date is
+    simply not processed - a visible gap (missing from a shift plan) rather than a silent guess.
+    """
     now = now or timezone.now()
     if employee is not None:
-        employees = [employee] if (get_active_shift_assignment(employee, work_date) or get_employee_roster_day(employee, work_date)) else []
+        employees = [employee] if get_employee_roster_day(employee, work_date) else []
     else:
         by_id = {}
         for row in EmployeeRosterDay.objects.filter(date=work_date, status="work", employee__status="active").select_related("employee", "shift"):
             by_id[row.employee_id] = row.employee
-        for assignment in (
-            ShiftAssignment.objects.filter(start_date__lte=work_date)
-            .filter(Q(end_date__isnull=True) | Q(end_date__gte=work_date))
-            .select_related("employee", "shift")
-            .order_by("employee_id", "-start_date")
-        ):
-            by_id.setdefault(assignment.employee_id, assignment.employee)
         employees = list(by_id.values())
 
     leave_ids = set(approved_leave_employee_ids(work_date))

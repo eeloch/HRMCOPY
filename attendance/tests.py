@@ -196,10 +196,11 @@ class AttendanceProcessingTests(TestCase):
             first_name="Attendance",
             last_name=suffix,
         )
-        ShiftAssignment.objects.create(
+        EmployeeRosterDay.objects.create(
             employee=employee,
+            date=self.work_date,
+            status="work",
             shift=shift or self.day_shift,
-            start_date=self.work_date,
         )
         return employee
 
@@ -241,15 +242,24 @@ class AttendanceProcessingTests(TestCase):
         self.assertEqual(record.status, "present")
         self.assertFalse(AttendanceException.objects.filter(attendance=record, exception_type="missing_clock_out").exists())
 
-    def test_the_roster_decides_who_is_processed_not_only_shift_assignments(self):
-        from attendance.models import EmployeeRosterDay
-
-        person = Employee.objects.create(employee_id="ATT-ROSTER", first_name="Roster", last_name="Only")  # no ShiftAssignment at all
+    def test_the_roster_alone_decides_who_is_processed(self):
+        person = Employee.objects.create(employee_id="ATT-ROSTER", first_name="Roster", last_name="Only")
         EmployeeRosterDay.objects.create(employee=person, date=self.work_date, status="work", shift=self.day_shift)
         self.add_event(person, self.work_date, 7)
         self.add_event(person, self.work_date, 19)
         results = process_attendance_for_date(self.work_date, now=self.after)
         self.assertIn(person.pk, [r.employee_id for r in results])
+
+    def test_an_old_style_shift_assignment_with_no_roster_day_is_not_processed(self):
+        """The roster is the sole source of truth: a leftover/legacy ShiftAssignment with no matching roster
+        day must never be silently used to calculate attendance."""
+        person = Employee.objects.create(employee_id="ATT-LEGACY", first_name="Legacy", last_name="Only")
+        ShiftAssignment.objects.create(employee=person, shift=self.day_shift, start_date=self.work_date)
+        self.add_event(person, self.work_date, 7)
+        self.add_event(person, self.work_date, 19)
+        self.assertIsNone(process_employee_attendance(person, self.work_date, now=self.after))
+        results = process_attendance_for_date(self.work_date, now=self.after)
+        self.assertNotIn(person.pk, [r.employee_id for r in results])
 
     def test_day_shift_on_time(self):
         employee = self.employee_with_shift("ONTIME")
