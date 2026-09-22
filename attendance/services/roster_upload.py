@@ -172,6 +172,8 @@ def apply_roster_upload(file, *, dry_run=True, actor=""):
     rows, idx = _read_rows(file)
     employees_by_number = {employee.employee_id: employee for employee in Employee.objects.filter(status="active")}
     plans_by_name = {plan.name.strip().lower(): plan for plan in ShiftPlan.objects.filter(active=True)}
+    rotation_plans = [plan for plan in plans_by_name.values() if plan.kind == "rotation"]
+    current = _current_assignments()
     report = RosterUploadReport(dry_run=dry_run, rows_in_file=len(rows))
 
     # Group people by (plan, group, start date) so each combination is applied in one call.
@@ -189,14 +191,23 @@ def apply_roster_upload(file, *, dry_run=True, actor=""):
         if employee is None:
             report.issues.append(RosterUploadIssue(position, employee_id, "No active employee with this staff number."))
             continue
-        if not plan_name:
-            report.unchanged += 1
-            continue  # nothing chosen for this person: leave their roster as it is
-        plan = plans_by_name.get(plan_name.strip().lower())
-        if plan is None:
-            report.issues.append(RosterUploadIssue(position, employee_id, f'No active plan named "{plan_name}".'))
-            continue
         group = str(get("group") or "").strip().upper()
+        if not plan_name:
+            if group in ("A", "B") and len(rotation_plans) == 1:
+                # A group was given with no Plan Name: the only sensible plan it can mean is the one
+                # rotation plan the system has, so infer it rather than silently doing nothing.
+                plan = rotation_plans[0]
+            elif group in ("A", "B"):
+                report.issues.append(RosterUploadIssue(position, employee_id, "A Group was given but no Plan Name, and there isn't exactly one rotation plan to infer it from - name the plan."))
+                continue
+            else:
+                report.unchanged += 1
+                continue  # nothing chosen for this person: leave their roster as it is
+        else:
+            plan = plans_by_name.get(plan_name.strip().lower())
+            if plan is None:
+                report.issues.append(RosterUploadIssue(position, employee_id, f'No active plan named "{plan_name}".'))
+                continue
         if plan.kind == "rotation" and group not in ("A", "B"):
             report.issues.append(RosterUploadIssue(position, employee_id, "A rotation plan needs Group A or B."))
             continue
@@ -207,6 +218,11 @@ def apply_roster_upload(file, *, dry_run=True, actor=""):
         except ValueError as error:
             report.issues.append(RosterUploadIssue(position, employee_id, str(error)))
             continue
+        existing = current.get(employee.pk)
+        already_current = existing is not None and existing.plan_id == plan.pk and existing.group == group
+        if already_current:
+            report.unchanged += 1
+            continue  # already exactly this plan and group: nothing to do, whatever start date was given
         buckets.setdefault((plan.pk, group, start), []).append(employee)
 
     def describe(key):

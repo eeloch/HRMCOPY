@@ -101,6 +101,38 @@ class RosterUploadServiceTests(TestCase):
         self.assertEqual(report.unchanged, 1)
         self.assertFalse(report.issues)
 
+    def test_blank_plan_name_with_a_group_infers_the_one_rotation_plan(self):
+        """A spreadsheet that mirrors Current Group into Group (A/B) but leaves Plan Name blank - as a
+        template filled in wholesale tends to - should still move the person, not silently no-op."""
+        upload = make_upload([["E002", "", "", "", "", "", "B", ""]])
+        report = apply_roster_upload(upload, dry_run=False)
+        self.assertEqual(report.changes, 1)
+        assignment = ShiftPlanAssignment.objects.get(employee=self.bob)
+        self.assertEqual(assignment.plan, self.rotation)
+        self.assertEqual(assignment.group, "B")
+
+    def test_blank_plan_name_with_a_group_and_two_rotation_plans_is_an_issue(self):
+        ShiftPlan.objects.create(name="Second Rotation", kind="rotation", day_shift=self.day, night_shift=self.night, anchor_monday=date(2026, 9, 21))
+        upload = make_upload([["E002", "", "", "", "", "", "B", ""]])
+        report = apply_roster_upload(upload, dry_run=True)
+        self.assertEqual(report.changes, 0)
+        self.assertEqual(len(report.issues), 1)
+        self.assertIn("exactly one rotation plan", report.issues[0].reason)
+
+    def test_a_row_that_already_matches_the_current_assignment_is_left_alone(self):
+        """A spreadsheet that fills every row (mirroring Current Plan/Group back into Plan Name/Group, as HR
+        filling a template top to bottom naturally does) must not fragment assignment history for people who
+        aren't actually changing, even if it gives a different start date."""
+        ShiftPlanAssignment.objects.create(employee=self.bob, plan=self.rotation, group="B", start_date=date(2026, 9, 1))
+        upload = make_upload([["E002", "", "", "", "", "Extrusion Rotation", "B", "2026-10-15"]])
+        report = apply_roster_upload(upload, dry_run=False)
+        self.assertEqual(report.changes, 0)
+        self.assertEqual(report.unchanged, 1)
+        # still exactly the one, original assignment - nothing new was created
+        assignments = ShiftPlanAssignment.objects.filter(employee=self.bob)
+        self.assertEqual(assignments.count(), 1)
+        self.assertEqual(assignments.first().start_date, date(2026, 9, 1))
+
     def test_unknown_employee_is_an_issue(self):
         upload = make_upload([["NOBODY", "", "", "", "", "Permanent Day", "", ""]])
         report = apply_roster_upload(upload, dry_run=True)
