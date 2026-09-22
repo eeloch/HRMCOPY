@@ -4,6 +4,8 @@ from leave.views import (
     LeaveBalanceAPIView,
     LeaveApproveAPIView,
     LeavePartialApproveAPIView,
+    LeavePolicyMatrixAPIView,
+    LeavePolicySetAPIView,
     LeaveRejectAPIView,
     LeaveRequestCreateAPIView,
     LeaveRequestDetailAPIView,
@@ -15,6 +17,8 @@ from leave.views import (
 
 urlpatterns = [
     path("types/", LeaveTypeListAPIView.as_view(), name="leave-types"),
+    path("policies/", LeavePolicyMatrixAPIView.as_view(), name="leave-policies"),
+    path("policies/set/", LeavePolicySetAPIView.as_view(), name="leave-policy-set"),
     path(
         "balance/<int:employee_id>/",
         LeaveBalanceAPIView.as_view(),

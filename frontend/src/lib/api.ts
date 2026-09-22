@@ -19,6 +19,7 @@ export type CurrentUser = {
     review_attendanceexception: boolean;
     review_overtime: boolean;
     approve_leave: boolean;
+    manage_leave_policy: boolean;
     view_payroll: boolean;
     manage_payroll: boolean;
     record_ppe_issue: boolean;

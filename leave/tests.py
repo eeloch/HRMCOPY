@@ -107,3 +107,57 @@ class LeaveRequestDurationTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["result"]["total_days"], "2.00")
+
+
+class LeavePolicyMatrixTests(TestCase):
+    """The screen that would have caught the "384 casual employees can't take any leave" gap: a full
+    matrix of every leave type x employment type, and the only way to fill in a missing combination."""
+
+    def setUp(self):
+        self.leave_type = LeaveType.objects.create(name="Matrix Annual", code="MATRIX-ANNUAL", default_days=Decimal("15.00"))
+        LeavePolicy.objects.create(leave_type=self.leave_type, employment_type=EmploymentType.PERMANENT, allocated_days=Decimal("15.00"))
+
+        self.manager = get_user_model().objects.create_user(username="leave-policy-manager", password="pw")
+        from django.contrib.auth.models import Permission
+        self.manager.user_permissions.add(Permission.objects.get(codename="manage_leave_policy"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.manager)
+
+    def test_matrix_shows_the_gap(self):
+        response = self.client.get("/api/leave/policies/")
+        self.assertEqual(response.status_code, 200)
+        covered = {p["employment_type"] for p in response.data["policies"] if p["leave_type"] == self.leave_type.pk}
+        self.assertEqual(covered, {"permanent"})  # casual, contract, etc. have no row at all - the gap is visible
+
+    def test_setting_a_missing_cell_makes_it_requestable(self):
+        employee = Employee.objects.create(employee_id="POLICY-CASUAL", first_name="Cas", last_name="Ual", employment_type=EmploymentType.CASUAL)
+
+        # Before: exactly the production bug - no policy matches, so no leave can be validated.
+        before = LeaveRequestService.validate_request(employee=employee, leave_type=self.leave_type, start_date=date(2026, 10, 1), end_date=date(2026, 10, 2), reason="Rest")
+        self.assertIn("leave_type", before["errors"])
+
+        response = self.client.post("/api/leave/policies/set/", {"leave_type": self.leave_type.pk, "employment_type": "casual", "allocated_days": "10"}, format="json")
+        self.assertEqual(response.status_code, 200)
+
+        after = LeaveRequestService.validate_request(employee=employee, leave_type=self.leave_type, start_date=date(2026, 10, 1), end_date=date(2026, 10, 2), reason="Rest")
+        self.assertTrue(after["is_valid"])
+        self.assertEqual(after["balance"]["allocated_days"], Decimal("10.00"))
+
+    def test_setting_an_existing_cell_updates_it_in_place_not_duplicates(self):
+        self.client.post("/api/leave/policies/set/", {"leave_type": self.leave_type.pk, "employment_type": "permanent", "allocated_days": "20"}, format="json")
+        self.assertEqual(LeavePolicy.objects.filter(leave_type=self.leave_type, employment_type="permanent").count(), 1)
+        self.assertEqual(LeavePolicy.objects.get(leave_type=self.leave_type, employment_type="permanent").allocated_days, Decimal("20.00"))
+
+    def test_requires_permission_to_set(self):
+        outsider = APIClient()
+        outsider.force_authenticate(get_user_model().objects.create_user(username="no-perm", password="pw"))
+        response = outsider.post("/api/leave/policies/set/", {"leave_type": self.leave_type.pk, "employment_type": "casual", "allocated_days": "10"}, format="json")
+        self.assertEqual(response.status_code, 403)
+
+    def test_negative_days_rejected(self):
+        response = self.client.post("/api/leave/policies/set/", {"leave_type": self.leave_type.pk, "employment_type": "casual", "allocated_days": "-5"}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_invalid_employment_type_rejected(self):
+        response = self.client.post("/api/leave/policies/set/", {"leave_type": self.leave_type.pk, "employment_type": "made-up", "allocated_days": "5"}, format="json")
+        self.assertEqual(response.status_code, 400)

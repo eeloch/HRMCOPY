@@ -59,6 +59,9 @@ class LeavePolicy(models.Model):
                 name="unique_leave_policy_per_type",
             )
         ]
+        permissions = [
+            ("manage_leave_policy", "Can manage leave policy allocations"),
+        ]
 
     def __str__(self):
         return f"{self.leave_type.name} policy - {self.get_employment_type_display()}"

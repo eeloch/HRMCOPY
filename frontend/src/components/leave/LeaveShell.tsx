@@ -12,6 +12,7 @@ const links = [
   { href: "/leave/new", label: "Request Leave" },
   { href: "/leave/approvals", label: "Approvals" },
   { href: "/leave/calendar", label: "Calendar" },
+  { href: "/leave/policies", label: "Leave Policies" },
 ];
 
 export function LeaveShell({ children }: { children: ReactNode }) {

@@ -16,6 +16,7 @@ MANAGED_PERMISSIONS = [
     {"codename": "review_attendanceexception", "app_label": "attendance", "label": "Review attendance exceptions", "group": "Attendance"},
     {"codename": "review_overtime", "app_label": "attendance", "label": "Review overtime records", "group": "Attendance"},
     {"codename": "approve_leave", "app_label": "leave", "label": "Approve leave requests", "group": "Leave"},
+    {"codename": "manage_leave_policy", "app_label": "leave", "label": "Set leave entitlements per employment type", "group": "Leave"},
     {"codename": "view_payroll", "app_label": "payroll", "label": "View payroll", "group": "Payroll"},
     {"codename": "manage_payroll", "app_label": "payroll", "label": "Manage payroll periods & records", "group": "Payroll"},
     {"codename": "record_meal_operations", "app_label": "meals", "label": "Record meal operations", "group": "Meals"},

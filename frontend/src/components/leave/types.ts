@@ -57,3 +57,19 @@ export type BalanceResponse = {
   count: number;
   results: LeaveBalance[];
 };
+
+export type LeavePolicyCell = {
+  id: number;
+  leave_type: number;
+  employment_type: string;
+  allocated_days: string;
+  is_paid: boolean;
+  requires_approval: boolean;
+  is_active: boolean;
+};
+
+export type LeavePolicyMatrix = {
+  leave_types: { id: number; code: string; name: string; default_days: string }[];
+  employment_types: { value: string; label: string }[];
+  policies: LeavePolicyCell[];
+};
