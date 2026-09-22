@@ -176,7 +176,9 @@ class EmployeeOfTheMonthService:
     @staticmethod
     def cancel(entry, *, actor):
         with transaction.atomic():
-            entry = EmployeeOfTheMonth.objects.select_for_update().select_related("employee", "department", "bonus").get(pk=entry.pk)
+            # "bonus" is a nullable FK (a LEFT JOIN) - Postgres refuses FOR UPDATE across an outer join
+            # unless it is scoped to just the base table with `of`.
+            entry = EmployeeOfTheMonth.objects.select_for_update(of=("self",)).select_related("employee", "department", "bonus").get(pk=entry.pk)
             if entry.status not in {EotmStatus.PROPOSED, EotmStatus.APPROVED}:
                 raise ValueError("This entry is already closed.")
             if entry.bonus_id and entry.bonus.status == BonusStatus.PAID:

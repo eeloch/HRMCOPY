@@ -71,7 +71,9 @@ class ShiftAssignmentDetailAPIView(APIView):
     def patch(self, request, assignment_id):
         try:
             with transaction.atomic():
-                assignment = ShiftAssignment.objects.select_for_update().select_related(
+                # employee__department is a nullable FK (a LEFT JOIN) - Postgres refuses FOR UPDATE across
+                # an outer join unless it is scoped to just the base table with `of`.
+                assignment = ShiftAssignment.objects.select_for_update(of=("self",)).select_related(
                     "employee",
                     "employee__department",
                     "shift",

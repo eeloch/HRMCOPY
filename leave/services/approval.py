@@ -100,7 +100,12 @@ class LeaveApprovalService:
     @staticmethod
     def _lock_pending_request(request_id):
         try:
-            leave_request = LeaveRequest.objects.select_for_update().select_related(
+            # select_related("requested_by") is a LEFT JOIN (the field is nullable) - Postgres refuses
+            # FOR UPDATE across an outer join unless the lock is scoped to just the base table with `of`.
+            # This was untested on Postgres: SQLite (used in tests and local dev) has no such restriction,
+            # so every decision through this path (approve/reject/partial-approve/cancel) failed in
+            # production while looking fine everywhere else.
+            leave_request = LeaveRequest.objects.select_for_update(of=("self",)).select_related(
                 "employee",
                 "leave_type",
                 "requested_by",
