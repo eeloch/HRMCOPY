@@ -91,6 +91,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
     current_shift = serializers.SerializerMethodField()
 
+    shift_plan = serializers.SerializerMethodField()
+
     hostel = serializers.SerializerMethodField()
 
     accommodation = serializers.SerializerMethodField()
@@ -105,12 +107,11 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
 
     def get_biometric(self, employee):
-
-        biometric = (
-            BiometricIdentity.objects
-            .filter(employee=employee)
-            .first()
-        )
+        # employee.biometric_identities.all() (not a fresh BiometricIdentity.objects.filter(...) query) so a
+        # list view's .prefetch_related("biometric_identities") is actually used - one query total, not one
+        # per employee.
+        identities = sorted(employee.biometric_identities.all(), key=lambda identity: identity.pk)
+        biometric = identities[0] if identities else None
 
         if biometric is None:
             return None
@@ -122,10 +123,9 @@ class EmployeeSerializer(serializers.ModelSerializer):
         }
 
     def get_biometric_identities(self, employee):
-        identities = employee.biometric_identities.filter(is_active=True).order_by(
-            "system",
-            "source_identifier",
-            "external_user_id",
+        identities = sorted(
+            (identity for identity in employee.biometric_identities.all() if identity.is_active),
+            key=lambda identity: (identity.system, identity.source_identifier, identity.external_user_id),
         )
         return [
             {
@@ -201,6 +201,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
             "status",
 
             "current_shift",
+            "shift_plan",
             "hostel",
             "accommodation",
             "biometric",
@@ -227,17 +228,24 @@ class EmployeeSerializer(serializers.ModelSerializer):
     def get_current_shift(self, employee):
         """Today's actual roster shift - the live source of truth, including a rotation plan's weekly
         Day/Night swap. The old static per-employee ShiftAssignment never reflects that swap, so it is not
-        used here."""
-        from django.utils import timezone
+        used here.
 
-        from attendance.models import EmployeeRosterDay
+        A list view passes a prefetched {employee_id: EmployeeRosterDay} map via context (`today_rosters`)
+        so this never runs one query per row; a single-object view (no context entry) queries directly."""
+        rosters = self.context.get("today_rosters")
+        if rosters is not None:
+            today_row = rosters.get(employee.id)
+        else:
+            from django.utils import timezone
 
-        today_row = (
-            EmployeeRosterDay.objects
-            .select_related("shift")
-            .filter(employee=employee, date=timezone.localdate(), status="work")
-            .first()
-        )
+            from attendance.models import EmployeeRosterDay
+
+            today_row = (
+                EmployeeRosterDay.objects
+                .select_related("shift")
+                .filter(employee=employee, date=timezone.localdate(), status="work")
+                .first()
+            )
 
         if not today_row or not today_row.shift:
             return None
@@ -247,6 +255,40 @@ class EmployeeSerializer(serializers.ModelSerializer):
             "name": today_row.shift.name,
             "start_time": today_row.shift.start_time,
             "end_time": today_row.shift.end_time,
+        }
+
+    def get_shift_plan(self, employee):
+        """The employee's current shift plan (and group, for a rotation plan) - not just today's shift, so
+        the directory can show and filter by "who is on which plan" even on a rest day.
+
+        Same prefetch-via-context pattern as get_current_shift, via `current_plan_assignments`."""
+        assignments = self.context.get("current_plan_assignments")
+        if assignments is not None:
+            assignment = assignments.get(employee.id)
+        else:
+            from django.db.models import Q
+            from django.utils import timezone
+
+            from attendance.models import ShiftPlanAssignment
+
+            today = timezone.localdate()
+            assignment = (
+                ShiftPlanAssignment.objects
+                .select_related("plan")
+                .filter(employee=employee, start_date__lte=today)
+                .filter(Q(end_date__isnull=True) | Q(end_date__gte=today))
+                .order_by("-start_date")
+                .first()
+            )
+
+        if not assignment:
+            return None
+
+        return {
+            "id": assignment.plan_id,
+            "name": assignment.plan.name,
+            "kind": assignment.plan.kind,
+            "group": assignment.group,
         }
 
 

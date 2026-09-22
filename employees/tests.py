@@ -765,3 +765,84 @@ class BulkImportAccommodationTests(APITestCase):
         self.assertEqual(self.client.post("/api/employees/import/", payload, format="multipart").status_code, status.HTTP_201_CREATED)
         self.assertEqual(Employee.objects.get(employee_id="000001").gender, "female")
         self.assertEqual(Employee.objects.get(employee_id="000002").gender, "male")
+
+
+class EmployeeDirectorySummaryAndFiltersTests(APITestCase):
+    """The Employee Directory's summary strip and filter chips: counts and query-param filters."""
+
+    def setUp(self):
+        from datetime import date, time
+
+        from attendance.models import Shift, ShiftPlan
+        from attendance.services.shift_plans import assign_plan
+
+        self.user = get_user_model().objects.create_user(username="directory-viewer", password="test-password")
+        self.client.force_authenticate(self.user)
+        self.department = Department.objects.create(name="Extrusion")
+
+        self.day = Shift.objects.get_or_create(name="Dir Day", defaults={"start_time": time(7), "end_time": time(19)})[0]
+        self.plan = ShiftPlan.objects.create(name="Dir Permanent Day", kind="fixed", shift=self.day, working_weekdays=[0, 1, 2, 3, 4, 5])
+
+        self.on_plan = Employee.objects.create(employee_id="DIR-001", first_name="On", last_name="Plan", department=self.department, status="active", employment_type="permanent", gender="female", bank_name="GTB", account_number="0123456789", bank_code="058", biometric_user_id="B1")
+        self.no_plan = Employee.objects.create(employee_id="DIR-002", first_name="No", last_name="Plan", department=self.department, status="active", employment_type="casual", gender="male")
+        self.inactive = Employee.objects.create(employee_id="DIR-003", first_name="In", last_name="Active", department=self.department, status="inactive")
+        assign_plan([self.on_plan], self.plan, start_date=date(2026, 1, 1))
+
+    def test_summary_counts(self):
+        data = self.client.get("/api/employees/summary/").json()
+        self.assertEqual(data["total"], 3)
+        self.assertEqual(data["by_status"]["active"], 2)
+        self.assertEqual(data["by_status"]["inactive"], 1)
+        self.assertEqual(data["not_assigned_shift_plan"], 1)  # no_plan, among active employees
+        self.assertEqual(data["missing_bank_details"], 1)  # no_plan has no bank details
+        self.assertEqual(data["missing_biometric"], 1)
+        self.assertEqual(data["gender"], {"male": 1, "female": 1, "unspecified": 0})
+        department_row = next(row for row in data["by_department"] if row["name"] == "Extrusion")
+        self.assertEqual(department_row["count"], 2)  # active only, not the inactive one
+        plan_row = next(row for row in data["by_shift_plan"] if row["id"] == self.plan.pk)
+        self.assertEqual(plan_row["count"], 1)
+        self.assertEqual(data["needs_attention"], 1)  # no_plan again: no plan AND no bank details AND no biometric
+
+    def test_filter_by_shift_plan_id(self):
+        response = self.client.get(f"/api/employees/?shift_plan={self.plan.pk}")
+        self.assertEqual([row["employee_id"] for row in response.json()["results"]], ["DIR-001"])
+
+    def test_filter_by_shift_plan_not_assigned(self):
+        response = self.client.get("/api/employees/?shift_plan=not_assigned")
+        ids = {row["employee_id"] for row in response.json()["results"]}
+        self.assertEqual(ids, {"DIR-002", "DIR-003"})  # inactive employees have no plan either
+
+    def test_filter_by_employment_type(self):
+        response = self.client.get("/api/employees/?employment_type=casual")
+        self.assertEqual([row["employee_id"] for row in response.json()["results"]], ["DIR-002"])
+
+    def test_filter_by_gender(self):
+        response = self.client.get("/api/employees/?gender=female")
+        self.assertEqual([row["employee_id"] for row in response.json()["results"]], ["DIR-001"])
+
+    def test_needs_attention_filter(self):
+        response = self.client.get("/api/employees/?needs_attention=1&status=active")
+        self.assertEqual([row["employee_id"] for row in response.json()["results"]], ["DIR-002"])
+
+    def test_list_response_includes_shift_plan_and_current_shift(self):
+        response = self.client.get("/api/employees/?status=active")
+        row = next(item for item in response.data["results"] if item["employee_id"] == "DIR-001")
+        self.assertEqual(row["shift_plan"]["name"], "Dir Permanent Day")
+
+    def test_listing_many_employees_does_not_grow_query_count_per_row(self):
+        """Regression guard: current_shift/shift_plan must be bulk-prefetched, not queried per employee."""
+        from datetime import date, time
+
+        from attendance.models import Shift, ShiftPlan
+        from attendance.services.shift_plans import assign_plan
+
+        night = Shift.objects.get_or_create(name="Dir Night", defaults={"start_time": time(19), "end_time": time(7), "is_overnight": True})[0]
+        night_plan = ShiftPlan.objects.create(name="Dir Permanent Night", kind="fixed", shift=night, working_weekdays=[0, 1, 2, 3, 4, 5])
+        more = [Employee.objects.create(employee_id=f"DIR-BULK-{i}", first_name="Bulk", last_name=str(i), status="active") for i in range(15)]
+        assign_plan(more, night_plan, start_date=date(2026, 1, 1))
+
+        # A handful of fixed, bulk queries (employee ids, the roster/plan/biometric prefetches, the list
+        # itself, and Django's own one-time permission-check cache) - none of it grows with employee count.
+        with self.assertNumQueries(8):
+            response = self.client.get("/api/employees/?status=active")
+        self.assertEqual(len(response.data["results"]), 17)  # on_plan, no_plan, and the 15 bulk employees

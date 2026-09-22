@@ -1,7 +1,7 @@
 from datetime import date, timedelta
 
 from django.contrib.auth import get_user_model
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from django.db import transaction
@@ -44,6 +44,35 @@ from .importers import (
 )
 from audit.models import AuditSeverity
 from audit.services import AuditService
+
+def _today_roster_and_plan_maps(employees_queryset):
+    """Bulk-prefetch today's roster row and current shift-plan assignment for a queryset of employees, as
+    {employee_id: row} maps - so listing hundreds of employees never runs one query per row."""
+    from django.db.models import Q
+    from django.utils import timezone
+
+    from attendance.models import EmployeeRosterDay, ShiftPlanAssignment
+
+    today = timezone.localdate()
+    employee_ids = list(employees_queryset.values_list("pk", flat=True))
+
+    today_rosters = {
+        row.employee_id: row
+        for row in EmployeeRosterDay.objects.select_related("shift").filter(employee_id__in=employee_ids, date=today, status="work")
+    }
+
+    current_plan_assignments = {}
+    assignments = (
+        ShiftPlanAssignment.objects.select_related("plan")
+        .filter(employee_id__in=employee_ids, start_date__lte=today)
+        .filter(Q(end_date__isnull=True) | Q(end_date__gte=today))
+        .order_by("employee_id", "-start_date")
+    )
+    for assignment in assignments:
+        current_plan_assignments.setdefault(assignment.employee_id, assignment)
+
+    return today_rosters, current_plan_assignments
+
 
 class DepartmentListAPIView(APIView):
 
@@ -124,7 +153,7 @@ class EmployeeListCreateAPIView(APIView):
                 "position",
             )
             .prefetch_related(
-                "shift_assignments__shift"
+                "biometric_identities",
             )
             .order_by(
                 "first_name",
@@ -132,75 +161,56 @@ class EmployeeListCreateAPIView(APIView):
             )
         )
 
-        search = (
-            request.query_params
-            .get(
-                "search",
-                "",
-            )
-            .strip()
-        )
-
-        status_filter = (
-            request.query_params.get(
-                "status"
-            )
-        )
-
-        department = (
-            request.query_params.get(
-                "department"
-            )
-        )
+        search = request.query_params.get("search", "").strip()
+        status_filter = request.query_params.get("status")
+        department = request.query_params.get("department")
+        employment_type = request.query_params.get("employment_type")
+        gender = request.query_params.get("gender")
+        shift_plan = request.query_params.get("shift_plan")  # a ShiftPlan id, or "not_assigned"
+        needs_attention = request.query_params.get("needs_attention")
 
         if search:
-
             employees = employees.filter(
-                Q(
-                    employee_id__icontains=
-                    search
-                )
-                |
-                Q(
-                    biometric_user_id__icontains=
-                    search
-                )
-                |
-                Q(
-                    first_name__icontains=
-                    search
-                )
-                |
-                Q(
-                    middle_name__icontains=
-                    search
-                )
-                |
-                Q(
-                    last_name__icontains=
-                    search
-                )
-                |
-                Q(
-                    phone__icontains=
-                    search
-                )
+                Q(employee_id__icontains=search)
+                | Q(biometric_user_id__icontains=search)
+                | Q(first_name__icontains=search)
+                | Q(middle_name__icontains=search)
+                | Q(last_name__icontains=search)
+                | Q(phone__icontains=search)
             )
 
         if status_filter:
-            employees = employees.filter(
-                status=status_filter
-            )
+            employees = employees.filter(status=status_filter)
 
         if department:
+            employees = employees.filter(department_id=department)
+
+        if employment_type:
+            employees = employees.filter(employment_type=employment_type)
+
+        if gender:
+            employees = employees.filter(gender=gender)
+
+        today_rosters, current_plan_assignments = _today_roster_and_plan_maps(employees)
+
+        if shift_plan == "not_assigned":
+            employees = employees.exclude(pk__in=current_plan_assignments.keys())
+        elif shift_plan:
+            matching_ids = [employee_id for employee_id, assignment in current_plan_assignments.items() if str(assignment.plan_id) == shift_plan]
+            employees = employees.filter(pk__in=matching_ids)
+
+        if str(needs_attention).lower() in ("1", "true", "yes"):
+            no_plan_ids = set(employees.values_list("pk", flat=True)) - set(current_plan_assignments.keys())
             employees = employees.filter(
-                department_id=department
+                Q(pk__in=no_plan_ids)
+                | Q(bank_name="") | Q(account_number="") | Q(bank_code="")
+                | Q(biometric_user_id__isnull=True) | Q(biometric_user_id="")
             )
 
         serializer = EmployeeSerializer(
             employees,
             many=True,
-            context={"request": request},
+            context={"request": request, "today_rosters": today_rosters, "current_plan_assignments": current_plan_assignments},
         )
 
         return Response({
@@ -246,6 +256,71 @@ class EmployeeListCreateAPIView(APIView):
             status=
                 status.HTTP_201_CREATED,
         )
+
+
+class EmployeeDirectorySummaryAPIView(APIView):
+    """Counts for the Employee Directory's top strip and filter chips, computed server-side so the page
+    never has to sum up hundreds of rows itself. Department, employment type, and shift-plan breakdowns are
+    of active employees only - that is what the filters on the page act on."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from attendance.services.leave import approved_leave_employee_ids
+
+        today = timezone.localdate()
+        month_start = today.replace(day=1)
+
+        all_employees = Employee.objects.all()
+        by_status = {row["status"]: row["c"] for row in all_employees.values("status").annotate(c=Count("id"))}
+        active = Employee.objects.filter(status="active")
+        active_ids = set(active.values_list("pk", flat=True))
+
+        _today_rosters, current_plan_assignments = _today_roster_and_plan_maps(active)
+        assigned_ids = set(current_plan_assignments.keys())
+
+        by_department = [
+            {"id": row["department_id"], "name": row["department__name"] or "No department", "count": row["c"]}
+            for row in active.values("department_id", "department__name").annotate(c=Count("id")).order_by("-c")
+        ]
+
+        by_employment_type = [
+            {"value": value, "label": label, "count": active.filter(employment_type=value).count()}
+            for value, label in EmploymentType.choices
+        ]
+
+        plan_counts = {}
+        for assignment in current_plan_assignments.values():
+            key = assignment.plan_id
+            plan_counts.setdefault(key, {"id": assignment.plan_id, "name": assignment.plan.name, "kind": assignment.plan.kind, "count": 0})
+            plan_counts[key]["count"] += 1
+        by_shift_plan = sorted(plan_counts.values(), key=lambda row: row["name"])
+        not_assigned_count = len(active_ids - assigned_ids)
+
+        missing_bank_details = active.filter(Q(bank_name="") | Q(account_number="") | Q(bank_code="")).count()
+        missing_biometric = active.filter(Q(biometric_user_id__isnull=True) | Q(biometric_user_id="")).count()
+
+        return Response({
+            "total": sum(by_status.values()),
+            "by_status": by_status,
+            "on_leave_today": len(set(approved_leave_employee_ids(today)) & active_ids),
+            "new_hires_this_month": active.filter(employment_date__gte=month_start, employment_date__lte=today).count(),
+            "exits_this_month": Employee.objects.filter(exit_date__gte=month_start, exit_date__lte=today).count(),
+            "gender": {
+                "male": active.filter(gender="male").count(),
+                "female": active.filter(gender="female").count(),
+                "unspecified": active.filter(gender="").count(),
+            },
+            "by_department": by_department,
+            "by_employment_type": by_employment_type,
+            "by_shift_plan": by_shift_plan,
+            "not_assigned_shift_plan": not_assigned_count,
+            "missing_bank_details": missing_bank_details,
+            "missing_biometric": missing_biometric,
+            "needs_attention": len(active_ids - assigned_ids | set(
+                active.filter(Q(bank_name="") | Q(account_number="") | Q(bank_code="") | Q(biometric_user_id__isnull=True) | Q(biometric_user_id="")).values_list("pk", flat=True)
+            )),
+        })
 
 
 class EmployeeDetailAPIView(APIView):

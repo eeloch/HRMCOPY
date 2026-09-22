@@ -1,13 +1,15 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
-import { AppCard, PageHeader, Section, StatusBadge } from "@/components/ui";
+import { AppCard, MetricCard, PageHeader, Section, StatusBadge } from "@/components/ui";
 import { AccommodationTracker } from "@/components/accommodation/AccommodationTracker";
 import { apiFetch, getAccessToken, getCurrentUser, type CurrentUser } from "@/lib/api";
+
+type ShiftPlanInfo = { id: number; name: string; kind: string; group: string } | null;
 
 type Employee = {
   id: number;
@@ -17,6 +19,7 @@ type Employee = {
   department_name: string | null;
   position_name: string | null;
   employment_type: string;
+  gender: string;
   phone: string;
   // Absent (not just blank) when the current user lacks permission to view salary.
   basic_salary?: string;
@@ -27,6 +30,23 @@ type Employee = {
     start_time: string;
     end_time: string;
   } | null;
+  shift_plan: ShiftPlanInfo;
+};
+
+type Summary = {
+  total: number;
+  by_status: Record<string, number>;
+  on_leave_today: number;
+  new_hires_this_month: number;
+  exits_this_month: number;
+  gender: { male: number; female: number; unspecified: number };
+  by_department: { id: number | null; name: string; count: number }[];
+  by_employment_type: { value: string; label: string; count: number }[];
+  by_shift_plan: { id: number; name: string; kind: string; count: number }[];
+  not_assigned_shift_plan: number;
+  missing_bank_details: number;
+  missing_biometric: number;
+  needs_attention: number;
 };
 
 type HireExitEntry = { id: number; employee_id: string; name: string; date: string; department: string };
@@ -36,6 +56,10 @@ type AccommodationReport = { categories: string[]; housing_types: string[]; coun
 const categoryLabels: Record<string, string> = { casual: "Casual", expatriate: "Expatriate", administrative: "Administrative", other: "Other" };
 const housingLabels: Record<string, string> = { in_house: "In-House (Hostel)", external: "External (Rental)" };
 
+const filterSelectClass = "rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500";
+
+type SortKey = "full_name" | "department_name" | "employment_type" | "basic_salary" | "status";
+
 function mondayOf(date: Date) {
   const day = date.getDay();
   const diff = (day === 0 ? -6 : 1) - day;
@@ -44,11 +68,38 @@ function mondayOf(date: Date) {
   return monday.toISOString().slice(0, 10);
 }
 
+function initials(name: string) {
+  const parts = name.trim().split(/\s+/);
+  return ((parts[0]?.[0] || "") + (parts[1]?.[0] || "")).toUpperCase();
+}
+
+function csvCell(value: string | number) {
+  const text = String(value ?? "");
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function shiftPlanCell(employee: Employee): { label: string; sub: string; missing: boolean } {
+  const plan = employee.shift_plan;
+  if (!plan) return { label: "Not assigned", sub: "", missing: true };
+  if (plan.kind === "rotation") {
+    return { label: plan.name, sub: `Group ${plan.group}${employee.current_shift ? ` · ${employee.current_shift.name} today` : ""}`, missing: false };
+  }
+  return { label: plan.name, sub: employee.current_shift ? `${employee.current_shift.name}, ${employee.current_shift.start_time.slice(0, 5)}-${employee.current_shift.end_time.slice(0, 5)}` : "", missing: false };
+}
+
 export default function EmployeesPage() {
   const router = useRouter();
   const [tab, setTab] = useState<"directory" | "hires-exits" | "accommodation">("directory");
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [summary, setSummary] = useState<Summary | null>(null);
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("active");
+  const [departmentFilter, setDepartmentFilter] = useState("");
+  const [employmentTypeFilter, setEmploymentTypeFilter] = useState("");
+  const [genderFilter, setGenderFilter] = useState("");
+  const [shiftPlanFilter, setShiftPlanFilter] = useState("");
+  const [needsAttentionOnly, setNeedsAttentionOnly] = useState(false);
+  const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({ key: "full_name", dir: "asc" });
   const [loading, setLoading] = useState(true);
   const [weekStart, setWeekStart] = useState(() => mondayOf(new Date()));
   const [hiresExits, setHiresExits] = useState<HiresExitsData | null>(null);
@@ -64,11 +115,13 @@ export default function EmployeesPage() {
     }
 
     void loadEmployees();
+    void loadSummary();
     getCurrentUser().then(setCurrentUser).catch(() => {});
     const timer = window.setTimeout(() => {
       if (new URLSearchParams(window.location.search).get("tab") === "accommodation") setTab("accommodation");
     }, 0);
     return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
   useEffect(() => {
@@ -76,6 +129,13 @@ export default function EmployeesPage() {
     if (tab === "accommodation" && !accommodation) void loadAccommodation();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, weekStart]);
+
+  // Dropdown/toggle filters apply immediately; the search box still needs Enter/Search (it can hit many
+  // fields at once and a full workforce list is large enough that typing shouldn't refetch every keystroke).
+  useEffect(() => {
+    void loadEmployees(search);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilter, departmentFilter, employmentTypeFilter, genderFilter, shiftPlanFilter, needsAttentionOnly]);
 
   async function loadHiresExits(week: string) {
     setLoadingHiresExits(true);
@@ -103,6 +163,16 @@ export default function EmployeesPage() {
     }
   }
 
+  async function loadSummary() {
+    try {
+      const response = await apiFetch("/employees/summary/");
+      if (!response.ok) throw new Error("Unable to load the workforce summary.");
+      setSummary(await response.json());
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
   function shiftWeek(days: number) {
     const next = new Date(`${weekStart}T00:00:00`);
     next.setDate(next.getDate() + days);
@@ -114,21 +184,18 @@ export default function EmployeesPage() {
 
     try {
       const params = new URLSearchParams();
-
-      if (searchValue) {
-        params.set("search", searchValue);
-      }
+      if (searchValue) params.set("search", searchValue);
+      if (statusFilter) params.set("status", statusFilter);
+      if (departmentFilter) params.set("department", departmentFilter);
+      if (employmentTypeFilter) params.set("employment_type", employmentTypeFilter);
+      if (genderFilter) params.set("gender", genderFilter);
+      if (shiftPlanFilter) params.set("shift_plan", shiftPlanFilter);
+      if (needsAttentionOnly) params.set("needs_attention", "1");
 
       const suffix = params.toString() ? `?${params.toString()}` : "";
       const response = await apiFetch(`/employees/${suffix}`);
 
       if (!response.ok) {
-        console.log("Status:", response.status);
-
-        const body = await response.text();
-
-        console.log("Response:", body);
-
         throw new Error(`Unable to load employees (${response.status})`);
       }
 
@@ -144,6 +211,69 @@ export default function EmployeesPage() {
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void loadEmployees(search);
+  }
+
+  function clearFilters() {
+    setSearch("");
+    setStatusFilter("");
+    setDepartmentFilter("");
+    setEmploymentTypeFilter("");
+    setGenderFilter("");
+    setShiftPlanFilter("");
+    setNeedsAttentionOnly(false);
+  }
+
+  function toggleSort(key: SortKey) {
+    setSort((previous) => (previous.key === key ? { key, dir: previous.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  }
+
+  const sortedEmployees = useMemo(() => {
+    const factor = sort.dir === "asc" ? 1 : -1;
+    const value = (employee: Employee): string | number => {
+      if (sort.key === "basic_salary") return Number(employee.basic_salary || 0);
+      if (sort.key === "department_name") return employee.department_name || "";
+      return (employee[sort.key] as string) || "";
+    };
+    return [...employees].sort((a, b) => {
+      const av = value(a);
+      const bv = value(b);
+      if (av < bv) return -1 * factor;
+      if (av > bv) return 1 * factor;
+      return 0;
+    });
+  }, [employees, sort]);
+
+  const activeFilterCount = [statusFilter && statusFilter !== "active", departmentFilter, employmentTypeFilter, genderFilter, shiftPlanFilter, needsAttentionOnly].filter(Boolean).length;
+
+  function exportCsv() {
+    const headers = ["Staff Number", "Name", "Department", "Position", "Employment Type", "Gender", "Biometric ID", "Shift Plan", "Group", "Today's Shift", "Salary", "Status"];
+    const rows = sortedEmployees.map((employee) => {
+      const plan = shiftPlanCell(employee);
+      return [
+        employee.employee_id,
+        employee.full_name,
+        employee.department_name || "",
+        employee.position_name || "",
+        formatEmploymentType(employee.employment_type),
+        employee.gender ? employee.gender.charAt(0).toUpperCase() + employee.gender.slice(1) : "",
+        employee.biometric_user_id || "",
+        plan.label,
+        employee.shift_plan?.group || "",
+        employee.current_shift?.name || "",
+        employee.basic_salary === undefined ? "Restricted" : employee.basic_salary,
+        employee.status,
+      ];
+    });
+    const csv = [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Employee Directory - ${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -271,36 +401,106 @@ export default function EmployeesPage() {
         )}
 
         {tab === "directory" && <>
+
+        {summary && (
+          <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <button type="button" onClick={() => setStatusFilter("")} className="text-left">
+              <MetricCard title="Total" value={summary.total} subtitle="All employees, any status" accentColor="#334155" />
+            </button>
+            <button type="button" onClick={() => setStatusFilter("active")} className="text-left">
+              <MetricCard title="Active" value={summary.by_status.active || 0} subtitle="Currently working" accentColor="#059669" />
+            </button>
+            <button type="button" onClick={() => setStatusFilter("inactive")} className="text-left">
+              <MetricCard title="Inactive" value={summary.by_status.inactive || 0} subtitle="No longer active" accentColor="#64748b" />
+            </button>
+            <MetricCard title="On Leave Today" value={summary.on_leave_today} subtitle="Approved leave covering today" accentColor="#2563eb" />
+            <MetricCard title="New Hires" value={summary.new_hires_this_month} subtitle="This month" accentColor="#0891b2" />
+            <MetricCard title="Exits" value={summary.exits_this_month} subtitle="This month" accentColor="#dc2626" />
+            <MetricCard title="Gender (Active)" value={`${summary.gender.male} M · ${summary.gender.female} F`} subtitle={summary.gender.unspecified ? `${summary.gender.unspecified} not set` : "Company hostel is split by gender"} accentColor="#7c3aed" />
+            <button type="button" onClick={() => setNeedsAttentionOnly(true)} className="text-left">
+              <MetricCard title="Needs Attention" value={summary.needs_attention} subtitle="No shift plan, bank details or biometric link" accentColor="#d97706" />
+            </button>
+          </div>
+        )}
+
         <AppCard className="mb-6">
-          <form onSubmit={submitSearch} className="flex gap-3">
+          <form onSubmit={submitSearch} className="flex flex-wrap gap-3">
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               placeholder="Search name, staff number, biometric ID or phone..."
-              className="flex-1 rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
+              className="min-w-[240px] flex-1 rounded-xl border border-slate-300 px-4 py-3 text-slate-900 outline-none focus:ring-2 focus:ring-blue-500"
             />
-            <button
-              type="submit"
-              className="rounded-xl bg-slate-900 px-6 py-3 font-medium text-white"
-            >
-              Search
-            </button>
+            <button type="submit" className="rounded-xl bg-slate-900 px-6 py-3 font-medium text-white">Search</button>
             <button
               type="button"
-              onClick={() => {
-                setSearch("");
-                void loadEmployees();
-              }}
+              onClick={() => { setSearch(""); void loadEmployees(); }}
               className="rounded-xl border border-slate-300 px-5 py-3"
             >
               Clear
             </button>
           </form>
+
+          <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-slate-100 pt-4">
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className={filterSelectClass}>
+              <option value="">All statuses</option>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+              <option value="suspended">Suspended</option>
+              <option value="terminated">Terminated</option>
+            </select>
+
+            <select value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)} className={filterSelectClass}>
+              <option value="">All departments</option>
+              {summary?.by_department.map((department) => (
+                <option key={department.id ?? "none"} value={department.id ?? ""}>{department.name} ({department.count})</option>
+              ))}
+            </select>
+
+            <select value={employmentTypeFilter} onChange={(event) => setEmploymentTypeFilter(event.target.value)} className={filterSelectClass}>
+              <option value="">All employment types</option>
+              {summary?.by_employment_type.map((type) => (
+                <option key={type.value} value={type.value}>{type.label} ({type.count})</option>
+              ))}
+            </select>
+
+            <select value={genderFilter} onChange={(event) => setGenderFilter(event.target.value)} className={filterSelectClass}>
+              <option value="">All genders</option>
+              <option value="male">Male ({summary?.gender.male ?? 0})</option>
+              <option value="female">Female ({summary?.gender.female ?? 0})</option>
+            </select>
+
+            <select value={shiftPlanFilter} onChange={(event) => setShiftPlanFilter(event.target.value)} className={filterSelectClass}>
+              <option value="">All shift plans</option>
+              <option value="not_assigned">Not assigned ({summary?.not_assigned_shift_plan ?? 0})</option>
+              {summary?.by_shift_plan.map((plan) => (
+                <option key={plan.id} value={plan.id}>{plan.name} ({plan.count})</option>
+              ))}
+            </select>
+
+            <button
+              type="button"
+              onClick={() => setNeedsAttentionOnly((value) => !value)}
+              className={`rounded-full border px-4 py-2 text-sm font-semibold ${needsAttentionOnly ? "border-amber-400 bg-amber-100 text-amber-800" : "border-slate-300 bg-white text-slate-700"}`}
+            >
+              Needs Attention{summary ? ` (${summary.needs_attention})` : ""}
+            </button>
+
+            {activeFilterCount > 0 && (
+              <button type="button" onClick={clearFilters} className="text-sm font-semibold text-blue-700 hover:text-blue-800">
+                Clear filters
+              </button>
+            )}
+
+            <button type="button" onClick={exportCsv} disabled={!sortedEmployees.length} className="ml-auto rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 disabled:opacity-50">
+              Export CSV
+            </button>
+          </div>
         </AppCard>
 
         <Section
           title="Employee Directory"
-          subtitle={`${employees.length} employee${employees.length === 1 ? "" : "s"}`}
+          subtitle={`${employees.length} employee${employees.length === 1 ? "" : "s"}${activeFilterCount ? " matching the current filters" : ""}`}
         >
           {loading ? (
             <div className="p-10">Loading employees...</div>
@@ -311,52 +511,67 @@ export default function EmployeesPage() {
               <table className="w-full">
                 <thead className="bg-slate-50">
                   <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
-                    <th className="px-5 py-4">Employee</th>
-                    <th className="px-5 py-4">Department</th>
+                    <SortableHeader label="Employee" sortKey="full_name" sort={sort} onSort={toggleSort} />
+                    <SortableHeader label="Department" sortKey="department_name" sort={sort} onSort={toggleSort} />
                     <th className="px-5 py-4">Position</th>
-                    <th className="px-5 py-4">Employment Type</th>
+                    <SortableHeader label="Employment Type" sortKey="employment_type" sort={sort} onSort={toggleSort} />
                     <th className="px-5 py-4">Biometric ID</th>
-                    <th className="px-5 py-4">Shift</th>
-                    <th className="px-5 py-4">Salary</th>
-                    <th className="px-5 py-4">Status</th>
+                    <th className="px-5 py-4">Shift Plan</th>
+                    <SortableHeader label="Salary" sortKey="basic_salary" sort={sort} onSort={toggleSort} />
+                    <SortableHeader label="Status" sortKey="status" sort={sort} onSort={toggleSort} />
                   </tr>
                 </thead>
                 <tbody>
-                  {employees.map((employee) => (
-                    <tr
-                      key={employee.id}
-                      onClick={() => router.push(`/employees/${employee.id}`)}
-                      className="cursor-pointer border-t border-slate-100 hover:bg-slate-50"
-                    >
-                      <td className="px-5 py-5">
-                        <div className="font-semibold text-slate-900">{employee.full_name}</div>
-                        <div className="text-sm text-slate-500">{employee.employee_id}</div>
-                      </td>
-                      <td className="px-5 py-5 text-slate-700">
-                        {employee.department_name || <StatusBadge status="incomplete" />}
-                      </td>
-                      <td className="px-5 py-5 text-slate-700">
-                        {employee.position_name || "-"}
-                      </td>
-                      <td className="px-5 py-5">
-                        <span className="inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
-                          {formatEmploymentType(employee.employment_type)}
-                        </span>
-                      </td>
-                      <td className="px-5 py-5 text-slate-700">
-                        {employee.biometric_user_id || "Not linked"}
-                      </td>
-                      <td className="px-5 py-5 text-slate-700">
-                        {employee.current_shift?.name || "Not assigned"}
-                      </td>
-                      <td className="px-5 py-5 font-medium text-slate-900">
-                        {employee.basic_salary === undefined ? <StatusBadge status="restricted" /> : `₦${Number(employee.basic_salary).toLocaleString()}`}
-                      </td>
-                      <td className="px-5 py-5">
-                        <StatusBadge status={employee.status} />
-                      </td>
-                    </tr>
-                  ))}
+                  {sortedEmployees.map((employee) => {
+                    const plan = shiftPlanCell(employee);
+                    const flagged = employee.status === "active" && (plan.missing || !employee.biometric_user_id);
+                    return (
+                      <tr
+                        key={employee.id}
+                        onClick={() => router.push(`/employees/${employee.id}`)}
+                        className="cursor-pointer border-t border-slate-100 hover:bg-slate-50"
+                      >
+                        <td className="px-5 py-5">
+                          <div className="flex items-center gap-3">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-100 text-sm font-bold text-blue-700">
+                              {initials(employee.full_name)}
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2 font-semibold text-slate-900">
+                                {employee.full_name}
+                                {flagged && <span title="Needs attention: missing shift plan or biometric link" className="h-2 w-2 rounded-full bg-amber-500" />}
+                              </div>
+                              <div className="text-sm text-slate-500">{employee.employee_id}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-5 py-5 text-slate-700">
+                          {employee.department_name || <StatusBadge status="incomplete" />}
+                        </td>
+                        <td className="px-5 py-5 text-slate-700">
+                          {employee.position_name || "-"}
+                        </td>
+                        <td className="px-5 py-5">
+                          <span className="inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                            {formatEmploymentType(employee.employment_type)}
+                          </span>
+                        </td>
+                        <td className="px-5 py-5 text-slate-700">
+                          {employee.biometric_user_id || <span className="text-amber-700">Not linked</span>}
+                        </td>
+                        <td className="px-5 py-5">
+                          <div className={`font-medium ${plan.missing && employee.status === "active" ? "text-amber-700" : "text-slate-900"}`}>{plan.label}</div>
+                          {plan.sub && <div className="mt-0.5 text-sm text-slate-500">{plan.sub}</div>}
+                        </td>
+                        <td className="px-5 py-5 font-medium text-slate-900">
+                          {employee.basic_salary === undefined ? <StatusBadge status="restricted" /> : `₦${Number(employee.basic_salary).toLocaleString()}`}
+                        </td>
+                        <td className="px-5 py-5">
+                          <StatusBadge status={employee.status} />
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -365,6 +580,18 @@ export default function EmployeesPage() {
         </>}
       </main>
     </div>
+  );
+}
+
+function SortableHeader({ label, sortKey, sort, onSort }: { label: string; sortKey: SortKey; sort: { key: SortKey; dir: "asc" | "desc" }; onSort: (key: SortKey) => void }) {
+  const active = sort.key === sortKey;
+  return (
+    <th className="px-5 py-4">
+      <button type="button" onClick={() => onSort(sortKey)} className={`flex items-center gap-1 hover:text-slate-700 ${active ? "text-slate-900" : ""}`}>
+        {label}
+        <span className="text-[10px]">{active ? (sort.dir === "asc" ? "▲" : "▼") : ""}</span>
+      </button>
+    </th>
   );
 }
 
