@@ -51,6 +51,18 @@ class RosterUploadServiceTests(TestCase):
         self.assertEqual(by_id["E001"][4], "A")  # Current Group
         self.assertIsNone(by_id["E002"][3])  # Bob has no plan yet (blank cell)
 
+    def test_plan_name_dropdown_survives_a_comma_in_the_name(self):
+        """A plan name with a comma in it (e.g. "Admin (8AM-6PM, Mon-Sat)") must not be split into two
+        dropdown entries: the validation list must reference the reference sheet, not a joined string."""
+        ShiftPlan.objects.create(name="Admin (8AM-6PM, Mon-Sat)", kind="fixed", shift=self.day, working_weekdays=[0, 1, 2, 3, 4, 5])
+        content = build_template_workbook()
+        workbook = load_workbook(io.BytesIO(content))
+        reference_names = [row[0] for row in workbook["Plans (reference)"].iter_rows(values_only=True, min_row=2)]
+        self.assertIn("Admin (8AM-6PM, Mon-Sat)", reference_names)
+        validation = next(iter(workbook["Roster Upload"].data_validations.dataValidation))
+        self.assertIn("Plans (reference)", validation.formula1)
+        self.assertNotIn(",", validation.formula1.split("!")[0])  # a sheet reference, not a comma-joined list
+
     def test_dry_run_reports_without_changing_anything(self):
         upload = make_upload([["E001", "", "", "", "", "Permanent Day", "", ""]])
         report = apply_roster_upload(upload, dry_run=True)

@@ -87,8 +87,9 @@ def build_template_workbook():
 
     last_row = row_count + 1
     if plan_names:
-        joined = ",".join(plan_names)
-        formula = f'"{joined}"' if len(joined) <= 250 else f"'Plans (reference)'!$A$2:$A${len(plan_names) + 1}"
+        # A sheet reference (not a comma-joined string) so a comma inside a plan name is never
+        # mistaken for a second entry in the list.
+        formula = f"'Plans (reference)'!$A$2:$A${len(plan_names) + 1}"
         plan_validation = DataValidation(type="list", formula1=formula, allow_blank=True, showErrorMessage=True)
         plan_validation.error = 'Pick a plan name from the "Plans (reference)" sheet.'
         sheet.add_data_validation(plan_validation)
