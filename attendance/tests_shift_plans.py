@@ -160,6 +160,21 @@ class ShiftPlanApiTests(PlanTestCase):
         outsider.force_authenticate(get_user_model().objects.create_user("nobody", password="pw"))
         self.assertEqual(outsider.post("/api/attendance/shift-plans/assign/", {"plan": self.rotation.pk, "group": "A", "everyone": True}, format="json").status_code, 403)
 
+    def test_employee_shift_plan_reflects_the_real_current_plan_and_todays_actual_shift(self):
+        """The per-employee endpoint must show the true, live plan/group - not a static shift that never
+        updates when a rotation flips Day/Night week to week."""
+        person = self.people[0]
+        # No plan yet.
+        empty = self.client.get(f"/api/attendance/shift-plans/for-employee/{person.pk}/").json()
+        self.assertIsNone(empty["plan"])
+
+        self.client.post("/api/attendance/shift-plans/assign/", {"plan": self.rotation.pk, "group": "A", "department_ids": [self.dept.pk], "start_date": MONDAY.isoformat()}, format="json")
+        data = self.client.get(f"/api/attendance/shift-plans/for-employee/{person.pk}/").json()
+        self.assertEqual(data["plan"]["name"], self.rotation.name)
+        self.assertEqual(data["plan"]["group"], "A")
+        # today's actual roster shift is included too, not just the plan
+        self.assertIn(data["today"]["status"], ("work", "rest"))
+
 
 class LiveDashboardTests(TestCase):
     """Punches show on the Workforce Operations dashboard the same day, and nobody is 'absent' while their shift is still running."""

@@ -225,25 +225,28 @@ class EmployeeSerializer(serializers.ModelSerializer):
         return data
 
     def get_current_shift(self, employee):
+        """Today's actual roster shift - the live source of truth, including a rotation plan's weekly
+        Day/Night swap. The old static per-employee ShiftAssignment never reflects that swap, so it is not
+        used here."""
+        from django.utils import timezone
 
-        assignment = (
-            employee.shift_assignments
+        from attendance.models import EmployeeRosterDay
+
+        today_row = (
+            EmployeeRosterDay.objects
             .select_related("shift")
-            .filter(
-                end_date__isnull=True
-            )
-            .order_by("-start_date")
+            .filter(employee=employee, date=timezone.localdate(), status="work")
             .first()
         )
 
-        if not assignment:
+        if not today_row or not today_row.shift:
             return None
 
         return {
-            "id": assignment.shift.id,
-            "name": assignment.shift.name,
-            "start_time": assignment.shift.start_time,
-            "end_time": assignment.shift.end_time,
+            "id": today_row.shift.id,
+            "name": today_row.shift.name,
+            "start_time": today_row.shift.start_time,
+            "end_time": today_row.shift.end_time,
         }
 
 

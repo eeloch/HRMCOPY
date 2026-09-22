@@ -417,6 +417,49 @@ class EmployeeProfileAPIViewTests(APITestCase):
         )
 
 
+class EmployeeCurrentShiftTests(APITestCase):
+    """current_shift must reflect today's live roster (including a rotation's weekly Day/Night swap),
+    never the old static per-employee ShiftAssignment, which is not touched by the shift-plan system."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="shift-viewer", password="test-password")
+        self.client.force_authenticate(user=self.user)
+        self.employee = Employee.objects.create(employee_id="EMP-200", first_name="Ada", last_name="Obi")
+
+    def test_no_roster_day_today_means_no_current_shift(self):
+        response = self.client.get(f"/api/employees/{self.employee.pk}/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data["current_shift"])
+
+    def test_a_rest_day_today_means_no_current_shift(self):
+        from attendance.models import EmployeeRosterDay
+        from django.utils import timezone
+
+        EmployeeRosterDay.objects.create(employee=self.employee, date=timezone.localdate(), status="rest")
+        response = self.client.get(f"/api/employees/{self.employee.pk}/")
+        self.assertIsNone(response.data["current_shift"])
+
+    def test_todays_roster_shift_is_returned(self):
+        from attendance.models import EmployeeRosterDay, Shift
+        from django.utils import timezone
+
+        night = Shift.objects.get(name="Night Shift")
+        EmployeeRosterDay.objects.create(employee=self.employee, date=timezone.localdate(), status="work", shift=night)
+        response = self.client.get(f"/api/employees/{self.employee.pk}/")
+        self.assertEqual(response.data["current_shift"]["name"], "Night Shift")
+
+    def test_an_old_style_shift_assignment_alone_is_not_enough(self):
+        """A leftover ShiftAssignment row with no matching roster day must not surface as the current shift."""
+        from datetime import date
+
+        from attendance.models import Shift, ShiftAssignment
+
+        day = Shift.objects.get(name="Day Shift")
+        ShiftAssignment.objects.create(employee=self.employee, shift=day, start_date=date(2020, 1, 1))
+        response = self.client.get(f"/api/employees/{self.employee.pk}/")
+        self.assertIsNone(response.data["current_shift"])
+
+
 class EmployeeStatusRevokesBiometricAccessTests(TestCase):
 
     def setUp(self):

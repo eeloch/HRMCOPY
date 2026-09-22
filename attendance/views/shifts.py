@@ -272,3 +272,47 @@ class ShiftRosterUploadAPIView(APIView):
         except Exception:
             return Response({"detail": "That file could not be read. Check it is the roster upload template."}, status=status.HTTP_400_BAD_REQUEST)
         return Response(report.as_dict())
+
+
+class EmployeeShiftPlanAPIView(APIView):
+    """One employee's real, current shift plan (and group, for a rotation plan) plus today's actual roster
+    shift - the accurate replacement for the old static per-employee Shift Assignment, which never reflects
+    a rotation's weekly Day/Night swap."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, employee_id):
+        from django.db.models import Q
+        from django.utils import timezone
+
+        from attendance.models import EmployeeRosterDay, ShiftPlanAssignment
+        from employees.models import Employee
+
+        employee = get_object_or_404(Employee, pk=employee_id)
+        today = timezone.localdate()
+        assignment = (
+            ShiftPlanAssignment.objects.select_related("plan")
+            .filter(employee=employee, start_date__lte=today)
+            .filter(Q(end_date__isnull=True) | Q(end_date__gte=today))
+            .order_by("-start_date")
+            .first()
+        )
+        roster_today = EmployeeRosterDay.objects.select_related("shift").filter(employee=employee, date=today).first()
+        return Response({
+            "plan": {
+                "id": assignment.plan_id,
+                "name": assignment.plan.name,
+                "kind": assignment.plan.kind,
+                "group": assignment.group,
+                "start_date": assignment.start_date,
+            } if assignment else None,
+            "today": {
+                "date": today,
+                "status": roster_today.status,
+                "shift": {
+                    "name": roster_today.shift.name,
+                    "start_time": roster_today.shift.start_time,
+                    "end_time": roster_today.shift.end_time,
+                } if roster_today.shift else None,
+            } if roster_today else None,
+        })

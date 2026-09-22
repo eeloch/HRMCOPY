@@ -6,6 +6,7 @@ from .exceptions import (
     PendingExceptionAPIView,
 )
 from .shifts import (
+    EmployeeShiftPlanAPIView,
     ShiftAssignmentChangeAPIView,
     ShiftAssignmentDetailAPIView,
     ShiftAssignmentListCreateAPIView,
