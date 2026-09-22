@@ -93,6 +93,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
     shift_plan = serializers.SerializerMethodField()
 
+    attention_reasons = serializers.SerializerMethodField()
+
     hostel = serializers.SerializerMethodField()
 
     accommodation = serializers.SerializerMethodField()
@@ -202,6 +204,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
             "current_shift",
             "shift_plan",
+            "attention_reasons",
             "hostel",
             "accommodation",
             "biometric",
@@ -290,6 +293,21 @@ class EmployeeSerializer(serializers.ModelSerializer):
             "kind": assignment.plan.kind,
             "group": assignment.group,
         }
+
+    def get_attention_reasons(self, employee):
+        """Short, specific reasons this active employee needs attention - not just a flag. Presence/absence
+        only (e.g. "Missing bank details"), never the actual values, so this is safe to show regardless of
+        whether the viewer has permission to see the values themselves."""
+        if employee.status != "active":
+            return []
+        reasons = []
+        if self.get_shift_plan(employee) is None:
+            reasons.append("No shift plan")
+        if not (employee.bank_name and employee.account_number and employee.bank_code):
+            reasons.append("Missing bank details")
+        if not employee.biometric_user_id:
+            reasons.append("No biometric link")
+        return reasons
 
 
 

@@ -824,6 +824,38 @@ class EmployeeDirectorySummaryAndFiltersTests(APITestCase):
         response = self.client.get("/api/employees/?needs_attention=1&status=active")
         self.assertEqual([row["employee_id"] for row in response.json()["results"]], ["DIR-002"])
 
+    def test_attention_reasons_are_specific_not_just_a_flag(self):
+        response = self.client.get("/api/employees/?status=active")
+        no_plan = next(row for row in response.data["results"] if row["employee_id"] == "DIR-002")
+        self.assertEqual(set(no_plan["attention_reasons"]), {"No shift plan", "Missing bank details", "No biometric link"})
+        on_plan = next(row for row in response.data["results"] if row["employee_id"] == "DIR-001")
+        self.assertEqual(on_plan["attention_reasons"], [])
+
+    def test_attention_reasons_are_empty_for_inactive_employees(self):
+        """An inactive employee predictably has no plan/bank details/biometric link - that is not a problem."""
+        response = self.client.get("/api/employees/?status=inactive")
+        row = next(item for item in response.data["results"] if item["employee_id"] == "DIR-003")
+        self.assertEqual(row["attention_reasons"], [])
+
+    def test_new_hires_this_month_filter(self):
+        from datetime import date
+
+        from django.utils import timezone
+
+        this_month = timezone.localdate().replace(day=1)
+        Employee.objects.create(employee_id="DIR-HIRE", first_name="New", last_name="Hire", status="active", employment_date=this_month)
+        Employee.objects.create(employee_id="DIR-OLD", first_name="Old", last_name="Hire", status="active", employment_date=date(2020, 1, 1))
+        response = self.client.get("/api/employees/?new_hires_this_month=1")
+        self.assertEqual([row["employee_id"] for row in response.json()["results"]], ["DIR-HIRE"])
+
+    def test_exits_this_month_filter(self):
+        from django.utils import timezone
+
+        today = timezone.localdate()
+        Employee.objects.create(employee_id="DIR-EXIT", first_name="Left", last_name="Recently", status="inactive", exit_date=today)
+        response = self.client.get("/api/employees/?exits_this_month=1")
+        self.assertEqual([row["employee_id"] for row in response.json()["results"]], ["DIR-EXIT"])
+
     def test_list_response_includes_shift_plan_and_current_shift(self):
         response = self.client.get("/api/employees/?status=active")
         row = next(item for item in response.data["results"] if item["employee_id"] == "DIR-001")

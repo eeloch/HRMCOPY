@@ -31,6 +31,7 @@ type Employee = {
     end_time: string;
   } | null;
   shift_plan: ShiftPlanInfo;
+  attention_reasons: string[];
 };
 
 type Summary = {
@@ -99,6 +100,8 @@ export default function EmployeesPage() {
   const [genderFilter, setGenderFilter] = useState("");
   const [shiftPlanFilter, setShiftPlanFilter] = useState("");
   const [needsAttentionOnly, setNeedsAttentionOnly] = useState(false);
+  const [newHiresOnly, setNewHiresOnly] = useState(false);
+  const [exitsOnly, setExitsOnly] = useState(false);
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({ key: "full_name", dir: "asc" });
   const [loading, setLoading] = useState(true);
   const [weekStart, setWeekStart] = useState(() => mondayOf(new Date()));
@@ -135,7 +138,7 @@ export default function EmployeesPage() {
   useEffect(() => {
     void loadEmployees(search);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter, departmentFilter, employmentTypeFilter, genderFilter, shiftPlanFilter, needsAttentionOnly]);
+  }, [statusFilter, departmentFilter, employmentTypeFilter, genderFilter, shiftPlanFilter, needsAttentionOnly, newHiresOnly, exitsOnly]);
 
   async function loadHiresExits(week: string) {
     setLoadingHiresExits(true);
@@ -191,6 +194,8 @@ export default function EmployeesPage() {
       if (genderFilter) params.set("gender", genderFilter);
       if (shiftPlanFilter) params.set("shift_plan", shiftPlanFilter);
       if (needsAttentionOnly) params.set("needs_attention", "1");
+      if (newHiresOnly) params.set("new_hires_this_month", "1");
+      if (exitsOnly) params.set("exits_this_month", "1");
 
       const suffix = params.toString() ? `?${params.toString()}` : "";
       const response = await apiFetch(`/employees/${suffix}`);
@@ -221,6 +226,38 @@ export default function EmployeesPage() {
     setGenderFilter("");
     setShiftPlanFilter("");
     setNeedsAttentionOnly(false);
+    setNewHiresOnly(false);
+    setExitsOnly(false);
+  }
+
+  // The stat cards are quick, mutually-exclusive shortcuts: each one shows you exactly who makes up that
+  // number, so clicking resets the others rather than combining with whatever was already selected.
+  function showStatus(status: string) {
+    setNewHiresOnly(false);
+    setExitsOnly(false);
+    setNeedsAttentionOnly(false);
+    setStatusFilter(status);
+  }
+
+  function showNewHires() {
+    setStatusFilter("");
+    setExitsOnly(false);
+    setNeedsAttentionOnly(false);
+    setNewHiresOnly(true);
+  }
+
+  function showExits() {
+    setStatusFilter("");
+    setNewHiresOnly(false);
+    setNeedsAttentionOnly(false);
+    setExitsOnly(true);
+  }
+
+  function showNeedsAttention() {
+    setStatusFilter("active");
+    setNewHiresOnly(false);
+    setExitsOnly(false);
+    setNeedsAttentionOnly(true);
   }
 
   function toggleSort(key: SortKey) {
@@ -243,10 +280,10 @@ export default function EmployeesPage() {
     });
   }, [employees, sort]);
 
-  const activeFilterCount = [statusFilter && statusFilter !== "active", departmentFilter, employmentTypeFilter, genderFilter, shiftPlanFilter, needsAttentionOnly].filter(Boolean).length;
+  const activeFilterCount = [statusFilter && statusFilter !== "active", departmentFilter, employmentTypeFilter, genderFilter, shiftPlanFilter, needsAttentionOnly, newHiresOnly, exitsOnly].filter(Boolean).length;
 
   function exportCsv() {
-    const headers = ["Staff Number", "Name", "Department", "Position", "Employment Type", "Gender", "Biometric ID", "Shift Plan", "Group", "Today's Shift", "Salary", "Status"];
+    const headers = ["Staff Number", "Name", "Department", "Position", "Employment Type", "Gender", "Biometric ID", "Shift Plan", "Group", "Today's Shift", "Salary", "Status", "Needs Attention"];
     const rows = sortedEmployees.map((employee) => {
       const plan = shiftPlanCell(employee);
       return [
@@ -262,6 +299,7 @@ export default function EmployeesPage() {
         employee.current_shift?.name || "",
         employee.basic_salary === undefined ? "Restricted" : employee.basic_salary,
         employee.status,
+        employee.attention_reasons.join("; "),
       ];
     });
     const csv = [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\n");
@@ -404,21 +442,25 @@ export default function EmployeesPage() {
 
         {summary && (
           <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <button type="button" onClick={() => setStatusFilter("")} className="text-left">
+            <button type="button" onClick={() => showStatus("")} className="text-left">
               <MetricCard title="Total" value={summary.total} subtitle="All employees, any status" accentColor="#334155" />
             </button>
-            <button type="button" onClick={() => setStatusFilter("active")} className="text-left">
+            <button type="button" onClick={() => showStatus("active")} className="text-left">
               <MetricCard title="Active" value={summary.by_status.active || 0} subtitle="Currently working" accentColor="#059669" />
             </button>
-            <button type="button" onClick={() => setStatusFilter("inactive")} className="text-left">
+            <button type="button" onClick={() => showStatus("inactive")} className="text-left">
               <MetricCard title="Inactive" value={summary.by_status.inactive || 0} subtitle="No longer active" accentColor="#64748b" />
             </button>
             <MetricCard title="On Leave Today" value={summary.on_leave_today} subtitle="Approved leave covering today" accentColor="#2563eb" />
-            <MetricCard title="New Hires" value={summary.new_hires_this_month} subtitle="This month" accentColor="#0891b2" />
-            <MetricCard title="Exits" value={summary.exits_this_month} subtitle="This month" accentColor="#dc2626" />
+            <button type="button" onClick={() => showNewHires()} className="text-left">
+              <MetricCard title="New Hires" value={summary.new_hires_this_month} subtitle="This month - click to see who" accentColor="#0891b2" />
+            </button>
+            <button type="button" onClick={() => showExits()} className="text-left">
+              <MetricCard title="Exits" value={summary.exits_this_month} subtitle="This month - click to see who" accentColor="#dc2626" />
+            </button>
             <MetricCard title="Gender (Active)" value={`${summary.gender.male} M · ${summary.gender.female} F`} subtitle={summary.gender.unspecified ? `${summary.gender.unspecified} not set` : "Company hostel is split by gender"} accentColor="#7c3aed" />
-            <button type="button" onClick={() => setNeedsAttentionOnly(true)} className="text-left">
-              <MetricCard title="Needs Attention" value={summary.needs_attention} subtitle="No shift plan, bank details or biometric link" accentColor="#d97706" />
+            <button type="button" onClick={() => showNeedsAttention()} className="text-left">
+              <MetricCard title="Needs Attention" value={summary.needs_attention} subtitle="Click to see who, and why" accentColor="#d97706" />
             </button>
           </div>
         )}
@@ -524,7 +566,6 @@ export default function EmployeesPage() {
                 <tbody>
                   {sortedEmployees.map((employee) => {
                     const plan = shiftPlanCell(employee);
-                    const flagged = employee.status === "active" && (plan.missing || !employee.biometric_user_id);
                     return (
                       <tr
                         key={employee.id}
@@ -537,11 +578,17 @@ export default function EmployeesPage() {
                               {initials(employee.full_name)}
                             </div>
                             <div>
-                              <div className="flex items-center gap-2 font-semibold text-slate-900">
-                                {employee.full_name}
-                                {flagged && <span title="Needs attention: missing shift plan or biometric link" className="h-2 w-2 rounded-full bg-amber-500" />}
-                              </div>
+                              <div className="font-semibold text-slate-900">{employee.full_name}</div>
                               <div className="text-sm text-slate-500">{employee.employee_id}</div>
+                              {employee.attention_reasons.length > 0 && (
+                                <div className="mt-1 flex flex-wrap gap-1">
+                                  {employee.attention_reasons.map((reason) => (
+                                    <span key={reason} className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800">
+                                      {reason}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           </div>
                         </td>

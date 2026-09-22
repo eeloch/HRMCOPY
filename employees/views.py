@@ -168,6 +168,8 @@ class EmployeeListCreateAPIView(APIView):
         gender = request.query_params.get("gender")
         shift_plan = request.query_params.get("shift_plan")  # a ShiftPlan id, or "not_assigned"
         needs_attention = request.query_params.get("needs_attention")
+        new_hires_this_month = request.query_params.get("new_hires_this_month")
+        exits_this_month = request.query_params.get("exits_this_month")
 
         if search:
             employees = employees.filter(
@@ -190,6 +192,15 @@ class EmployeeListCreateAPIView(APIView):
 
         if gender:
             employees = employees.filter(gender=gender)
+
+        today = timezone.localdate()
+        month_start = today.replace(day=1)
+
+        if str(new_hires_this_month).lower() in ("1", "true", "yes"):
+            employees = employees.filter(employment_date__gte=month_start, employment_date__lte=today)
+
+        if str(exits_this_month).lower() in ("1", "true", "yes"):
+            employees = employees.filter(exit_date__gte=month_start, exit_date__lte=today)
 
         today_rosters, current_plan_assignments = _today_roster_and_plan_maps(employees)
 
