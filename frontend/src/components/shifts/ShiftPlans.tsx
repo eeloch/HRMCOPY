@@ -8,6 +8,7 @@ import { apiFetch } from "@/lib/api";
 type Plan = { id: number; name: string; kind: string; description: string; members: number; group_a: number; group_b: number; shift: string | null; this_week?: { monday: string; day_group: string; next_monday: string; next_day_group: string } };
 type Overview = { results: Plan[]; active_employees: number; on_a_plan: number };
 type Department = { id: number; name: string };
+type UploadReport = { dry_run: boolean; rows_in_file: number; changes: number; unchanged: number; by_plan: Record<string, number>; issues: { row: number; employee_id: string; reason: string }[] };
 
 const inputClass = "mt-1 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500";
 
@@ -32,6 +33,10 @@ export function ShiftPlans({ onChanged }: { onChanged?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({ plan: "", group: "split", who: "departments", departments: [] as number[], currentPlan: "", start: nextMondayISO() });
   const [preview, setPreview] = useState<{ people: number; split: { A: number; B: number } | null; sample: string[] } | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadReport, setUploadReport] = useState<UploadReport | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   async function load() {
     const [plans, deps] = await Promise.all([apiFetch("/attendance/shift-plans/"), apiFetch("/employees/departments/")]);
@@ -73,6 +78,45 @@ export function ShiftPlans({ onChanged }: { onChanged?: () => void }) {
       setFeedback("Groups swapped. Rosters from today onward have been rewritten."); await load(); onChanged?.();
     } catch (flipError) { setError(flipError instanceof Error ? flipError.message : "That did not work."); }
     finally { setBusy(false); }
+  }
+
+  async function downloadTemplate() {
+    setDownloading(true); setError("");
+    try {
+      const response = await apiFetch("/attendance/shift-roster/template/");
+      if (!response.ok) throw new Error("Unable to create the roster template.");
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "Roster Upload Template.xlsx";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (downloadError) {
+      setError(downloadError instanceof Error ? downloadError.message : "Unable to create the roster template.");
+    } finally { setDownloading(false); }
+  }
+
+  async function runUpload(dryRun: boolean) {
+    if (!uploadFile) return;
+    setUploading(true); setError("");
+    try {
+      const form = new FormData();
+      form.append("file", uploadFile);
+      form.append("dry_run", dryRun ? "true" : "false");
+      const response = await apiFetch("/attendance/shift-roster/upload/", { method: "POST", body: form });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(apiError(data, "Unable to read that file."));
+      setUploadReport(data);
+      if (!dryRun) {
+        setFeedback(`${data.changes} people assigned from the spreadsheet. Their rosters are written for the next 17 weeks and extend by themselves.`);
+        setUploadFile(null); setUploadReport(null);
+        await load(); onChanged?.();
+      }
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Unable to read that file.");
+    } finally { setUploading(false); }
   }
 
   const ready = form.plan && (!rotation || form.group) && (form.who !== "departments" || form.departments.length > 0) && (form.who !== "plan" || form.currentPlan);
@@ -121,6 +165,34 @@ export function ShiftPlans({ onChanged }: { onChanged?: () => void }) {
                 <button type="button" disabled={!ready || busy || !preview} onClick={() => void run(false)} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white disabled:bg-blue-300">{busy ? "Working..." : "Assign"}</button>
               </div>
               <p className="mt-2 text-xs text-slate-500">Manual roster changes you have made for individual days are never overwritten. A rotation should start on a Monday.</p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 p-4">
+              <p className="font-semibold text-slate-900">Assign by spreadsheet</p>
+              <p className="mt-1 text-sm text-slate-600">Download the template - it already lists every active employee with their staff number, name, department and current plan. Type the Plan Name (and Group, for a rotation plan) only for the people who should change, leave the rest blank, and upload it back.</p>
+              <div className="mt-3 flex flex-wrap items-center gap-3">
+                <button type="button" disabled={downloading} onClick={() => void downloadTemplate()} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 disabled:opacity-50">{downloading ? "Preparing..." : "Download template"}</button>
+                <input type="file" accept=".xlsx" onChange={(event) => { setUploadFile(event.target.files?.[0] || null); setUploadReport(null); }} className="text-sm text-slate-600" />
+              </div>
+              {uploadReport && (
+                <div className="mt-3 rounded-xl bg-blue-50 p-3 text-sm text-blue-900">
+                  <p><b>{uploadReport.changes}</b> {uploadReport.changes === 1 ? "person" : "people"} will be assigned, {uploadReport.unchanged} left unchanged.{uploadReport.issues.length ? ` ${uploadReport.issues.length} row(s) have a problem.` : ""}</p>
+                  {Object.keys(uploadReport.by_plan).length > 0 && (
+                    <ul className="mt-2 list-disc pl-5">
+                      {Object.entries(uploadReport.by_plan).map(([label, count]) => <li key={label}>{label}: {count}</li>)}
+                    </ul>
+                  )}
+                  {uploadReport.issues.length > 0 && (
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-red-700">
+                      {uploadReport.issues.map((issue) => <li key={issue.row}>Row {issue.row}{issue.employee_id ? ` (${issue.employee_id})` : ""}: {issue.reason}</li>)}
+                    </ul>
+                  )}
+                </div>
+              )}
+              <div className="mt-4 flex gap-3">
+                <button type="button" disabled={!uploadFile || uploading} onClick={() => void runUpload(true)} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 disabled:opacity-50">Preview</button>
+                <button type="button" disabled={!uploadFile || uploading || !uploadReport || uploadReport.changes === 0} onClick={() => void runUpload(false)} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white disabled:bg-blue-300">{uploading ? "Working..." : "Assign from file"}</button>
+              </div>
             </div>
           </>
         )}

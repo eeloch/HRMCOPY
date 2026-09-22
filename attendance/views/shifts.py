@@ -1,9 +1,11 @@
 from datetime import timedelta
 
 from django.db import transaction
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -231,3 +233,42 @@ class ShiftPlanFlipAPIView(APIView):
         except ValueError as error:
             return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"roster_days_changed": summary.updated + summary.created})
+
+
+class ShiftRosterTemplateAPIView(APIView):
+    """Download the roster upload template: every active employee, with their current plan already filled in."""
+
+    permission_classes = [IsAuthenticated, CanManageShifts]
+
+    def get(self, request):
+        from attendance.services.roster_upload import build_template_workbook
+
+        content = build_template_workbook()
+        response = HttpResponse(
+            content,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = 'attachment; filename="Roster Upload Template.xlsx"'
+        return response
+
+
+class ShiftRosterUploadAPIView(APIView):
+    """Upload the filled-in roster template. dry_run=true (default) only reports what would change."""
+
+    permission_classes = [IsAuthenticated, CanManageShifts]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        from attendance.services.roster_upload import apply_roster_upload
+
+        upload = request.FILES.get("file")
+        if upload is None or not upload.name.lower().endswith(".xlsx"):
+            return Response({"detail": "Upload the roster template as an .xlsx file."}, status=status.HTTP_400_BAD_REQUEST)
+        dry_run = str(request.data.get("dry_run", "true")).lower() != "false"
+        try:
+            report = apply_roster_upload(upload, dry_run=dry_run, actor=request.user.get_username())
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({"detail": "That file could not be read. Check it is the roster upload template."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(report.as_dict())

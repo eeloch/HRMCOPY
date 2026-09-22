@@ -13,6 +13,8 @@ from .shifts import (
     ShiftPlanAssignAPIView,
     ShiftPlanFlipAPIView,
     ShiftPlanListAPIView,
+    ShiftRosterTemplateAPIView,
+    ShiftRosterUploadAPIView,
 )
 from .roster import EmployeeRosterListAPIView, RosterGenerationAPIView, RosterOverrideAPIView, RotationRosterGenerationAPIView
 from .overtime import OvertimeDecisionAPIView, OvertimeMarkPaidAPIView, OvertimeRecordListAPIView
