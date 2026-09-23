@@ -49,6 +49,10 @@ class AttendanceExceptionListAPIView(APIView):
             "type"
         )
 
+        exception_id = request.query_params.get(
+            "id"
+        )
+
         if exception_status:
             queryset = queryset.filter(
                 status=exception_status
@@ -57,6 +61,11 @@ class AttendanceExceptionListAPIView(APIView):
         if exception_type:
             queryset = queryset.filter(
                 exception_type=exception_type
+            )
+
+        if exception_id:
+            queryset = queryset.filter(
+                id=exception_id
             )
 
         serializer = AttendanceExceptionSerializer(

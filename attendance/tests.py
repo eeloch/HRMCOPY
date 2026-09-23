@@ -320,6 +320,22 @@ class AttendanceProcessingTests(TestCase):
             ).exists()
         )
 
+    def test_reprocessing_a_late_single_punch_does_not_re_log_the_same_late_arrival(self):
+        """A single-punch day resolves to status "incomplete", never "late" - the late-arrival log must
+        still be deduped off late_minutes itself, not the overall status, or every periodic reprocess of
+        an already-closed day re-logs the identical late arrival forever."""
+        employee = self.employee_with_shift("SINGLE-LATE")
+        self.add_event(employee, self.work_date, 7, 5)
+
+        first = process_employee_attendance(employee, self.work_date, now=self.after)
+        self.assertEqual(first.status, "incomplete")
+        self.assertEqual(first.late_minutes, 5)
+        self.assertEqual(AuditEvent.objects.filter(employee=employee, event_type="attendance.late").count(), 1)
+
+        second = process_employee_attendance(employee, self.work_date, now=self.after)
+        self.assertEqual(second.status, "incomplete")
+        self.assertEqual(AuditEvent.objects.filter(employee=employee, event_type="attendance.late").count(), 1)
+
     def test_late_single_punch_is_missing_clock_in(self):
         employee = self.employee_with_shift("MISSING-IN")
         self.add_event(employee, self.work_date, 19, 30)

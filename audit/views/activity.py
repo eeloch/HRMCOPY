@@ -38,6 +38,7 @@ class AuditActivityAPIView(APIView):
     def _get_queryset(request):
         events = AuditEvent.objects.select_related(
             "employee",
+            "employee__department",
             "actor",
             "content_type",
         ).order_by("-created_at")

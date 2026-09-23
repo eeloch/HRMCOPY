@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
 import {
@@ -39,7 +39,17 @@ async function errorMessage(response: Response) {
 }
 
 export default function ExceptionPage() {
+  return (
+    <Suspense fallback={null}>
+      <ExceptionPageInner />
+    </Suspense>
+  );
+}
+
+function ExceptionPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const deepLinkId = searchParams.get("id");
   const [records, setRecords] = useState<AttendanceExceptionRecord[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>("pending");
   const [search, setSearch] = useState("");
@@ -51,6 +61,7 @@ export default function ExceptionPage() {
   const [selectedRecord, setSelectedRecord] = useState<AttendanceExceptionRecord | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [modalError, setModalError] = useState("");
+  const [deepLinkNotice, setDeepLinkNotice] = useState("");
 
   const loadExceptions = useCallback(async (mode = viewMode) => {
     setLoading(true);
@@ -75,7 +86,38 @@ export default function ExceptionPage() {
     }
     const loadTimer = window.setTimeout(() => void loadExceptions(), 0);
     return () => window.clearTimeout(loadTimer);
-  }, [router, loadExceptions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router]);
+
+  // Arrived from a clicked Activity Center card: jump straight to the record that prompted it,
+  // instead of leaving the person to search the list by hand.
+  useEffect(() => {
+    if (!deepLinkId || !getAccessToken()) return;
+    (async () => {
+      try {
+        const response = await apiFetch(`/attendance/exceptions/?id=${deepLinkId}`);
+        if (!response.ok) throw new Error(await errorMessage(response));
+        const data = await response.json();
+        const record: AttendanceExceptionRecord | undefined = data.results?.[0];
+        if (!record) {
+          setDeepLinkNotice("That attendance exception could not be found.");
+          return;
+        }
+        if (record.status === "pending") {
+          setModalError("");
+          setSelectedRecord(record);
+        } else {
+          setViewMode("history");
+          setStatusFilter(record.status);
+          setSearch(record.employee_name);
+          setDeepLinkNotice(`This ${label(record.exception_type).toLowerCase()} was already ${record.status} by ${record.reviewed_by || "a reviewer"}.`);
+        }
+      } catch {
+        setDeepLinkNotice("That attendance exception could not be found.");
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deepLinkId]);
 
   function switchView(mode: ViewMode) {
     setViewMode(mode);
@@ -125,6 +167,12 @@ export default function ExceptionPage() {
         <AppCard className="mb-6 border-blue-200 bg-blue-50">
           <p className="text-sm text-blue-800">Biometric punches and calculated attendance facts remain read-only. Decisions record the review outcome only.</p>
         </AppCard>
+
+        {deepLinkNotice && (
+          <AppCard className="mb-6 border-amber-200 bg-amber-50">
+            <p className="text-sm text-amber-800">{deepLinkNotice}</p>
+          </AppCard>
+        )}
 
         <div className="mb-6 flex gap-2 border-b border-slate-200">
           <ViewTab active={viewMode === "pending"} onClick={() => switchView("pending")}>Pending Review</ViewTab>

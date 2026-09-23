@@ -104,14 +104,21 @@ def _log_attendance_changes(attendance, previous):
             metadata={**metadata, "clock_out": attendance.actual_clock_out.isoformat()},
         )
 
-    if attendance.late_minutes and (
-        previous["status"] != "late" or previous["late_minutes"] != attendance.late_minutes
-    ):
+    # Keyed on late_minutes alone, not status=="late": a single-punch day with no clock-out
+    # resolves to status "incomplete" (see the event_count==1 branch below), not "late", even
+    # though it's still carrying the same late_minutes fact. Checking status too meant that once
+    # a day like that closed out, every 5-minute reprocess re-logged the identical late arrival
+    # forever, since previous["status"] could never equal "late" for it.
+    if attendance.late_minutes and previous["late_minutes"] != attendance.late_minutes:
+        # Linked to the pending "late" exception itself, not the attendance row, so the Activity
+        # Center can send HR straight to the record that actually needs a decision - _sync_exception
+        # (called above) has already created or updated it for this same late_minutes value.
+        late_exception = AttendanceException.objects.filter(attendance=attendance, exception_type="late").first()
         AuditService.log(
             event_type="attendance.late",
             module="attendance",
             employee=employee,
-            object=attendance,
+            object=late_exception or attendance,
             severity=AuditSeverity.WARNING,
             title="Late arrival recorded",
             description=f"{employee.full_name} arrived late.",
