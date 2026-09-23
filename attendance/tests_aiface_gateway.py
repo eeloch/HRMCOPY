@@ -1,6 +1,9 @@
 from datetime import datetime
 
-from django.test import SimpleTestCase
+from unittest import mock
+
+from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 
 from attendance.integrations.aiface_protocol import (
     build_adduser_command,
@@ -278,3 +281,55 @@ class ChooseTerminalReplyTests(SimpleTestCase):
         self.assertEqual(choose_terminal_reply("gated", self.entitled), (1, "Ticket 1 of 2 - Ada"))
         self.assertEqual(choose_terminal_reply("gated", self.extra), (0, "Not entitled - Ada"))
         self.assertEqual(choose_terminal_reply("gated", self.unknown), (0, "Not enrolled for meals"))
+
+
+class NextCommandPriorityTests(TestCase):
+    """The meal terminal takes one command at a time, so what it is sent first decides how fast a person
+    who has used their last ticket is switched off (2026-09-23: a third ticket got through behind a queue)."""
+
+    def setUp(self):
+        from attendance.management.commands.run_aiface_gateway import Command
+        from attendance.models import BiometricDevice
+
+        self.next_command = Command._next_command_to_send
+        self.meal = BiometricDevice.objects.create(name="Meal", serial_number="MEAL1", location="x", device_type="factory", purpose="meal_ticket")
+        self.attendance = BiometricDevice.objects.create(name="Att", serial_number="ATT1", location="x", device_type="factory", purpose="attendance")
+
+    def queue(self, device, command_type, payload):
+        from attendance.models import DeviceCommand
+
+        return DeviceCommand.objects.create(device=device, command_type=command_type, payload=payload)
+
+    def at_hour(self, hour):
+        return mock.patch("attendance.management.commands.run_aiface_gateway.timezone.localtime", return_value=timezone.now().replace(hour=hour))
+
+    def test_switching_a_person_off_goes_before_everything_else(self):
+        self.queue(self.meal, "enroll_user", {"enrollid": 1})
+        switch = self.queue(self.meal, "set_user_enabled", {"enrollid": 2, "enabled": False})
+        self.assertEqual(self.next_command("MEAL1")[0], switch.pk)
+
+    def test_a_clone_is_held_on_a_meal_terminal_during_the_day(self):
+        self.queue(self.meal, "clone_enrollment", {"employee_id": 1, "enrollid": 1, "target_device_ids": [self.attendance.pk]})
+        with self.at_hour(12):
+            self.assertIsNone(self.next_command("MEAL1"))
+
+    def test_a_clone_aimed_at_a_meal_terminal_is_held_during_the_day(self):
+        self.queue(self.attendance, "clone_enrollment", {"employee_id": 1, "enrollid": 1, "target_device_ids": [self.meal.pk]})
+        with self.at_hour(12):
+            self.assertIsNone(self.next_command("ATT1"))
+
+    def test_held_background_jobs_do_not_block_a_switch_queued_behind_them(self):
+        self.queue(self.meal, "clone_enrollment", {"employee_id": 1, "enrollid": 1, "target_device_ids": []})
+        switch = self.queue(self.meal, "set_user_enabled", {"enrollid": 2, "enabled": False})
+        with self.at_hour(12):
+            self.assertEqual(self.next_command("MEAL1")[0], switch.pk)
+
+    def test_background_jobs_still_run_overnight(self):
+        clone = self.queue(self.meal, "clone_enrollment", {"employee_id": 1, "enrollid": 1, "target_device_ids": []})
+        with self.at_hour(2):
+            self.assertEqual(self.next_command("MEAL1")[0], clone.pk)
+
+    def test_attendance_terminals_are_unaffected(self):
+        clone = self.queue(self.attendance, "clone_enrollment", {"employee_id": 1, "enrollid": 1, "target_device_ids": [self.attendance.pk]})
+        with self.at_hour(12):
+            self.assertEqual(self.next_command("ATT1")[0], clone.pk)

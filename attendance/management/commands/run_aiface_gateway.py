@@ -44,6 +44,7 @@ CLONE_MAX_ATTEMPTS = 3
 COMMAND_POLL_INTERVAL_SECONDS = 2
 ATTENDANCE_REFRESH_SECONDS = 300  # turn punches into attendance records this often (today and yesterday)
 ROSTER_EXTEND_CHECK_SECONDS = 3600  # once an hour we check whether today's roster extension has run
+BACKGROUND_QUIET_HOURS_END = 5  # local hour before which bulk clone/purge jobs may use a meal terminal
 GATING_FULL_CHECK_SECONDS = 300  # everyone is re-checked this often; a person's own scan re-checks them at once
 
 try:
@@ -417,20 +418,45 @@ class Command(BaseCommand):
         return meal_bridge_url if purpose == "meal_ticket" else bridge_url
 
     @staticmethod
+    def _background_job_held(command, device_purpose):
+        """Bulk background jobs (clone/purge) never run on, or aimed at, a meal-ticket terminal during the
+        day. The terminal takes one command at a time, so a relay in flight (up to 5 minutes if it hangs)
+        makes every "switch this person off" wait behind it - at the lunch rush that is how a third
+        ticket got through (2026-09-23). They wait for the quiet hours instead."""
+        if command.command_type not in DeviceCommand.BACKGROUND_TYPES:
+            return False
+        if timezone.localtime().hour < BACKGROUND_QUIET_HOURS_END:
+            return False
+        if device_purpose == "meal_ticket":
+            return True
+        target_ids = command.payload.get("target_device_ids") or []
+        return bool(target_ids) and BiometricDevice.objects.filter(pk__in=target_ids, purpose="meal_ticket").exists()
+
+    @staticmethod
     def _next_command_to_send(serial_number):
         """The next (id, wire message) to send for this device, or None if nothing's due.
 
         Returns None while a previously-sent command is still awaiting a
-        response, so only one command is ever in flight per device.
+        response, so only one command is ever in flight per device. Switching
+        someone on/off at a terminal goes first, ahead of enroll/delete and of
+        bulk background jobs.
         """
         DeviceCommand.expire_stale()
         if DeviceCommand.objects.filter(device__serial_number=serial_number, status="sent").exists():
             return None
-        command = (
+        purpose = BiometricDevice.objects.filter(serial_number=serial_number).values_list("purpose", flat=True).first()
+        candidates = (
             DeviceCommand.objects.filter(device__serial_number=serial_number, status="pending")
-            .order_by(Case(When(command_type__in=DeviceCommand.BACKGROUND_TYPES, then=1), default=0), "created_at")
-            .first()
+            .order_by(
+                Case(
+                    When(command_type="set_user_enabled", then=0),
+                    When(command_type__in=DeviceCommand.BACKGROUND_TYPES, then=2),
+                    default=1,
+                ),
+                "created_at",
+            )[:100]
         )
+        command = next((c for c in candidates if not Command._background_job_held(c, purpose)), None)
         if command is None:
             return None
         if command.command_type == "clone_enrollment":
