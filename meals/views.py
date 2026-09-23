@@ -326,8 +326,25 @@ class MealOperationsAPIView(APIView):
 
         shown = list(collections[:100])
 
+        # The metric cards need real, unambiguous totals for today - not something derived client-side
+        # from whichever 100 rows happen to still be in the "most recent" window, which silently drops
+        # older same-day collections once more than 100 scans have happened anywhere in the company.
+        today = timezone.localdate()
+        today_collections = MealCollection.objects.filter(work_date=today, voided_at__isnull=True)
+        today_within = today_collections.filter(status="within_entitlement").count()
+        today_total = today_collections.count()
+
         return Response(
             {
+                "summary": {
+                    "today_collections": today_total,
+                    "today_within_entitlement": today_within,
+                    "today_excess": today_total - today_within,
+                    # All-time, not just today: an unresolved excess from an earlier day still needs a
+                    # decision, so this is a backlog count, not a "today" count - shown separately on
+                    # purpose rather than made to look like it should match the totals above.
+                    "pending_review": exceptions.count(),
+                },
                 "collections": [
                     {
                         "id": x.pk,
