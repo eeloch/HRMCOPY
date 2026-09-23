@@ -20,6 +20,7 @@ from datetime import datetime
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.db import close_old_connections
 from django.db.models import Case, When
 from django.utils import timezone
 
@@ -112,6 +113,22 @@ class Command(BaseCommand):
         async with websockets.serve(handler, host, port):
             await asyncio.Future()
 
+    @staticmethod
+    async def _run_db(fn, *args):
+        """Every database-touching call in this file goes through here instead of a bare
+        asyncio.to_thread. This process holds its connections open for hours or days outside
+        Django's normal request/response cycle, which is the only place Django itself checks
+        a connection's health - so once Postgres or the network drops a worker thread's
+        connection (an idle timeout is enough), every future query on that thread fails with
+        "connection already closed" forever, silently freezing that one device's status (and
+        anything else that happens to land on the same thread) until the whole gateway is
+        restarted. close_old_connections() is Django's own request_started/request_finished
+        hook, invoked by hand since this process never fires those signals."""
+        def call():
+            close_old_connections()
+            return fn(*args)
+        return await asyncio.to_thread(call)
+
     async def _handle_connection(self, ws, bridge_url, meal_bridge_url, secret):
         sn = None
         peer = ws.remote_address
@@ -130,9 +147,9 @@ class Command(BaseCommand):
                     sn = message.get("sn")
                     self.stdout.write(f"[{peer}] reg from device sn={sn}")
                     self._connections[sn] = ws
-                    await asyncio.to_thread(self._mark_device_online, sn, peer[0] if peer else None)
-                    await asyncio.to_thread(self._recover_interrupted_clones, sn)
-                    minimal = await asyncio.to_thread(self._minimal_reg_for_device, sn)
+                    await self._run_db(self._mark_device_online, sn, peer[0] if peer else None)
+                    await self._run_db(self._recover_interrupted_clones, sn)
+                    minimal = await self._run_db(self._minimal_reg_for_device, sn)
                     self.stdout.write(f"[{sn}] reg ack: {'minimal (vendor demo style)' if minimal else 'standard'}")
                     await ws.send(json.dumps(build_reg_ack(datetime.now(), minimal=minimal)))
                     if poller_task is None:
@@ -150,7 +167,7 @@ class Command(BaseCommand):
                         pending.set_result(message)
                     else:
                         self.stdout.write(f"[{sn}] command response ret={ret}: {message}")
-                        await asyncio.to_thread(self._resolve_command, sn, message)
+                        await self._run_db(self._resolve_command, sn, message)
                 elif cmd:
                     self.stdout.write(f"[{peer}] unhandled cmd={cmd!r}")
         except websockets.exceptions.ConnectionClosed:
@@ -162,13 +179,13 @@ class Command(BaseCommand):
             if sn:
                 # A switch on/off that was on the wire when the terminal dropped never got an answer: retry it
                 # straight away on the next connection instead of waiting for it to time out.
-                await asyncio.to_thread(self._requeue_lost_switches, sn)
+                await self._run_db(self._requeue_lost_switches, sn)
             # A device that reconnected already has a newer socket registered under
             # this serial; only the current one may deregister/mark offline, or a
             # late-noticed dead connection would evict its replacement.
             if sn and self._connections.get(sn) is ws:
                 self._connections.pop(sn, None)
-                await asyncio.to_thread(self._mark_device_offline, sn)
+                await self._run_db(self._mark_device_offline, sn)
 
     async def _poll_commands(self, ws, sn):
         """Deliver queued admin commands (enroll/delete/refresh) one at a time.
@@ -187,14 +204,14 @@ class Command(BaseCommand):
                     # Safety net for everyone covered by MEAL_GATING_EMPLOYEE_IDS (day rollover, roster changes, a
                     # gateway that was down). Claim the slot first so the other terminals' loops skip it.
                     self._last_gating_check = now
-                    await asyncio.to_thread(self._reconcile_meal_gating)
+                    await self._run_db(self._reconcile_meal_gating)
                 if now - self._last_attendance_refresh >= ATTENDANCE_REFRESH_SECONDS:
                     self._last_attendance_refresh = now
-                    await asyncio.to_thread(self._refresh_attendance)
+                    await self._run_db(self._refresh_attendance)
                 if now - self._last_roster_check >= ROSTER_EXTEND_CHECK_SECONDS:
                     self._last_roster_check = now
-                    await asyncio.to_thread(self._extend_rosters_daily)
-                next_command = await asyncio.to_thread(self._next_command_to_send, sn)
+                    await self._run_db(self._extend_rosters_daily)
+                next_command = await self._run_db(self._next_command_to_send, sn)
                 if next_command is None:
                     continue
                 command_id, wire_message = next_command
@@ -203,7 +220,7 @@ class Command(BaseCommand):
                     continue
                 self.stdout.write(f"[{sn}] sending queued command: {wire_message}")
                 await ws.send(json.dumps(wire_message))
-                await asyncio.to_thread(self._mark_command_sent, command_id)
+                await self._run_db(self._mark_command_sent, command_id)
         except asyncio.CancelledError:
             pass
 
@@ -288,13 +305,13 @@ class Command(BaseCommand):
         the row is left "sent"; _recover_interrupted_clones puts it back to
         "pending" when that device next registers.
         """
-        await asyncio.to_thread(self._mark_command_sent, command_id)
-        command = await asyncio.to_thread(lambda: DeviceCommand.objects.select_related("device").get(pk=command_id))
+        await self._run_db(self._mark_command_sent, command_id)
+        command = await self._run_db(lambda: DeviceCommand.objects.select_related("device").get(pk=command_id))
         payload = command.payload
         enrollid, employee_id, employee_name = payload["enrollid"], payload["employee_id"], payload.get("name", "")
         biometric_type = payload.get("biometric_type", "face")
         target_ids = payload.get("target_device_ids", [])
-        targets = await asyncio.to_thread(lambda: list(BiometricDevice.objects.filter(pk__in=target_ids)))
+        targets = await self._run_db(lambda: list(BiometricDevice.objects.filter(pk__in=target_ids)))
 
         # Don't bother the source for a template nobody can receive right now.
         reachable, skipped_offline = [], []
@@ -304,17 +321,17 @@ class Command(BaseCommand):
             else:
                 reachable.append(target)
         if not reachable:
-            await asyncio.to_thread(self._finish_clone_command, command_id, "failed", {"detail": "None of the target devices were online.", "skipped_offline": skipped_offline})
+            await self._run_db(self._finish_clone_command, command_id, "failed", {"detail": "None of the target devices were online.", "skipped_offline": skipped_offline})
             return
 
         try:
             reply = await self._send_and_wait(ws, sn, build_getuserinfo_command(sn, enrollid, biometric_type), CLONE_REPLY_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             self.stdout.write(f"[{sn}] clone_enrollment: timed out waiting for the source device to return the template")
-            await asyncio.to_thread(self._finish_clone_command, command_id, "failed", {"detail": "Timed out waiting for the source device to return the enrolled template."})
+            await self._run_db(self._finish_clone_command, command_id, "failed", {"detail": "Timed out waiting for the source device to return the enrolled template."})
             return
         if not reply.get("result"):
-            await asyncio.to_thread(self._finish_clone_command, command_id, "failed", {"detail": "Source device could not return the enrolled template."})
+            await self._run_db(self._finish_clone_command, command_id, "failed", {"detail": "Source device could not return the enrolled template."})
             return
         record = reply.get("record")
         self.stdout.write(f"[{sn}] clone_enrollment: template captured for enrollid={enrollid}, relaying to {len(reachable)} device(s)")
@@ -325,10 +342,10 @@ class Command(BaseCommand):
             if target_ws is None:
                 skipped_offline.append({"device_id": target.id, "device_name": target.name})
                 continue
-            if await asyncio.to_thread(self._device_is_busy, target):
+            if await self._run_db(self._device_is_busy, target):
                 skipped_busy.append({"device_id": target.id, "device_name": target.name})
                 continue
-            target_enrollid = await asyncio.to_thread(self._enrollid_for_target, target, enrollid)
+            target_enrollid = await self._run_db(self._enrollid_for_target, target, enrollid)
             push_message = build_setuserinfo_command(target.serial_number, target_enrollid, employee_name, biometric_type, record)
             try:
                 push_reply = await self._send_and_wait(target_ws, target.serial_number, push_message, CLONE_REPLY_TIMEOUT_SECONDS)
@@ -339,12 +356,12 @@ class Command(BaseCommand):
             if not push_reply.get("result"):
                 failed.append({"device_id": target.id, "device_name": target.name, "reason": "device rejected the template"})
                 continue
-            await asyncio.to_thread(self._link_cloned_identity, employee_id, target, target_enrollid)
+            await self._run_db(self._link_cloned_identity, employee_id, target, target_enrollid)
             cloned_to.append({"device_id": target.id, "device_name": target.name})
 
         record = None  # drop the only reference to the template as soon as we're done relaying it
         self.stdout.write(f"[{sn}] clone_enrollment: done - cloned={len(cloned_to)} offline={len(skipped_offline)} busy={len(skipped_busy)} failed={len(failed)}")
-        await asyncio.to_thread(
+        await self._run_db(
             self._finish_clone_command, command_id, "acked" if cloned_to else "failed",
             {"cloned_to": cloned_to, "skipped_offline": skipped_offline, "skipped_busy": skipped_busy, "failed": failed},
         )
@@ -355,7 +372,7 @@ class Command(BaseCommand):
         logindex = message.get("logindex")
         count = message.get("count", len(records))
 
-        target_url = await asyncio.to_thread(self._bridge_url_for_device, sn, bridge_url, meal_bridge_url)
+        target_url = await self._run_db(self._bridge_url_for_device, sn, bridge_url, meal_bridge_url)
         gateway_records = [translate_sendlog_record(sn, record) for record in records]
         result = True
         access, terminal_message = None, None
