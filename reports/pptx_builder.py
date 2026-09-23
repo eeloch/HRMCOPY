@@ -93,6 +93,10 @@ def _stat_row(slide, top, items, card_w=Inches(1.95), gap=Inches(0.2), start_lef
 
 
 def _growth_color(pct):
+    # A tiny previous-week base (e.g. attendance barely logged that week) can blow the ratio up to an
+    # absurd number - that's not a real trend, so it gets a neutral color and an "N/M" label below.
+    if abs(pct) > 300:
+        return SLATE
     if pct > 0:
         return GREEN
     if pct < 0:
@@ -101,6 +105,8 @@ def _growth_color(pct):
 
 
 def _growth_label(pct):
+    if abs(pct) > 300:
+        return "N/M"
     sign = "+" if pct > 0 else ""
     return f"{sign}{pct:.1f}%"
 
@@ -349,7 +355,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
 
     # --- Slide 4: Top Departments ---
     slide = _blank(prs)
-    comparable = [row for row in data.department_comparison if row.previous > 0]
+    comparable = [row for row in data.department_comparison if row.previous >= 5]
     leader = data.department_comparison[0] if data.department_comparison else None
     grower = max(comparable, key=lambda r: r.growth_pct, default=None)
     decliner = min(comparable, key=lambda r: r.growth_pct, default=None)
