@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
@@ -66,9 +66,30 @@ type NotYetInRow = {
   not_yet_in: number;
 };
 
+type NotYetInEmployee = {
+  employee_id: number;
+  employee_number: string;
+  employee_name: string;
+  department: string | null;
+  hostel: boolean;
+  room: string | null;
+};
+
+type LateEmployee = {
+  employee_id: number;
+  employee_number: string;
+  employee_name: string;
+  department: string | null;
+  shift: string | null;
+  actual_clock_in: string | null;
+  late_minutes: number;
+};
+
 type AttendanceDashboard = {
   summary: DashboardSummary;
   not_yet_in_by_department: NotYetInRow[];
+  not_yet_in_employees: NotYetInEmployee[];
+  late_employees: LateEmployee[];
   workforce_action_center: WorkforceEmployee[];
   department_readiness: DepartmentReadiness[];
   hostel_absentees: HostelAbsentee[];
@@ -81,6 +102,7 @@ const summaryCards: {
   label: string;
   detail: string;
   accent: string;
+  action?: string;
 }[] = [
   {
     key: "expected",
@@ -99,18 +121,21 @@ const summaryCards: {
     label: "Not In Yet",
     detail: "Expected but no punch so far",
     accent: "bg-orange-50 text-orange-700 ring-orange-100",
+    action: "Click to print a roster",
   },
   {
     key: "absent",
     label: "Absent",
     detail: "Needs attention",
     accent: "bg-red-50 text-red-700 ring-red-100",
+    action: "Click to jump to the list",
   },
   {
     key: "late",
     label: "Late",
     detail: "Arrived after shift start",
     accent: "bg-amber-50 text-amber-700 ring-amber-100",
+    action: "Click to view the list",
   },
   {
     key: "on_leave",
@@ -143,6 +168,23 @@ export default function AttendancePage() {
   const [dashboard, setDashboard] = useState<AttendanceDashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [showLate, setShowLate] = useState(false);
+  const [showNotYetInReport, setShowNotYetInReport] = useState(false);
+  const actionCenterRef = useRef<HTMLElement | null>(null);
+
+  function handleCardClick(key: keyof DashboardSummary) {
+    if (key === "late") {
+      setShowLate((current) => !current);
+      return;
+    }
+    if (key === "not_yet_in") {
+      setShowNotYetInReport(true);
+      return;
+    }
+    if (key === "absent") {
+      actionCenterRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -182,7 +224,7 @@ export default function AttendancePage() {
     <div className="min-h-screen bg-slate-100">
       <Sidebar />
 
-      <main className="ml-64 min-w-0 p-4 md:p-8">
+      <main className="ml-64 min-w-0 p-4 md:p-8 print:hidden">
         <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="text-sm font-semibold uppercase tracking-wider text-blue-600">
@@ -234,9 +276,71 @@ export default function AttendancePage() {
                       detail={card.detail}
                       value={dashboard?.summary[card.key] || 0}
                       accent={card.accent}
+                      action={card.action}
+                      active={card.key === "late" && showLate}
+                      onClick={card.action ? () => handleCardClick(card.key) : undefined}
                     />
                   ))}
             </section>
+
+            {showLate && (
+              <section className="mt-6 overflow-hidden rounded-2xl border border-amber-200 bg-amber-50/40 shadow-sm">
+                <div className="flex items-center justify-between border-b border-amber-200 px-5 py-4">
+                  <div>
+                    <h2 className="text-lg font-bold text-slate-900">
+                      Late Today ({dashboard?.late_employees.length ?? 0})
+                    </h2>
+                    <p className="mt-1 text-sm text-slate-500">Clocked in after their shift start.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowLate(false)}
+                    className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                  >
+                    Hide
+                  </button>
+                </div>
+                {dashboard?.late_employees.length ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[640px] text-left">
+                      <thead className="bg-white text-xs font-semibold uppercase tracking-wider text-slate-500">
+                        <tr>
+                          <th className="px-5 py-3">Employee</th>
+                          <th className="px-5 py-3">Department</th>
+                          <th className="px-5 py-3">Shift</th>
+                          <th className="px-5 py-3">Clocked In</th>
+                          <th className="px-5 py-3">Late By</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-amber-100 bg-white">
+                        {dashboard.late_employees.map((employee) => (
+                          <tr
+                            key={employee.employee_id}
+                            onClick={() => router.push(`/employees/${employee.employee_id}`)}
+                            className="cursor-pointer hover:bg-amber-50"
+                          >
+                            <td className="px-5 py-3">
+                              <div className="font-semibold text-slate-900">{employee.employee_name}</div>
+                              <div className="text-sm text-slate-500">{employee.employee_number}</div>
+                            </td>
+                            <td className="px-5 py-3 text-sm text-slate-600">{employee.department || "Not assigned"}</td>
+                            <td className="px-5 py-3 text-sm text-slate-600">{employee.shift || "No shift"}</td>
+                            <td className="px-5 py-3 text-sm text-slate-600">
+                              {employee.actual_clock_in
+                                ? new Date(employee.actual_clock_in).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
+                                : "-"}
+                            </td>
+                            <td className="px-5 py-3 text-sm font-semibold text-amber-700">{employee.late_minutes} min</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="p-8 text-center text-slate-500">No one is late today.</div>
+                )}
+              </section>
+            )}
 
             <section className="mt-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
               <div className="border-b border-slate-200 px-5 py-5">
@@ -276,7 +380,7 @@ export default function AttendancePage() {
               )}
             </section>
 
-            <section className="mt-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+            <section ref={actionCenterRef} className="mt-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm scroll-mt-6">
               <div className="flex flex-col gap-2 border-b border-slate-200 px-5 py-5 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h2 className="text-lg font-bold text-slate-900">
@@ -507,6 +611,75 @@ export default function AttendancePage() {
           </>
         )}
       </main>
+
+      {showNotYetInReport && dashboard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 print:static print:block print:bg-white print:p-0">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-2xl bg-white shadow-xl print:max-h-none print:w-full print:max-w-none print:overflow-visible print:rounded-none print:shadow-none">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 print:hidden">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">Not Yet In — Printable Roster</h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  {dashboard.not_yet_in_employees.length} people expected but not yet clocked in.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                >
+                  Print
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowNotYetInReport(false)}
+                  className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6">
+              <div className="mb-4 hidden print:block">
+                <h2 className="text-xl font-bold text-slate-900">
+                  Not Yet In — {new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}
+                </h2>
+                <p className="text-sm text-slate-600">
+                  {dashboard.not_yet_in_employees.length} people expected but not yet clocked in.
+                </p>
+              </div>
+
+              {dashboard.not_yet_in_employees.length ? (
+                <table className="w-full text-left text-sm">
+                  <thead className="border-b-2 border-slate-300 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="py-2 pr-3">Department</th>
+                      <th className="py-2 pr-3">Employee</th>
+                      <th className="py-2 pr-3">Staff No.</th>
+                      <th className="py-2 pr-3">Hostel</th>
+                      <th className="py-2">Room</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {dashboard.not_yet_in_employees.map((employee) => (
+                      <tr key={employee.employee_id}>
+                        <td className="py-2 pr-3 font-medium text-slate-900">{employee.department || "Not assigned"}</td>
+                        <td className="py-2 pr-3 text-slate-700">{employee.employee_name}</td>
+                        <td className="py-2 pr-3 text-slate-600">{employee.employee_number}</td>
+                        <td className="py-2 pr-3 text-slate-600">{employee.hostel ? "Yes" : "No"}</td>
+                        <td className="py-2 font-semibold text-slate-900">{employee.room || "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="py-6 text-center text-slate-500">Everyone expected right now has already clocked in.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -516,14 +689,26 @@ function SummaryCard({
   detail,
   value,
   accent,
+  action,
+  active,
+  onClick,
 }: {
   label: string;
   detail: string;
   value: number;
   accent: string;
+  action?: string;
+  active?: boolean;
+  onClick?: () => void;
 }) {
+  const clickable = Boolean(onClick);
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+    <div
+      onClick={onClick}
+      className={`rounded-2xl border bg-white p-5 shadow-sm transition ${
+        clickable ? "cursor-pointer hover:-translate-y-0.5 hover:shadow-md" : ""
+      } ${active ? "border-blue-400 ring-2 ring-blue-100" : "border-slate-200"}`}
+    >
       <div className={`inline-flex rounded-xl px-3 py-1 text-sm font-semibold ring-1 ${accent}`}>
         {label}
       </div>
@@ -531,6 +716,7 @@ function SummaryCard({
         {value}
       </div>
       <p className="mt-1 text-sm text-slate-500">{detail}</p>
+      {action && <p className="mt-2 text-xs font-semibold text-blue-600">{action} →</p>}
     </div>
   );
 }
