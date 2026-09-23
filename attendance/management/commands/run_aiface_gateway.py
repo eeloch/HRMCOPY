@@ -16,7 +16,7 @@ import asyncio
 import json
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -44,7 +44,10 @@ CLONE_MAX_ATTEMPTS = 3
 COMMAND_POLL_INTERVAL_SECONDS = 2
 ATTENDANCE_REFRESH_SECONDS = 300  # turn punches into attendance records this often (today and yesterday)
 ROSTER_EXTEND_CHECK_SECONDS = 3600  # once an hour we check whether today's roster extension has run
+MEAL_IDLE_BEFORE_BACKGROUND = timedelta(minutes=10)  # no meal scan for this long = safe to run bulk jobs on a meal terminal
 BACKGROUND_QUIET_HOURS_END = 5  # local hour before which bulk clone/purge jobs may use a meal terminal
+AUTO_SYNC_SECONDS = 1800  # every 30 min, queue clone relays for anyone still missing from a terminal
+AUTO_SYNC_MAX_JOBS = 60  # per pass, so a big gap fills steadily instead of flooding the queues
 GATING_FULL_CHECK_SECONDS = 300  # everyone is re-checked this often; a person's own scan re-checks them at once
 
 try:
@@ -105,6 +108,7 @@ class Command(BaseCommand):
     _last_gating_check = float("-inf")
     _last_roster_check = float("-inf")
     _last_attendance_refresh = float("-inf")
+    _last_auto_sync = float("-inf")
     _roster_extended_on = None
 
     async def _serve(self, host, port, bridge_url, meal_bridge_url, secret):
@@ -212,6 +216,9 @@ class Command(BaseCommand):
                 if now - self._last_roster_check >= ROSTER_EXTEND_CHECK_SECONDS:
                     self._last_roster_check = now
                     await self._run_db(self._extend_rosters_daily)
+                if now - self._last_auto_sync >= AUTO_SYNC_SECONDS:
+                    self._last_auto_sync = now
+                    await self._run_db(self._auto_sync_enrollments)
                 next_command = await self._run_db(self._next_command_to_send, sn)
                 if next_command is None:
                     continue
@@ -256,6 +263,22 @@ class Command(BaseCommand):
             self.stdout.write(f"roster extension: created {summary.created}, changed {summary.updated}")
         except Exception as error:  # never let this take the gateway down
             self.stderr.write(f"roster extension failed: {error}")
+
+    def _auto_sync_enrollments(self):
+        """Relays fail for ordinary reasons (terminals drop their connection every ~30s and a relay needs
+        several round trips), and a failed one used to stay failed until someone pressed Sync All Devices.
+        Re-queue whatever is still missing, a bounded batch at a time."""
+        try:
+            from attendance.services.device_sync import queue_missing_clones, reachable_devices
+
+            devices = reachable_devices()
+            if len(devices) < 2:
+                return
+            queued = queue_missing_clones(devices, limit=AUTO_SYNC_MAX_JOBS)
+            if queued:
+                self.stdout.write(f"auto sync: queued {len(queued)} enrollment relay(s)")
+        except Exception as error:  # never let this take the gateway down
+            self.stderr.write(f"auto sync failed: {error}")
 
     def _reconcile_meal_gating(self):
         try:
@@ -419,18 +442,25 @@ class Command(BaseCommand):
 
     @staticmethod
     def _background_job_held(command, device_purpose):
-        """Bulk background jobs (clone/purge) never run on, or aimed at, a meal-ticket terminal during the
-        day. The terminal takes one command at a time, so a relay in flight (up to 5 minutes if it hangs)
-        makes every "switch this person off" wait behind it - at the lunch rush that is how a third
-        ticket got through (2026-09-23). They wait for the quiet hours instead."""
+        """Bulk background jobs (clone/purge) do not run on, or aimed at, a meal-ticket terminal while meals
+        are being served. The terminal takes one command at a time, so a relay in flight makes every
+        "switch this person off" wait behind it - at the lunch rush that is how a third ticket got
+        through (2026-09-23). They run when no meal has been scanned for MEAL_IDLE_BEFORE_BACKGROUND
+        (or overnight), so the sync still happens, just between rushes."""
         if command.command_type not in DeviceCommand.BACKGROUND_TYPES:
             return False
         if timezone.localtime().hour < BACKGROUND_QUIET_HOURS_END:
             return False
-        if device_purpose == "meal_ticket":
-            return True
         target_ids = command.payload.get("target_device_ids") or []
-        return bool(target_ids) and BiometricDevice.objects.filter(pk__in=target_ids, purpose="meal_ticket").exists()
+        involves_meal = device_purpose == "meal_ticket" or (
+            bool(target_ids) and BiometricDevice.objects.filter(pk__in=target_ids, purpose="meal_ticket").exists()
+        )
+        if not involves_meal:
+            return False
+        from meals.models import MealEvent
+
+        latest = MealEvent.objects.values_list("timestamp", flat=True).first()
+        return latest is not None and timezone.now() - latest < MEAL_IDLE_BEFORE_BACKGROUND
 
     @staticmethod
     def _next_command_to_send(serial_number):

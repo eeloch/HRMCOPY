@@ -308,17 +308,36 @@ class NextCommandPriorityTests(TestCase):
         switch = self.queue(self.meal, "set_user_enabled", {"enrollid": 2, "enabled": False})
         self.assertEqual(self.next_command("MEAL1")[0], switch.pk)
 
-    def test_a_clone_is_held_on_a_meal_terminal_during_the_day(self):
+    def scan_meal_minutes_ago(self, minutes):
+        from datetime import timedelta
+
+        from employees.models import Employee
+        from meals.models import MealDevice, MealEvent
+
+        employee = Employee.objects.create(employee_id="MP-1", first_name="M", last_name="P")
+        device = MealDevice.objects.create(name="Meal", serial_number="MEAL1", active=True)
+        MealEvent.objects.create(employee=employee, device=device, timestamp=timezone.now() - timedelta(minutes=minutes), external_event_id="e1", source_system="t")
+
+    def test_a_clone_is_held_on_a_meal_terminal_while_meals_are_being_served(self):
+        self.scan_meal_minutes_ago(2)
         self.queue(self.meal, "clone_enrollment", {"employee_id": 1, "enrollid": 1, "target_device_ids": [self.attendance.pk]})
         with self.at_hour(12):
             self.assertIsNone(self.next_command("MEAL1"))
 
-    def test_a_clone_aimed_at_a_meal_terminal_is_held_during_the_day(self):
+    def test_a_clone_aimed_at_a_meal_terminal_is_held_while_meals_are_being_served(self):
+        self.scan_meal_minutes_ago(2)
         self.queue(self.attendance, "clone_enrollment", {"employee_id": 1, "enrollid": 1, "target_device_ids": [self.meal.pk]})
         with self.at_hour(12):
             self.assertIsNone(self.next_command("ATT1"))
 
+    def test_a_clone_runs_on_a_meal_terminal_once_it_has_been_idle(self):
+        self.scan_meal_minutes_ago(30)
+        clone = self.queue(self.meal, "clone_enrollment", {"employee_id": 1, "enrollid": 1, "target_device_ids": [self.attendance.pk]})
+        with self.at_hour(12):
+            self.assertEqual(self.next_command("MEAL1")[0], clone.pk)
+
     def test_held_background_jobs_do_not_block_a_switch_queued_behind_them(self):
+        self.scan_meal_minutes_ago(2)
         self.queue(self.meal, "clone_enrollment", {"employee_id": 1, "enrollid": 1, "target_device_ids": []})
         switch = self.queue(self.meal, "set_user_enabled", {"enrollid": 2, "enabled": False})
         with self.at_hour(12):

@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 
 from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
 from attendance.models import BiometricDevice, DeviceCommand
+from attendance.services.device_sync import queue_missing_clones
 from attendance.serializers import BiometricDeviceSerializer, DeviceCommandSerializer
 from audit.models import AuditSeverity
 from audit.services import AuditService
@@ -323,46 +324,7 @@ class DeviceSyncAllAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        device_by_serial = {device.serial_number: device for device in devices}
-        all_serials = set(device_by_serial)
-
-        identities_by_employee: dict[int, dict[str, BiometricIdentity]] = {}
-        for identity in BiometricIdentity.objects.filter(
-            system=IDENTITY_SYSTEM, source_identifier__in=all_serials, is_active=True, employee__status="active",
-        ).select_related("employee"):
-            identities_by_employee.setdefault(identity.employee_id, {})[identity.source_identifier] = identity
-
-        already_waiting = {
-            command.payload.get("employee_id")
-            for command in DeviceCommand.objects.filter(command_type="clone_enrollment", status__in=("pending", "sent"))
-        }
-
-        queued = []
-        for employee_id, identities_by_serial in identities_by_employee.items():
-            missing_serials = all_serials - identities_by_serial.keys()
-            if not missing_serials or employee_id in already_waiting:
-                continue
-            source_serial, source_identity = next(iter(identities_by_serial.items()))
-            source_device = device_by_serial[source_serial]
-            target_ids = [device_by_serial[serial].id for serial in missing_serials]
-
-            DeviceCommand.objects.create(
-                device=source_device, command_type="clone_enrollment",
-                payload={
-                    "employee_id": employee_id,
-                    "enrollid": int(source_identity.external_user_id),
-                    "name": source_identity.employee.full_name,
-                    "biometric_type": "face",
-                    "target_device_ids": target_ids,
-                },
-                requested_by=request.user if request.user.is_authenticated else None,
-            )
-            queued.append({
-                "employee_id": source_identity.employee.employee_id,
-                "employee_name": source_identity.employee.full_name,
-                "from_device": source_device.name,
-                "to_devices": [device_by_serial[serial].name for serial in missing_serials],
-            })
+        queued = queue_missing_clones(devices, requested_by=request.user if request.user.is_authenticated else None)
 
         detail = f"Queued {len(queued)} sync operation(s). Each device works through its queue one relay at a time, so this runs in the background."
         if not queued:
