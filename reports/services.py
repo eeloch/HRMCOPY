@@ -47,6 +47,77 @@ class PersonEntry:
 
 
 @dataclass
+class ComparisonRow:
+    """One metric, the week before vs. the reported week - the shape both the headline chart and the
+    department/leave-type breakdowns share, so growth% is computed in one place."""
+    label: str
+    previous: float
+    current: float
+
+    @property
+    def growth_pct(self):
+        if self.previous == 0:
+            return 0.0 if self.current == 0 else 100.0
+        return (self.current - self.previous) / self.previous * 100
+
+
+@dataclass
+class _PeriodMetrics:
+    """The subset of a week's numbers needed only for week-over-week comparison - cheaper than the full
+    WeeklyReportData, and computed identically for both the reported week and the one before it."""
+    new_hires: int
+    exits: int
+    leave_submitted: int
+    meal_collections: int
+    attendance_present: int
+    attendance_late: int
+    attendance_absent: int
+    department_present: dict
+    leave_by_type: dict
+
+
+def _attendance_rate(present, late, absent):
+    total = present + late + absent
+    if total == 0:
+        return 0.0
+    return (present + late) / total * 100
+
+
+def _period_metrics(week_start):
+    week_end = week_start + timedelta(days=6)
+    working_end = week_start + timedelta(days=5)
+
+    new_hires = Employee.objects.filter(employment_date__gte=week_start, employment_date__lte=week_end).count()
+    exits = Employee.objects.filter(exit_date__gte=week_start, exit_date__lte=week_end).count()
+
+    week_attendance = DailyAttendance.objects.filter(date__range=(week_start, working_end))
+    department_present = {
+        row["employee__department__name"] or "No department": row["c"]
+        for row in week_attendance.filter(status="present").values("employee__department__name").annotate(c=Count("id"))
+    }
+
+    submitted = LeaveRequest.objects.filter(created_at__date__range=(week_start, week_end))
+    leave_by_type = {
+        row["leave_type__name"]: row["c"]
+        for row in submitted.values("leave_type__name").annotate(c=Count("id"))
+    }
+
+    meal_collections = MealCollection.objects.filter(work_date__range=(week_start, week_end), voided_at__isnull=True).count()
+
+    return _PeriodMetrics(
+        new_hires=new_hires,
+        exits=exits,
+        leave_submitted=submitted.count(),
+        meal_collections=meal_collections,
+        attendance_present=week_attendance.filter(status="present").count(),
+        attendance_late=week_attendance.filter(status="late").count(),
+        attendance_absent=week_attendance.filter(status="absent").count(),
+        department_present=department_present,
+        leave_by_type=leave_by_type,
+    )
+
+
+@dataclass
 class WeeklyReportData:
     week_start: object
     week_end: object
@@ -85,6 +156,16 @@ class WeeklyReportData:
     meal_collections: int = 0
     meal_excess: int = 0
     meal_within_entitlement: int = 0
+
+    # Week-over-week comparison, against the week immediately before this one.
+    previous_week_start: object = None
+    previous_week_end: object = None
+    previous_active_employees: int = 0
+    attendance_rate: float = 0.0
+    previous_attendance_rate: float = 0.0
+    headline_comparison: list = field(default_factory=list)
+    department_comparison: list = field(default_factory=list)
+    leave_type_comparison: list = field(default_factory=list)
 
 
 def build_weekly_report(week_start=None):
@@ -177,5 +258,41 @@ def build_weekly_report(week_start=None):
     data.meal_collections = week_meals.count()
     data.meal_excess = week_meals.filter(status=MealCollectionStatus.EXCESS).count()
     data.meal_within_entitlement = week_meals.filter(status=MealCollectionStatus.WITHIN).count()
+
+    # --- Week-over-week comparison ---
+    data.previous_week_start = week_start - timedelta(days=7)
+    data.previous_week_end = data.previous_week_start + timedelta(days=6)
+    previous = _period_metrics(data.previous_week_start)
+
+    data.attendance_rate = _attendance_rate(data.attendance_present, data.attendance_late, data.attendance_absent)
+    data.previous_attendance_rate = _attendance_rate(previous.attendance_present, previous.attendance_late, previous.attendance_absent)
+    # No historical headcount snapshot exists, so "active as of last week" is approximated from this
+    # week's movements: undo the hires and restore the exits.
+    data.previous_active_employees = max(data.active_employees - len(data.new_hires) + len(data.exits), 0)
+
+    data.headline_comparison = [
+        ComparisonRow("New Hires", previous.new_hires, len(data.new_hires)),
+        ComparisonRow("Leave Requests", previous.leave_submitted, data.leave_submitted),
+        ComparisonRow("Meal Tickets", previous.meal_collections, data.meal_collections),
+        ComparisonRow("Present Records", previous.attendance_present, data.attendance_present),
+        ComparisonRow("Absent Records", previous.attendance_absent, data.attendance_absent),
+    ]
+
+    current_department_present = {
+        row["employee__department__name"] or "No department": row["c"]
+        for row in week_attendance.filter(status="present").values("employee__department__name").annotate(c=Count("id"))
+    }
+    dept_names = set(current_department_present) | set(previous.department_present)
+    data.department_comparison = sorted(
+        (ComparisonRow(name, previous.department_present.get(name, 0), current_department_present.get(name, 0)) for name in dept_names),
+        key=lambda row: row.current, reverse=True,
+    )[:8]
+
+    current_leave_by_type = {row.name: row.count for row in data.leave_by_type}
+    leave_type_names = set(current_leave_by_type) | set(previous.leave_by_type)
+    data.leave_type_comparison = sorted(
+        (ComparisonRow(name, previous.leave_by_type.get(name, 0), current_leave_by_type.get(name, 0)) for name in leave_type_names),
+        key=lambda row: row.current, reverse=True,
+    )
 
     return data

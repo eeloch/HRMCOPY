@@ -70,6 +70,16 @@ class WeeklyReportSummaryAPIView(APIView):
                 "within_entitlement": data.meal_within_entitlement,
                 "excess": data.meal_excess,
             },
+            "comparison": {
+                "previous_week_start": data.previous_week_start,
+                "previous_week_end": data.previous_week_end,
+                "attendance_rate": round(data.attendance_rate, 1),
+                "previous_attendance_rate": round(data.previous_attendance_rate, 1),
+                "headline": [
+                    {"label": r.label, "previous": r.previous, "current": r.current, "growth_pct": round(r.growth_pct, 1)}
+                    for r in data.headline_comparison
+                ],
+            },
         })
 
 
