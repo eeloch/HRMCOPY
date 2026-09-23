@@ -37,6 +37,8 @@ class DashboardService:
             "department_readiness": DashboardService.get_department_readiness(today),
             "workforce_action_center": DashboardService.get_absent_employees(today),
             "not_yet_in_by_department": DashboardService.get_not_yet_in_by_department(today),
+            "not_yet_in_employees": DashboardService.get_not_yet_in_employees(today),
+            "late_employees": DashboardService.get_late_employees(today),
             "recent_events": DashboardService.get_recent_events(),
             "device_status": DashboardService.get_device_status(),
             "hostel_absentees": DashboardService.get_hostel_absentees(today),
@@ -109,6 +111,63 @@ class DashboardService:
             else:
                 row["not_yet_in"] += 1
         return sorted(rows.values(), key=lambda r: (-r["not_yet_in"], r["department"]))
+
+    @staticmethod
+    def get_not_yet_in_employees(today):
+        """Who is expected at work right now but hasn't punched in - with room numbers, so a physical
+        search of the hostel is possible."""
+        leave_ids = set(approved_leave_employee_ids(today))
+        expected = DashboardService.expected_ids(today, leave_ids)
+        in_ids = set(
+            DashboardService.live_records(today)
+            .filter(status__in=["present", "late", "incomplete"])
+            .values_list("employee_id", flat=True)
+        )
+        missing_ids = expected - in_ids
+        employees = (
+            Employee.objects.filter(id__in=missing_ids)
+            .select_related("department")
+            .order_by("department__name", "hostel_room_number", "first_name")
+        )
+        return [
+            {
+                "employee_id": employee.id,
+                "employee_number": employee.employee_id,
+                "employee_name": employee.full_name,
+                "department": employee.department.name if employee.department else None,
+                "hostel": employee.lives_in_company_hostel,
+                "room": employee.hostel_room_number,
+            }
+            for employee in employees
+        ]
+
+    @staticmethod
+    def get_late_employees(today):
+        """Everyone counted in the 'Late' summary card, one row each - for the on-page table, not a report."""
+        conflict_employee_ids = set(
+            AttendanceException.objects.filter(
+                attendance__date=today, exception_type="leave_punch_conflict"
+            ).values_list("attendance__employee_id", flat=True)
+        )
+        attendance = (
+            DashboardService.live_records(today)
+            .select_related("employee", "employee__department", "shift")
+            .filter(status="late")
+            .exclude(employee_id__in=conflict_employee_ids)
+            .order_by("employee__first_name")
+        )
+        return [
+            {
+                "employee_id": record.employee.id,
+                "employee_number": record.employee.employee_id,
+                "employee_name": record.employee.full_name,
+                "department": record.employee.department.name if record.employee.department else None,
+                "shift": record.shift.name if record.shift else None,
+                "actual_clock_in": record.actual_clock_in,
+                "late_minutes": record.late_minutes,
+            }
+            for record in attendance
+        ]
 
     @staticmethod
     def expected_now(today, attendance, leave_employee_ids):
