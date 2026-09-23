@@ -333,6 +333,6 @@ class DashboardService:
     @staticmethod
     def get_device_status():
         return [
-            {"name": d.name, "purpose": d.purpose, "online": d.is_online, "last_sync_at": d.last_sync_at}
+            {"name": d.name, "purpose": d.purpose, "online": d.is_reachable, "last_sync_at": d.last_sync_at}
             for d in BiometricDevice.objects.order_by("name")
         ]

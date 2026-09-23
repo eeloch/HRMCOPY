@@ -315,8 +315,8 @@ class DeviceSyncAllAPIView(APIView):
 
     def post(self, request):
         all_devices = list(BiometricDevice.objects.all())
-        devices = [device for device in all_devices if device.is_online]
-        offline_names = [device.name for device in all_devices if not device.is_online]
+        devices = [device for device in all_devices if device.is_reachable]
+        offline_names = [device.name for device in all_devices if not device.is_reachable]
         if len(devices) < 2:
             return Response(
                 {"detail": "Need at least two devices online to sync." + (f" Offline right now: {', '.join(offline_names)}." if offline_names else "")},

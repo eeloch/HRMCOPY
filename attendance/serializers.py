@@ -6,13 +6,15 @@ from .models import AttendanceEvent, AttendanceException, BiometricDevice, Daily
 
 
 class BiometricDeviceSerializer(serializers.ModelSerializer):
+    is_online = serializers.BooleanField(source="is_reachable", read_only=True)
+
     class Meta:
         model = BiometricDevice
         fields = [
             "id", "name", "serial_number", "model", "location", "device_type",
             "purpose", "ip_address", "is_online", "last_sync_at",
         ]
-        read_only_fields = ["ip_address", "is_online", "last_sync_at"]
+        read_only_fields = ["ip_address", "last_sync_at"]
 
 
 class DeviceCommandSerializer(serializers.ModelSerializer):

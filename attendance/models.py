@@ -210,11 +210,22 @@ class BiometricDevice(models.Model):
         blank=True,
     )
 
+    # The terminals close and reopen their connection about every 30s on their own, so the connected flag
+    # drops for a few seconds at a time; treating that as "offline" made every device look like it kept
+    # going down. A device is only reported offline once it has been unseen for longer than this.
+    ONLINE_GRACE = timedelta(seconds=120)
+
     class Meta:
         permissions = [("manage_devices", "Can register and manage biometric devices")]
 
     def __str__(self):
         return f"{self.name} - {self.serial_number}"
+
+    @property
+    def is_reachable(self):
+        if self.is_online:
+            return True
+        return self.last_sync_at is not None and timezone.now() - self.last_sync_at <= self.ONLINE_GRACE
 
     def free_enrollid(self, preferred=None):
         """The user id to enroll someone under on this terminal.
