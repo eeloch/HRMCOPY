@@ -130,6 +130,11 @@ export default function ActivityPage() {
             </AppCard>
 
             <Section title="Activity Timeline" subtitle={`${count} event${count === 1 ? "" : "s"} found.`}>
+              {!loading && events.length > 0 && (
+                <div className="border-b border-slate-200">
+                  <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+                </div>
+              )}
               {loading ? <TimelineSkeleton /> : events.length ? (
                 <div className="divide-y divide-slate-100">
                   {events.map((event) => {
@@ -178,7 +183,9 @@ export default function ActivityPage() {
                   })}
                 </div>
               ) : <p className="p-10 text-center text-slate-500">No activity found.</p>}
-              <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+              <div className="border-t border-slate-200">
+                <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+              </div>
             </Section>
           </>
         )}
@@ -187,7 +194,46 @@ export default function ActivityPage() {
   );
 }
 
-function Pagination({ page, totalPages, onChange }: { page: number; totalPages: number; onChange: (page: number) => void }) { return <div className="flex items-center justify-between border-t border-slate-200 px-5 py-4"><p className="text-sm text-slate-500">Page {page} of {totalPages}</p><div className="flex gap-2"><button disabled={page === 1} onClick={() => onChange(page - 1)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">Previous</button><button disabled={page >= totalPages} onClick={() => onChange(page + 1)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">Next</button></div></div>; }
+// First/last page plus a small window around the current one, with "…" for the gaps - so jumping
+// from page 1 to page 20 is one click instead of nineteen.
+function pageNumbers(current: number, total: number): (number | "...")[] {
+  const delta = 1;
+  const rangeStart = Math.max(2, current - delta);
+  const rangeEnd = Math.min(total - 1, current + delta);
+  const pages: (number | "...")[] = [1];
+  if (rangeStart > 2) pages.push("...");
+  for (let value = rangeStart; value <= rangeEnd; value += 1) pages.push(value);
+  if (rangeEnd < total - 1) pages.push("...");
+  if (total > 1) pages.push(total);
+  return pages;
+}
+
+function Pagination({ page, totalPages, onChange }: { page: number; totalPages: number; onChange: (page: number) => void }) {
+  if (totalPages <= 1) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+      <p className="text-sm text-slate-500">Page {page} of {totalPages}</p>
+      <div className="flex flex-wrap items-center gap-1">
+        <button disabled={page === 1} onClick={() => onChange(page - 1)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">Previous</button>
+        {pageNumbers(page, totalPages).map((item, index) =>
+          item === "..." ? (
+            <span key={`ellipsis-${index}`} className="px-2 text-sm text-slate-400">…</span>
+          ) : (
+            <button
+              key={item}
+              onClick={() => onChange(item)}
+              aria-current={item === page ? "page" : undefined}
+              className={`min-w-[2.25rem] rounded-lg px-3 py-2 text-sm font-medium ${item === page ? "bg-blue-600 text-white" : "border border-slate-300 text-slate-700 hover:bg-slate-50"}`}
+            >
+              {item}
+            </button>
+          )
+        )}
+        <button disabled={page >= totalPages} onClick={() => onChange(page + 1)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">Next</button>
+      </div>
+    </div>
+  );
+}
 function TimelineSkeleton() { return <div className="space-y-4 p-5">{[1, 2, 3, 4].map((item) => <div key={item} className="h-20 animate-pulse rounded-xl bg-slate-100" />)}</div>; }
 function ErrorPanel({ message, retry }: { message: string; retry: () => void }) { return <div className="rounded-2xl border border-red-200 bg-red-50 p-6 text-red-700"><p className="font-semibold">Unable to load activity</p><p className="mt-1 text-sm">{message}</p><button onClick={() => void retry()} className="mt-4 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white">Try Again</button></div>; }
 function capitalize(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }
