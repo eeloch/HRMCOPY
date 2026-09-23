@@ -2073,9 +2073,12 @@ class MealGatingTests(TestCase):
         self.assertEqual(self.commands()[-1], (7, True))  # no waiting for the next full check
 
     def test_the_wire_message(self):
+        """The legacy enableuser command (enflag) was replaced 2026-09-23: confirmed on production it
+        only blocks face verification, not card or fingerprint scans for the same enrollid. The newer
+        setuserinfo profile command's `enable` field is documented as governing the user as a whole."""
         from attendance.integrations.aiface_protocol import build_device_command
-        self.assertEqual(build_device_command("SN1", "set_user_enabled", {"enrollid": 7, "enabled": False}), {"cmd": "enableuser", "sn": "SN1", "enrollid": 7, "enflag": 0})
-        self.assertEqual(build_device_command("SN1", "set_user_enabled", {"enrollid": 7, "enabled": True})["enflag"], 1)
+        self.assertEqual(build_device_command("SN1", "set_user_enabled", {"enrollid": 7, "enabled": False}), {"cmd": "setuserinfo", "sn": "SN1", "enrollid": 7, "enable": 0})
+        self.assertEqual(build_device_command("SN1", "set_user_enabled", {"enrollid": 7, "enabled": True})["enable"], 1)
 
 
 class ExtraTicketAuthorizationTests(TestCase):

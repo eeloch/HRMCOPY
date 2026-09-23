@@ -138,10 +138,29 @@ def build_setuserinfo_command(sn: str, enrollid: int, name: str, biometric_type:
 
 
 def build_enableuser_command(sn: str, enrollid: int, enabled: bool) -> dict:
-    """Server -> device: switch one enrolled person on or off. A person who is off is refused at the terminal
-    (no verification, so no printed receipt). The vendor doc's Disable example spells the key "enrolled";
-    both examples use the same `enableuser` command, and `enrollid` is the documented key for Enable."""
+    """Server -> device: switch one enrolled person on or off via the legacy `enableuser` command
+    (protocol v1.7, 2017). The vendor doc's Disable example spells the key "enrolled"; both examples
+    use the same `enableuser` command, and `enrollid` is the documented key for Enable.
+
+    Confirmed on production 2026-09-23: this command is acked as successful but only actually blocks
+    face verification - a card or fingerprint scan for the same enrollid still goes through afterward.
+    No longer used for set_user_enabled; kept only for reference/tests. See
+    build_user_enabled_profile_command for the replacement.
+    """
     return {"cmd": "enableuser", "sn": sn, "enrollid": enrollid, "enflag": 1 if enabled else 0}
+
+
+def build_user_enabled_profile_command(sn: str, enrollid: int, enabled: bool) -> dict:
+    """Server -> device: switch one enrolled person on or off via the newer `setuserinfo` profile
+    command (protocol v2.9+, "AI face recognition device firmware version 5.09 or v2.09 or above" -
+    section 37 of the vendor's websocket+json protocol doc). Its `enable` field is documented as
+    governing the user's access as a whole ("0 User disabled, 1 User enable"), not tied to one
+    verification method the way the legacy `enableuser` command apparently is in practice. Every other
+    field in the documented payload (name, verifymode, department, card, pwd, shift/zone/group ids,
+    access window, backupnum, record) is optional there, as it is throughout this protocol - sending
+    only enrollid and enable leaves the rest of the person's profile untouched.
+    """
+    return {"cmd": "setuserinfo", "sn": sn, "enrollid": enrollid, "enable": 1 if enabled else 0}
 
 
 def build_device_command(sn: str, command_type: str, payload: Mapping[str, Any]) -> dict:
@@ -153,7 +172,7 @@ def build_device_command(sn: str, command_type: str, payload: Mapping[str, Any])
     if command_type == "refresh_enrolled_ids":
         return build_getuserids_command(sn)
     if command_type == "set_user_enabled":
-        return build_enableuser_command(sn, payload["enrollid"], bool(payload["enabled"]))
+        return build_user_enabled_profile_command(sn, payload["enrollid"], bool(payload["enabled"]))
     raise ValueError(f"Unknown command_type: {command_type!r}")
 
 

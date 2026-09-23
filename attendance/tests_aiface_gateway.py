@@ -6,12 +6,14 @@ from attendance.integrations.aiface_protocol import (
     build_adduser_command,
     build_deleteuser_command,
     build_device_command,
+    build_enableuser_command,
     build_getuserids_command,
     build_getuserinfo_command,
     build_reg_ack,
     build_setuserinfo_command,
     build_sendlog_ack,
     build_senduser_ack,
+    build_user_enabled_profile_command,
     stable_record_id,
     translate_sendlog_record,
 )
@@ -205,9 +207,32 @@ class BuildDeviceCommandTests(SimpleTestCase):
 
         self.assertEqual(command["cmd"], "getuserids")
 
+    def test_dispatches_set_user_enabled_to_the_profile_command_not_the_legacy_one(self):
+        """Confirmed on production 2026-09-23: the legacy enableuser command is acked as successful but
+        only actually blocks face verification, not card or fingerprint - see
+        build_user_enabled_profile_command's docstring."""
+        command = build_device_command("LF00000001", "set_user_enabled", {"enrollid": 5, "enabled": True})
+
+        self.assertEqual(command, build_user_enabled_profile_command("LF00000001", 5, True))
+        self.assertNotEqual(command, build_enableuser_command("LF00000001", 5, True))
+
     def test_unknown_command_type_raises(self):
         with self.assertRaises(ValueError):
             build_device_command("LF00000001", "reboot_device", {})
+
+
+class BuildUserEnabledProfileCommandTests(SimpleTestCase):
+    def test_enable(self):
+        self.assertEqual(
+            build_user_enabled_profile_command("LF00000001", 7, True),
+            {"cmd": "setuserinfo", "sn": "LF00000001", "enrollid": 7, "enable": 1},
+        )
+
+    def test_disable(self):
+        self.assertEqual(
+            build_user_enabled_profile_command("LF00000001", 7, False),
+            {"cmd": "setuserinfo", "sn": "LF00000001", "enrollid": 7, "enable": 0},
+        )
 
 
 class SendLogAckAccessTests(SimpleTestCase):
