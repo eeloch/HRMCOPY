@@ -21,12 +21,18 @@ type AuditEvent = {
   severity: string;
   title: string;
   description: string;
+  metadata: Record<string, unknown> | null;
   created_at: string;
 };
 type ActivityResponse = { count: number; page: number; total_pages: number; results: AuditEvent[] };
 
 const modules = ["employees", "leave", "attendance", "documents", "payroll"];
 const severities = ["info", "success", "warning", "error"];
+
+function todayIso() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
 
 // Where clicking this event's card should go, when it points at something with a decision to make
 // (an attendance exception awaiting review) or a record worth jumping to (the employee).
@@ -38,6 +44,18 @@ function eventLink(event: AuditEvent): string | null {
     return `/employees/${event.employee_id}`;
   }
   return null;
+}
+
+// A biometric terminal catching up on a backlog can log an attendance fact today that actually
+// happened on an earlier date - without this, a late-arrival or clock-in card is indistinguishable
+// from something that just happened, which is exactly what read as "confusing old information" here.
+function backdatedNotice(event: AuditEvent): string | null {
+  const attendanceDate = event.metadata?.attendance_date;
+  if (typeof attendanceDate !== "string") return null;
+  const loggedDate = event.created_at.slice(0, 10);
+  if (attendanceDate === loggedDate) return null;
+  const formatted = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" }).format(new Date(`${attendanceDate}T00:00:00`));
+  return `Actually happened on ${formatted} - just arrived via a delayed device sync`;
 }
 
 export default function ActivityPage() {
@@ -52,8 +70,10 @@ export default function ActivityPage() {
   const [employee, setEmployee] = useState("");
   const [module, setModule] = useState("");
   const [severity, setSeverity] = useState("");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
+  // Defaults to today only: this system just went live, and unfiltered history mixes in pre-launch
+  // and backlog data that would otherwise look like it just happened. "Clear" still opens it up.
+  const [dateFrom, setDateFrom] = useState(todayIso);
+  const [dateTo, setDateTo] = useState(todayIso);
 
   useEffect(() => {
     if (!getAccessToken()) { router.push("/login"); return; }
@@ -114,6 +134,7 @@ export default function ActivityPage() {
                 <div className="divide-y divide-slate-100">
                   {events.map((event) => {
                     const link = eventLink(event);
+                    const notice = backdatedNotice(event);
                     return (
                       <article
                         key={event.id}
@@ -126,6 +147,11 @@ export default function ActivityPage() {
                             <div>
                               <p className="font-semibold text-slate-900">{event.title}</p>
                               <p className="mt-1 text-sm text-slate-600">{event.description || event.event_type}</p>
+                              {notice && (
+                                <p className="mt-1 inline-flex items-center rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
+                                  {notice}
+                                </p>
+                              )}
                             </div>
                             <div className="flex shrink-0 items-center gap-2">
                               <StatusBadge status={event.severity} />
