@@ -29,6 +29,19 @@ from .serializers import (
 from .services import MealService
 from payroll.models import PayrollPeriod
 
+CARD_VERIFICATION_MODE = 3  # confirmed 2026-09-23: matches meals/bridge.py's CARD_VERIFICATION_MODE
+
+
+def _is_card_verified(employee_id, work_date, sequence_number):
+    """Whether the collection that produced this pending exception was a card scan - see
+    meals/bridge.py's _notify_card_gating_bypass for why that matters here."""
+    collection = (
+        MealCollection.objects.filter(employee_id=employee_id, work_date=work_date, sequence_number=sequence_number)
+        .select_related("event")
+        .first()
+    )
+    return bool(collection) and collection.event.raw_payload.get("mode") == CARD_VERIFICATION_MODE
+
 
 class CanViewMealOperations(BasePermission):
     def has_permission(self, request, view):
@@ -379,6 +392,10 @@ class MealOperationsAPIView(APIView):
                         "reviewer": x.reviewer_id,
                         "reviewed_at": x.reviewed_at,
                         "comment": x.comment,
+                        # Card verification does not respect the terminal's enable/disable state the way
+                        # face verification does (confirmed 2026-09-23) - flagged so a reviewer isn't left
+                        # guessing why gating didn't stop this one.
+                        "card_verified": _is_card_verified(x.employee_id, x.work_date, x.collected_quantity),
                     }
                     for x in exceptions
                 ],

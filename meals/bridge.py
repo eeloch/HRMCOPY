@@ -23,6 +23,46 @@ from .services import MealService
 
 FORBIDDEN_BIOMETRIC_FIELDS = {"image", "photo", "face", "fingerprint", "template", "signature", "base64"}
 
+CARD_VERIFICATION_MODE = 3  # confirmed 2026-09-23: a few staff use card verification at the meal terminal
+
+
+def _notify_card_gating_bypass(collections):
+    """Card-verified scans do not respect the terminal's enable/disable state, unlike face scans - so
+    someone already past their entitlement can keep collecting by card indefinitely; gating.reconcile()
+    still (correctly) tells the terminal to disable them, the terminal still acks it, but a card scan
+    goes through anyway. One notification per employee per day, not one per scan, since a bypass slips
+    through repeatedly before anyone notices."""
+    from django.contrib.auth import get_user_model
+    from notifications.models import Notification, NotificationSeverity
+    from notifications.services import NotificationService
+
+    today = timezone.localdate()
+    for collection in collections:
+        if collection.status == MealCollectionStatus.WITHIN:
+            continue
+        if collection.event.raw_payload.get("mode") != CARD_VERIFICATION_MODE:
+            continue
+        employee = collection.employee
+        already_notified_today = Notification.objects.filter(
+            event_type="meals.card_gating_bypass", employee=employee, created_at__date=today,
+        ).exists()
+        if already_notified_today:
+            continue
+        for user in get_user_model().objects.filter(is_superuser=True):
+            NotificationService.create(
+                recipient=user,
+                event_type="meals.card_gating_bypass",
+                title="Card scan bypassed meal gating",
+                message=(
+                    f"{employee.full_name} ({employee.employee_id}) collected an extra meal ticket by card "
+                    "after their entitlement was used up. The terminal does not block card verification the "
+                    "way it blocks face scans, so this can repeat - physical follow-up may be needed."
+                ),
+                severity=NotificationSeverity.WARNING,
+                employee=employee,
+                related_url="/meals",
+            )
+
 
 def terminal_reply(result):
     """What the meal terminal should show and do for one scan: allow (so its printer issues the
@@ -90,9 +130,11 @@ class MealVendorGatewayPunchBridgeAPIView(APIView):
             from .gating import reconcile
 
             scanned = {r.collection_id for r in summary.results if getattr(r, "collection_id", None)}
-            people = set(MealCollection.objects.filter(pk__in=scanned).values_list("employee_id", flat=True)) if scanned else set()
+            scanned_collections = list(MealCollection.objects.filter(pk__in=scanned).select_related("employee", "event")) if scanned else []
+            people = {c.employee_id for c in scanned_collections}
             if people:
                 reconcile(employees=people)  # e.g. switch someone off at the terminal the moment they have had their last ticket
+            _notify_card_gating_bypass(scanned_collections)
         except Exception:  # a problem here must never lose a scan
             pass
         invalid = [(gateway_id, record) for gateway_id, record in normalized if "invalid" in record]
