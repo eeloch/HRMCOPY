@@ -414,3 +414,53 @@ class SlotListingCompletenessTests(SimpleTestCase):
     def test_the_first_ever_listing_is_accepted(self):
         finished = self.run_listing([self.page(100), None], previous=0)
         self.assertEqual(finished[0][0], "acked")
+
+
+class SlotTargetIdTests(TestCase):
+    """A relay must never invent a new terminal id for someone (2026-09-24: ~130 people duplicated on one terminal)."""
+
+    def setUp(self):
+        from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
+        from attendance.management.commands.run_aiface_gateway import Command
+        from attendance.models import BiometricDevice
+        from employees.models import BiometricIdentity, Employee
+
+        self.system, self.Identity, self.Command = IDENTITY_SYSTEM, BiometricIdentity, Command
+        self.device = BiometricDevice.objects.create(name="T", serial_number="T1", location="x", device_type="factory", purpose="attendance")
+        self.ada = Employee.objects.create(employee_id="000040", first_name="Ada", last_name="A", status="active")
+        self.bob = Employee.objects.create(employee_id="000041", first_name="Bob", last_name="B", status="active")
+
+    def link(self, employee, enrollid):
+        return self.Identity.objects.create(employee=employee, system=self.system, source_identifier="T1", external_user_id=str(enrollid))
+
+    def test_a_person_keeps_the_id_they_already_have_on_the_terminal(self):
+        self.link(self.ada, 40)
+        self.assertEqual(self.Command._slot_target_enrollid(self.ada.pk, self.device, 999), 40)
+
+    def test_the_source_id_is_used_when_nobody_holds_it_there(self):
+        self.assertEqual(self.Command._slot_target_enrollid(self.ada.pk, self.device, 40), 40)
+
+    def test_an_id_held_by_someone_else_is_refused_not_replaced_by_a_new_number(self):
+        self.link(self.bob, 40)
+        self.assertIsNone(self.Command._slot_target_enrollid(self.ada.pk, self.device, 40))
+
+    def test_linking_after_a_relay_never_overwrites_an_existing_identity(self):
+        self.link(self.ada, 40)
+        self.Command._link_identity_if_missing(self.ada.pk, self.device, 1500)
+        self.assertEqual(self.Identity.objects.get(employee=self.ada, source_identifier="T1").external_user_id, "40")
+
+    def test_an_id_on_the_terminal_that_is_the_persons_own_staff_number_is_theirs(self):
+        from django.utils import timezone
+
+        from attendance.models import DeviceCommand
+
+        DeviceCommand.objects.create(device=self.device, command_type="list_user_slots", status="acked", completed_at=timezone.now(), result={"slots": [[40, 50]]})
+        self.assertEqual(self.Command._slot_target_enrollid(self.ada.pk, self.device, 40), 40)
+
+    def test_an_unlinked_id_on_the_terminal_that_is_not_the_persons_own_number_is_left_alone(self):
+        from django.utils import timezone
+
+        from attendance.models import DeviceCommand
+
+        DeviceCommand.objects.create(device=self.device, command_type="list_user_slots", status="acked", completed_at=timezone.now(), result={"slots": [[77, 50]]})
+        self.assertIsNone(self.Command._slot_target_enrollid(self.ada.pk, self.device, 77))

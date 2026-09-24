@@ -1018,9 +1018,11 @@ class CloneEnrollmentRelayTests(TransactionTestCase):
 
         _, target_ws = self.run_relay({"ret": "getuserinfo", "result": True, "record": TEMPLATE}, {"ret": "setuserinfo", "result": True})
 
-        self.assertEqual(target_ws.sent[0]["enrollid"], 1134)
+        # Refused, not moved to a brand-new number: the old fallback duplicated people on the terminal.
+        self.assertEqual(target_ws.sent, [])
+        self.assertEqual(self.job.result["failed"][0]["reason"], "id in use by someone else")
         self.assertEqual(BiometricIdentity.objects.get(source_identifier="AYTK14145402", external_user_id="1133").employee, other)
-        self.assertEqual(BiometricIdentity.objects.get(employee=self.employee, source_identifier="AYTK14145402").external_user_id, "1134")
+        self.assertFalse(BiometricIdentity.objects.filter(employee=self.employee, source_identifier="AYTK14145402").exists())
 
 
 class InactiveStaffTests(TestCase):

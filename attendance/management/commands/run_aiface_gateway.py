@@ -415,7 +415,10 @@ class Command(BaseCommand):
                 if target_ws is None:
                     skipped_offline.append(target.name)
                     continue
-                target_enrollid = await self._run_db(self._enrollid_for_target, target, enrollid)
+                target_enrollid = await self._run_db(self._slot_target_enrollid, employee_id, target, enrollid)
+                if target_enrollid is None:
+                    failed.append({"backupnum": backupnum, "target": target.name, "target_device_id": target.pk, "reason": "id in use by someone else"})
+                    continue
                 try:
                     push_reply = await self._send_and_wait(target_ws, target.serial_number, build_setuserinfo_slot_command(target.serial_number, target_enrollid, name, backupnum, record), CLONE_REPLY_TIMEOUT_SECONDS)
                 except asyncio.TimeoutError:
@@ -430,7 +433,7 @@ class Command(BaseCommand):
                     continue
                 pushed += 1
                 if target.pk not in linked:
-                    await self._run_db(self._link_cloned_identity, employee_id, target, target_enrollid)
+                    await self._run_db(self._link_identity_if_missing, employee_id, target, target_enrollid)
                     linked.add(target.pk)
             record = None  # drop the only reference to the credential as soon as it has been relayed
         self.stdout.write(f"[{sn}] slot_clone: pushed={pushed} failed={len(failed)} offline={len(skipped_offline)}")
@@ -528,7 +531,10 @@ class Command(BaseCommand):
             if await self._run_db(self._device_is_busy, target):
                 skipped_busy.append({"device_id": target.id, "device_name": target.name})
                 continue
-            target_enrollid = await self._run_db(self._enrollid_for_target, target, enrollid)
+            target_enrollid = await self._run_db(self._slot_target_enrollid, employee_id, target, enrollid)
+            if target_enrollid is None:
+                failed.append({"device_id": target.id, "device_name": target.name, "reason": "id in use by someone else"})
+                continue
             push_message = build_setuserinfo_command(target.serial_number, target_enrollid, employee_name, biometric_type, record)
             try:
                 push_reply = await self._send_and_wait(target_ws, target.serial_number, push_message, CLONE_REPLY_TIMEOUT_SECONDS)
@@ -539,7 +545,7 @@ class Command(BaseCommand):
             if not push_reply.get("result"):
                 failed.append({"device_id": target.id, "device_name": target.name, "reason": "device rejected the template"})
                 continue
-            await self._run_db(self._link_cloned_identity, employee_id, target, target_enrollid)
+            await self._run_db(self._link_identity_if_missing, employee_id, target, target_enrollid)
             cloned_to.append({"device_id": target.id, "device_name": target.name})
 
         record = None  # drop the only reference to the template as soon as we're done relaying it
@@ -698,6 +704,39 @@ class Command(BaseCommand):
     @staticmethod
     def _finish_clone_command(command_id, status, result):
         DeviceCommand.objects.filter(pk=command_id).update(status=status, result=result, completed_at=timezone.now())
+
+    @staticmethod
+    def _slot_target_enrollid(employee_id, device, preferred):
+        """The id a person already has on `device`, else `preferred` (the staff-number convention) when nobody else
+        holds it there, else None. Never a brand-new number: the old fallback ("one past the highest id") created a
+        second copy of anyone who was already on the terminal under their own id, re-pointed their HRM identity at
+        the copy, and by 2026-09-24 had left ~130 people duplicated on one meal terminal - the switch-off then only
+        reached the copy."""
+        from employees.models import BiometricIdentity
+
+        mine = BiometricIdentity.objects.filter(employee_id=employee_id, system=IDENTITY_SYSTEM, source_identifier=device.serial_number, is_active=True).first()
+        if mine is not None and mine.external_user_id.isdigit():
+            return int(mine.external_user_id)
+        if BiometricIdentity.objects.filter(system=IDENTITY_SYSTEM, source_identifier=device.serial_number, external_user_id=str(preferred), is_active=True).exclude(employee_id=employee_id).exists():
+            return None
+        from attendance.services.device_sync import latest_slots
+        from employees.models import Employee
+
+        own_number = Employee.objects.filter(pk=employee_id).values_list("employee_id", flat=True).first() or ""
+        if own_number.isdigit() and int(own_number) == preferred:
+            return preferred  # terminals were enrolled by staff number, so this id on the terminal is this person
+        if preferred in (latest_slots(device) or {}):
+            return None  # somebody we do not know holds it: never overwrite them
+        return preferred
+
+    @staticmethod
+    def _link_identity_if_missing(employee_id, device, enrollid):
+        from employees.models import BiometricIdentity
+
+        BiometricIdentity.objects.get_or_create(
+            employee_id=employee_id, system=IDENTITY_SYSTEM, source_identifier=device.serial_number,
+            defaults={"external_user_id": str(enrollid), "is_active": True},
+        )
 
     @staticmethod
     def _link_cloned_identity(employee_id, device, enrollid):
