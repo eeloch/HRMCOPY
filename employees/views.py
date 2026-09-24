@@ -652,7 +652,7 @@ class EmployeeImportAPIView(APIView):
         for item in rows_to_import:
             existing_id = item["data"].get("existing_employee_id")
             row_data = item["data"]
-            if not can_set_salary:
+            if not can_set_salary or row_data.get("basic_salary") is None:
                 # The importer always fills basic_salary (defaulting to 0
                 # when the sheet has no value), so treating its mere presence
                 # as "trying to set a salary" would fail every row for an

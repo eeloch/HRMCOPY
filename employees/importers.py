@@ -933,12 +933,18 @@ def validate_employee_rows(
         # Therefore a blank/broken Amount should NOT cause the
         # employee row itself to disappear.
         #
+        # A blank or broken cell means "the sheet says nothing about pay",
+        # so basic_salary stays None and the import leaves the stored salary
+        # alone (2026-09-23: an employee re-import with an empty Amount column
+        # overwrote 471 salaries with 0).
         try:
-            basic_salary = parse_salary(
-                row.get("basic_salary")
+            basic_salary = (
+                parse_salary(row.get("basic_salary"))
+                if normalize_value(row.get("basic_salary"))
+                else None
             )
         except ValueError as exc:
-            basic_salary = Decimal("0")
+            basic_salary = None
             warnings.append(
                 str(exc)
             )
@@ -1083,8 +1089,10 @@ def validate_employee_rows(
                 if exit_date
                 else None
             ),
-            "basic_salary": str(
-                basic_salary
+            "basic_salary": (
+                str(basic_salary)
+                if basic_salary is not None
+                else None
             ),
             "lives_in_company_hostel": lives_in_hostel,
             "hostel_room_number": hostel_room,

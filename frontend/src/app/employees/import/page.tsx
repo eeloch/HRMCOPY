@@ -40,7 +40,7 @@ type ImportRow = {
     employment_date: string | null;
     exit_date?: string | null;
     employment_type?: string;
-    basic_salary: string;
+    basic_salary: string | null;
 
     lives_in_company_hostel: boolean;
     hostel_room_number: string;

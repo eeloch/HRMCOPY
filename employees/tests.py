@@ -685,6 +685,35 @@ class SalaryVisibilityBulkImportTests(APITestCase):
         self.existing.refresh_from_db()
         self.assertEqual(str(self.existing.basic_salary), "150000.00")
 
+    def test_privileged_import_with_no_salary_column_keeps_existing_salary(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position\n"
+                "BULK-SAL-001,Existing,Renamed,Operations,Operator\n"
+            ),
+            "update_existing": "true",
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.existing.refresh_from_db()
+        self.assertEqual(self.existing.last_name, "Renamed")
+        self.assertEqual(str(self.existing.basic_salary), "150000.00")
+
+    def test_privileged_import_with_blank_salary_cell_keeps_existing_salary(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position,basic_salary\n"
+                "BULK-SAL-001,Existing,Person,Operations,Operator,\n"
+            ),
+            "update_existing": "true",
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.existing.refresh_from_db()
+        self.assertEqual(str(self.existing.basic_salary), "150000.00")
+
     def test_privileged_importer_sets_salary_from_the_sheet(self):
         self.client.force_authenticate(self.privileged)
         response = self.client.post("/api/employees/import/", {
