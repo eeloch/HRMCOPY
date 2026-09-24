@@ -54,6 +54,13 @@ COMMAND_POLL_INTERVAL_SECONDS = 2
 # off; instead a connection is dropped only when the terminal has sent nothing at all for DEVICE_SILENCE_LIMIT.
 DEVICE_SILENCE_LIMIT_SECONDS = 180
 LISTING_MIN_FRACTION_OF_PREVIOUS = 0.8
+# 2026-09-24: one meal terminal's command poller sat idle for ~40 minutes on a perfectly good connection, so switch-offs
+# queued during a meal service were not sent until the terminal happened to reconnect, and people collected extra
+# tickets in the meantime. A poller that has neither looped for POLLER_IDLE_STALL_SECONDS nor finished a job within
+# POLLER_JOB_STALL_SECONDS is treated as stuck: its stack is logged and the connection is closed so the terminal
+# reconnects with a fresh poller.
+POLLER_IDLE_STALL_SECONDS = 60
+POLLER_JOB_STALL_SECONDS = 480
 DEVICE_TOUCH_EVERY_SECONDS = 20
 ATTENDANCE_REFRESH_SECONDS = 300  # turn punches into attendance records this often (today and yesterday)
 ROSTER_EXTEND_CHECK_SECONDS = 3600  # once an hour we check whether today's roster extension has run
@@ -179,8 +186,9 @@ class Command(BaseCommand):
                     await ws.send(json.dumps(build_reg_ack(datetime.now(), minimal=minimal)))
                     activity["touched"] = activity["seen"]
                     if poller_task is None:
-                        poller_task = asyncio.create_task(self._poll_commands(ws, sn))
-                        watchdog_task = asyncio.create_task(self._drop_if_silent(ws, activity))
+                        activity["beat"], activity["busy_since"] = loop.time(), None
+                        poller_task = asyncio.create_task(self._poll_commands(ws, sn, activity))
+                        watchdog_task = asyncio.create_task(self._drop_if_silent(ws, activity, poller_task, sn))
                 elif cmd == "sendlog":
                     await self._handle_sendlog(ws, message, bridge_url, meal_bridge_url, secret)
                 elif cmd == "senduser":
@@ -217,20 +225,36 @@ class Command(BaseCommand):
                 await self._run_db(self._mark_device_offline, sn)
 
     @staticmethod
-    async def _drop_if_silent(ws, activity):
-        """Hang up on a terminal that has sent nothing for DEVICE_SILENCE_LIMIT_SECONDS (a half-dead connection);
-        it reconnects on its own. With server pings off this is the only dead-connection check."""
+    def _mark_busy(activity):
+        """A long job (a relay, a listing, maintenance) is about to run: the watchdog allows it POLLER_JOB_STALL_SECONDS."""
+        if activity is not None:
+            activity["busy_since"] = asyncio.get_running_loop().time()
+
+    async def _drop_if_silent(self, ws, activity, poller_task=None, sn=None):
+        """Hang up on a terminal that has sent nothing for DEVICE_SILENCE_LIMIT_SECONDS (a half-dead connection), or
+        whose command poller has stopped making progress; the terminal reconnects on its own. With server pings off
+        this is the only dead-connection check."""
         loop = asyncio.get_running_loop()
         try:
             while True:
                 await asyncio.sleep(15)
-                if loop.time() - activity["seen"] > DEVICE_SILENCE_LIMIT_SECONDS:
+                now = loop.time()
+                if now - activity["seen"] > DEVICE_SILENCE_LIMIT_SECONDS:
                     await ws.close()
                     return
+                beat, busy_since = activity.get("beat"), activity.get("busy_since")
+                if poller_task is not None and beat is not None:
+                    stuck = (poller_task.done() or (busy_since is None and now - beat > POLLER_IDLE_STALL_SECONDS) or (busy_since is not None and now - busy_since > POLLER_JOB_STALL_SECONDS))
+                    if stuck:
+                        self.stdout.write(f"[{sn}] command poller stalled (done={poller_task.done()}, idle {now - beat:.0f}s, busy {(now - busy_since) if busy_since else 0:.0f}s): closing the connection so the terminal reconnects")
+                        for frame in poller_task.get_stack(limit=4):
+                            self.stdout.write(f"[{sn}]   stuck at {frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_lineno} in {frame.f_code.co_name}")
+                        await ws.close()
+                        return
         except asyncio.CancelledError:
             pass
 
-    async def _poll_commands(self, ws, sn):
+    async def _poll_commands(self, ws, sn, activity=None):
         """Deliver queued admin commands (enroll/delete/refresh) one at a time.
 
         The AiFace protocol requires the server send a device's commands
@@ -243,18 +267,24 @@ class Command(BaseCommand):
             while True:
                 await asyncio.sleep(COMMAND_POLL_INTERVAL_SECONDS)
                 now = asyncio.get_running_loop().time()
+                if activity is not None:
+                    activity["beat"], activity["busy_since"] = now, None  # looping normally; a long job below marks itself busy
                 if now - self._last_gating_check >= GATING_FULL_CHECK_SECONDS:
+                    self._mark_busy(activity)
                     # Safety net for everyone covered by MEAL_GATING_EMPLOYEE_IDS (day rollover, roster changes, a
                     # gateway that was down). Claim the slot first so the other terminals' loops skip it.
                     self._last_gating_check = now
                     await self._run_db(self._reconcile_meal_gating)
                 if now - self._last_attendance_refresh >= ATTENDANCE_REFRESH_SECONDS:
+                    self._mark_busy(activity)
                     self._last_attendance_refresh = now
                     await self._run_db(self._refresh_attendance)
                 if now - self._last_roster_check >= ROSTER_EXTEND_CHECK_SECONDS:
+                    self._mark_busy(activity)
                     self._last_roster_check = now
                     await self._run_db(self._extend_rosters_daily)
                 if now - self._last_auto_sync >= AUTO_SYNC_SECONDS:
+                    self._mark_busy(activity)
                     self._last_auto_sync = now
                     await self._run_db(self._auto_sync_enrollments)
                 next_command = await self._run_db(self._next_command_to_send, sn)
@@ -262,6 +292,7 @@ class Command(BaseCommand):
                     continue
                 command_id, wire_message = next_command
                 if wire_message is None:
+                    self._mark_busy(activity)
                     kind = await self._run_db(self._command_kind, command_id)
                     if kind == "list_user_slots":
                         await self._run_list_user_slots(ws, sn, command_id)
@@ -573,7 +604,7 @@ class Command(BaseCommand):
         only the name is kept. The credential in the reply is dropped at once: not stored, not logged."""
         await self._run_db(self._mark_command_sent, command_id)
         command = await self._run_db(lambda: DeviceCommand.objects.get(pk=command_id))
-        names, missing = {}, []
+        names, missing, enable_flags = {}, [], {}
         for item in command.payload["items"]:
             try:
                 reply = await self._send_and_wait(ws, sn, build_getuserinfo_slot_command(sn, int(item["enrollid"]), int(item["backupnum"])), CLONE_REPLY_TIMEOUT_SECONDS)
@@ -582,10 +613,12 @@ class Command(BaseCommand):
                 continue
             if reply.get("result") and reply.get("name") is not None:
                 names[str(item["enrollid"])] = str(reply["name"])
+                if "enable" in reply:
+                    enable_flags[str(item["enrollid"])] = reply["enable"]
             else:
                 missing.append(item["enrollid"])
             reply = None
-        await self._run_db(self._finish_clone_command, command_id, "acked" if names else "failed", {"names": names, "missing": missing})
+        await self._run_db(self._finish_clone_command, command_id, "acked" if names else "failed", {"names": names, "missing": missing, "enable": enable_flags})
 
     async def _run_list_user_slots(self, ws, sn, command_id):
         """Read every enrolled (enrollid, backupnum) slot off one terminal, a page at a time, and store the list
@@ -942,7 +975,20 @@ class Command(BaseCommand):
             source_identifier=command.device.serial_number,
             defaults={"external_user_id": str(enrollid), "is_active": True},
         )
+        Command._refresh_meal_gating(employee_id)
         Command._queue_clone_to_other_devices(command, employee_id)
+
+    @staticmethod
+    def _refresh_meal_gating(employee_id):
+        """A person just enrolled on a terminal starts switched ON. Someone with no ticket today (a new hire, a rest
+        day) must not wait for the next full check to be switched off: 2026-09-24 one collected a ticket seconds
+        after being enrolled."""
+        try:
+            from meals.gating import refresh
+
+            refresh(employee_id)
+        except Exception:
+            pass
 
     @staticmethod
     def _queue_clone_to_other_devices(command, employee_id):

@@ -2,7 +2,8 @@
 
 The terminal prints a receipt for every person it verifies and has no print command, so the only way to stop a
 receipt for someone who is not entitled is for the terminal to refuse them. This switches people off (and on
-again) with the protocol's `enableuser` command. It is limited to the staff numbers in
+again) with the protocol's `setuserinfo enable` command plus the legacy `enableuser` command (one firmware only
+honours the legacy one for faces - see build_enableuser_command). It is limited to the staff numbers in
 settings.MEAL_GATING_EMPLOYEE_IDS.
 """
 
@@ -59,9 +60,16 @@ def _meal_identities(employee):
 
 def _queue(device, employee, enrollid, enabled):
     """One pending switch per person per direction is enough."""
-    already = DeviceCommand.objects.filter(device=device, command_type=COMMAND_TYPE, status__in=["pending", "sent"], payload__enrollid=int(enrollid), payload__enabled=enabled).exists()
-    if not already:
+    waiting = DeviceCommand.objects.filter(device=device, command_type=COMMAND_TYPE, status__in=["pending", "sent"], payload__enrollid=int(enrollid), payload__enabled=enabled)
+    queued = False
+    if not waiting.exclude(payload__has_key="legacy").exists():
         DeviceCommand.objects.create(device=device, command_type=COMMAND_TYPE, payload={"enrollid": int(enrollid), "enabled": enabled, "employee_id": employee.pk})
+        queued = True
+    if not waiting.filter(payload__has_key="legacy").exists():
+        # The companion: some firmware ignores the profile switch for faces, so the older command goes too.
+        DeviceCommand.objects.create(device=device, command_type=COMMAND_TYPE, payload={"enrollid": int(enrollid), "enabled": enabled, "employee_id": employee.pk, "legacy": True})
+        queued = True
+    if queued:
         return True
     return False
 

@@ -464,3 +464,57 @@ class SlotTargetIdTests(TestCase):
 
         DeviceCommand.objects.create(device=self.device, command_type="list_user_slots", status="acked", completed_at=timezone.now(), result={"slots": [[77, 50]]})
         self.assertIsNone(self.Command._slot_target_enrollid(self.ada.pk, self.device, 77))
+
+
+class PollerWatchdogTests(SimpleTestCase):
+    """2026-09-24: a meal terminal's command poller sat idle ~40 min on a live connection, so switch-offs were not sent."""
+
+    def run_watchdog(self, activity_offsets, task_done=False):
+        import asyncio
+        import io
+
+        from attendance.management.commands.run_aiface_gateway import Command
+
+        real_sleep = asyncio.sleep
+
+        async def quick_sleep(_seconds):
+            await real_sleep(0.001)
+
+        class FakeWS:
+            closed = False
+
+            async def close(self):
+                self.closed = True
+
+        async def scenario():
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            ws, log = FakeWS(), io.StringIO()
+            command = Command(stdout=log)
+            task = asyncio.create_task(real_sleep(0 if task_done else 3600))
+            await real_sleep(0.01)
+            activity = {"seen": now, "beat": now - activity_offsets["idle"], "busy_since": (now - activity_offsets["busy"]) if activity_offsets.get("busy") else None}
+            with mock.patch("attendance.management.commands.run_aiface_gateway.asyncio.sleep", quick_sleep):
+                watcher = asyncio.create_task(command._drop_if_silent(ws, activity, task, "S1"))
+                await real_sleep(0.05)
+                watcher.cancel()
+            task.cancel()
+            return ws.closed, log.getvalue()
+
+        return asyncio.run(scenario())
+
+    def test_an_idle_poller_that_has_stopped_looping_gets_the_connection_closed_and_the_stack_logged(self):
+        closed, log = self.run_watchdog({"idle": 120})
+        self.assertTrue(closed)
+        self.assertIn("command poller stalled", log)
+
+    def test_a_poller_that_keeps_looping_is_left_alone(self):
+        closed, _ = self.run_watchdog({"idle": 1})
+        self.assertFalse(closed)
+
+    def test_a_long_job_is_allowed_its_time_but_not_forever(self):
+        self.assertFalse(self.run_watchdog({"idle": 200, "busy": 200})[0])
+        self.assertTrue(self.run_watchdog({"idle": 600, "busy": 600})[0])
+
+    def test_a_poller_that_has_ended_closes_the_connection(self):
+        self.assertTrue(self.run_watchdog({"idle": 1}, task_done=True)[0])

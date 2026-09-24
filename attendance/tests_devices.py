@@ -1347,6 +1347,6 @@ class NameProbeTests(TransactionTestCase):
         job.refresh_from_db()
 
         self.assertEqual(job.status, "acked")
-        self.assertEqual(job.result, {"names": {"1500": "Ada Okafor"}, "missing": [1501]})
+        self.assertEqual(job.result, {"names": {"1500": "Ada Okafor"}, "missing": [1501], "enable": {}})
         self.assertNotIn(TEMPLATE, json.dumps(job.result) + json.dumps(job.payload) + log.getvalue())
         self.assertEqual({m["backupnum"] for m in ws.sent}, {0})  # it asked for a fingerprint slot, not a face

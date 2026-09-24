@@ -162,8 +162,10 @@ def build_enableuser_command(sn: str, enrollid: int, enabled: bool) -> dict:
 
     Confirmed on production 2026-09-23: this command is acked as successful but only actually blocks
     face verification - a card or fingerprint scan for the same enrollid still goes through afterward.
-    No longer used for set_user_enabled; kept only for reference/tests. See
-    build_user_enabled_profile_command for the replacement.
+    Sent as a companion to build_user_enabled_profile_command on every switch (payload "legacy": true):
+    2026-09-24, AI Meal Ticket 2 (AI24FB 486) kept letting switched-off people through by FACE (9 of 9 leaks were
+    face scans) even though it acked the profile command, while AI Meal Ticket obeyed the profile command alone.
+    Sending both covers every firmware.
     """
     return {"cmd": "enableuser", "sn": sn, "enrollid": enrollid, "enflag": 1 if enabled else 0}
 
@@ -190,6 +192,8 @@ def build_device_command(sn: str, command_type: str, payload: Mapping[str, Any])
     if command_type == "refresh_enrolled_ids":
         return build_getuserids_command(sn)
     if command_type == "set_user_enabled":
+        if payload.get("legacy"):
+            return build_enableuser_command(sn, payload["enrollid"], bool(payload["enabled"]))
         return build_user_enabled_profile_command(sn, payload["enrollid"], bool(payload["enabled"]))
     raise ValueError(f"Unknown command_type: {command_type!r}")
 
