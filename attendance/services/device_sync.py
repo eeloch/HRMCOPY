@@ -276,3 +276,54 @@ def find_duplicate_ids(device, slots=None):
             "deletable": copy_id in slots and not someone_elses and copy_kinds <= own_kinds,
         })
     return found
+
+
+# ---- move people from a stray terminal id to their staff-number id, on the same terminal ---------------------------
+
+RENUMBER_LISTING_FRESH_FOR = timedelta(hours=1)
+
+
+def plan_renumbers(devices, *, limit=None, dry_run=False):
+    """One same-terminal move per person whose id on a terminal is not their staff number while their staff-number id
+    is free there (nobody else's identity on it). The job (see run_aiface_gateway._run_renumber) carries only the
+    slots the old id holds that the staff-number id does not already hold; with none left it just drops the old
+    entry. Returns the list of planned moves; creates the jobs unless dry_run."""
+    owners = defaultdict(list)
+    for employee in Employee.objects.only("id", "employee_id"):
+        if employee.employee_id.isdigit():
+            owners[int(employee.employee_id)].append(employee.pk)
+    waiting = {
+        (command.device_id, command.payload.get("employee_id"))
+        for command in DeviceCommand.objects.filter(command_type="clone_enrollment", status__in=("pending", "sent"), payload__has_key="renumber")
+    }
+    planned = []
+    for device in devices:
+        slots = latest_slots(device, max_age=RENUMBER_LISTING_FRESH_FOR)
+        if not slots:
+            continue
+        identities = list(BiometricIdentity.objects.filter(system=IDENTITY_SYSTEM, source_identifier=device.serial_number, is_active=True, employee__status="active").select_related("employee"))
+        claimed = defaultdict(set)
+        for identity in identities:
+            if identity.external_user_id.isdigit():
+                claimed[int(identity.external_user_id)].add(identity.employee_id)
+        for identity in identities:
+            if limit is not None and len(planned) >= limit:
+                return planned
+            employee = identity.employee
+            if not employee.employee_id.isdigit() or not identity.external_user_id.isdigit():
+                continue
+            own_id, old_id = int(employee.employee_id), int(identity.external_user_id)
+            if own_id == old_id or owners[own_id] != [employee.pk] or claimed[own_id] - {employee.pk} or old_id not in slots:
+                continue
+            if (device.pk, employee.pk) in waiting:
+                continue
+            own_kinds = _held(slots.get(own_id, set()))
+            to_move = sorted(number for kind, numbers in _held(slots[old_id]).items() if kind not in own_kinds for number in numbers)
+            move = {"employee": employee, "device": device, "from_id": old_id, "to_id": own_id, "slots": to_move}
+            planned.append(move)
+            if not dry_run:
+                DeviceCommand.objects.create(
+                    device=device, command_type="clone_enrollment",
+                    payload={"renumber": True, "employee_id": employee.pk, "name": employee.full_name, "from_id": old_id, "to_id": own_id, "slots": to_move},
+                )
+    return planned

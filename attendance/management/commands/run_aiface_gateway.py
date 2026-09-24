@@ -27,6 +27,7 @@ from django.utils import timezone
 from attendance.models import BiometricDevice, DeviceCommand
 from attendance.integrations.aiface_protocol import (
     IDENTITY_SYSTEM,
+    build_deleteuser_command,
     build_device_command,
     build_getuserinfo_command,
     build_getuserinfo_slot_command,
@@ -265,6 +266,8 @@ class Command(BaseCommand):
                         await self._run_list_user_slots(ws, sn, command_id)
                     elif kind == "slot_clone":
                         await self._run_slot_clone(ws, sn, command_id)
+                    elif kind == "renumber":
+                        await self._run_renumber(ws, sn, command_id)
                     else:
                         await self._run_clone_enrollment(ws, sn, command_id)
                     continue
@@ -373,6 +376,8 @@ class Command(BaseCommand):
             return None
         if command.command_type == "clone_enrollment" and command.payload.get("pushes"):
             return "slot_clone"
+        if command.command_type == "clone_enrollment" and command.payload.get("renumber"):
+            return "renumber"
         return command.command_type
 
     async def _run_slot_clone(self, ws, sn, command_id):
@@ -438,6 +443,124 @@ class Command(BaseCommand):
             record = None  # drop the only reference to the credential as soon as it has been relayed
         self.stdout.write(f"[{sn}] slot_clone: pushed={pushed} failed={len(failed)} offline={len(skipped_offline)}")
         await self._run_db(self._finish_clone_command, command_id, "acked" if pushed else "failed", {"pushed": pushed, "failed": failed, "skipped_offline": skipped_offline})
+
+    async def _run_renumber(self, ws, sn, command_id):
+        """Move one person's credentials on THIS terminal from a stray id to their staff-number id (terminals are
+        meant to hold people under their staff number; the old sync fallback left some under a made-up one).
+
+        Every credential is read from the old id first (held in memory only, never stored or logged), then written
+        under the new id, non-faces first. The terminal refuses a face it already holds under another id ("face is
+        double"), so a face is only pushed after the old entry is removed - and if the push still fails it is put
+        back under the old id, so nobody loses a face. The old identity is dropped only once everything is across,
+        and both ids resolve to the person until then. Safe to run again after a dropped connection."""
+        await self._run_db(self._mark_command_sent, command_id)
+        command = await self._run_db(lambda: DeviceCommand.objects.get(pk=command_id))
+        payload = command.payload
+        employee_id, name, from_id, to_id = payload["employee_id"], payload.get("name", ""), payload["from_id"], payload["to_id"]
+        slots = sorted(payload.get("slots", []), key=lambda backupnum: (self._is_face_slot(backupnum), backupnum))
+
+        async def ask(message):
+            return await self._send_and_wait(ws, sn, message, CLONE_REPLY_TIMEOUT_SECONDS)
+
+        records, moved, failed, old_entry_removed, linked = {}, [], None, False, False
+        try:
+            for backupnum in slots:
+                reply = await ask(build_getuserinfo_slot_command(sn, from_id, backupnum))
+                if reply.get("result") and reply.get("record") is not None:
+                    records[backupnum] = reply["record"]
+                    continue
+                if (await ask(build_getuserinfo_slot_command(sn, to_id, backupnum))).get("result"):
+                    moved.append(backupnum)  # an earlier attempt already got it across
+                    continue
+                failed = {"backupnum": backupnum, "reason": "could not read it from the old id"}
+                break
+            if failed is None:
+                for backupnum in list(records):
+                    push = await ask(build_setuserinfo_slot_command(sn, to_id, name, backupnum, records[backupnum]))
+                    if not push.get("result") and self._is_face_slot(backupnum) and self._face_is_double(push):
+                        holder = self._face_holder(push)
+                        if holder == to_id:
+                            push = {"result": True}  # already on the new id
+                        elif holder != from_id:
+                            failed = {"backupnum": backupnum, "reason": f"this face is already enrolled under id {holder}", "reply": self._plain_reply(push)}
+                            break
+                        else:
+                            if not old_entry_removed:
+                                if not (await ask(build_deleteuser_command(sn, from_id))).get("result"):
+                                    failed = {"backupnum": backupnum, "reason": "could not remove the old entry to free the face"}
+                                    break
+                                old_entry_removed = True
+                            push = await ask(build_setuserinfo_slot_command(sn, to_id, name, backupnum, records[backupnum]))
+                            if not push.get("result"):
+                                await ask(build_setuserinfo_slot_command(sn, from_id, name, backupnum, records[backupnum]))
+                                failed = {"backupnum": backupnum, "reason": "refused on the new id; put back on the old one", "reply": self._plain_reply(push)}
+                                break
+                    elif not push.get("result"):
+                        failed = {"backupnum": backupnum, "reason": "refused", "reply": self._plain_reply(push)}
+                        break
+                    if not linked:
+                        await self._run_db(self._add_identity, employee_id, sn, to_id)
+                        linked = True
+                    moved.append(backupnum)
+                    records[backupnum] = None
+        except asyncio.TimeoutError:
+            failed = {"reason": "the terminal stopped answering"}
+        records.clear()
+        if failed is not None:
+            await self._run_db(self._finish_clone_command, command_id, "failed", {"moved": moved, "failed": failed})
+            return
+        if not old_entry_removed:
+            old_entry_removed = bool((await ask(build_deleteuser_command(sn, from_id))).get("result"))
+        await self._run_db(self._finish_renumber, employee_id, sn, from_id, to_id, old_entry_removed)
+        self.stdout.write(f"[{sn}] renumber: enrollid {from_id} -> {to_id}, {len(moved)} credential(s), old entry {'removed' if old_entry_removed else 'kept'}")
+        await self._run_db(self._finish_clone_command, command_id, "acked", {"moved": moved, "old_entry_removed": old_entry_removed})
+
+    @staticmethod
+    def _is_face_slot(backupnum):
+        return backupnum == 50 or 20 <= backupnum <= 27
+
+    @staticmethod
+    def _face_is_double(reply):
+        return reply.get("reason") == 12 or "double" in str(reply.get("msg", "")).lower()
+
+    @staticmethod
+    def _face_holder(reply):
+        """The id the terminal says already holds this face ("face is double,id=1432"), or None."""
+        import re
+
+        found = re.search(r"id=(\d+)", str(reply.get("msg", "")))
+        return int(found.group(1)) if found else None
+
+    @staticmethod
+    def _plain_reply(reply):
+        return {key: value for key, value in reply.items() if key not in ("record", "sn")}
+
+    @staticmethod
+    def _add_identity(employee_id, serial_number, enrollid):
+        """Both ids resolve to the person while a move is under way; never takes an id someone else holds."""
+        from employees.models import BiometricIdentity
+
+        BiometricIdentity.objects.get_or_create(
+            system=IDENTITY_SYSTEM, source_identifier=serial_number, external_user_id=str(enrollid),
+            defaults={"employee_id": employee_id, "is_active": True},
+        )
+
+    @staticmethod
+    def _finish_renumber(employee_id, serial_number, from_id, to_id, old_entry_removed):
+        from employees.models import BiometricIdentity
+
+        Command._add_identity(employee_id, serial_number, to_id)
+        if old_entry_removed:
+            BiometricIdentity.objects.filter(employee_id=employee_id, system=IDENTITY_SYSTEM, source_identifier=serial_number, external_user_id=str(from_id)).delete()
+        device = BiometricDevice.objects.filter(serial_number=serial_number).first()
+        if device is not None and device.purpose == "meal_ticket":
+            from employees.models import Employee
+            from meals.gating import _queue, gated_employees, tickets_left_today
+
+            employee = Employee.objects.get(pk=employee_id)
+            if employee.pk in {e.pk for e in gated_employees(only=[employee.pk])}:
+                # The new entry starts switched on; make it match what the person has left today.
+                _queue(device, employee, to_id, tickets_left_today(employee) > 0)
 
     async def _run_list_user_slots(self, ws, sn, command_id):
         """Read every enrolled (enrollid, backupnum) slot off one terminal, a page at a time, and store the list

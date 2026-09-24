@@ -1170,3 +1170,157 @@ class LostSwitchCommandTests(TestCase):
         DeviceCommand.expire_stale()
         command.refresh_from_db()
         self.assertEqual(command.status, "failed")
+
+
+class RenumberTests(TransactionTestCase):
+    """The same-terminal move from a stray id to the staff-number id (see Command._run_renumber)."""
+
+    SN = "AYTK14145399"
+
+    def setUp(self):
+        self.device = BiometricDevice.objects.create(name="Terminal A", serial_number=self.SN, location="x", device_type="factory", is_online=True, purpose="attendance")
+        self.employee = Employee.objects.create(employee_id="000062", first_name="Oliver", last_name="Ekerette", status="active")
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier=self.SN, external_user_id="1604", is_active=True)
+        self.log = io.StringIO()
+        self.gateway = Command(stdout=self.log)
+        self.gateway._connections, self.gateway._pending_replies, self.gateway._locks = {}, {}, {}
+
+    def run_move(self, slots, responder):
+        job = DeviceCommand.objects.create(
+            device=self.device, command_type="clone_enrollment", status="pending",
+            payload={"renumber": True, "employee_id": self.employee.id, "name": "Oliver Ekerette", "from_id": 1604, "to_id": 62, "slots": slots},
+        )
+        ws = FakeTerminal(self.gateway, self.SN, responder)
+        self.gateway._connections[self.SN] = ws
+        asyncio.run(self.gateway._run_renumber(ws, self.SN, job.id))
+        job.refresh_from_db()
+        return job, ws
+
+    @staticmethod
+    def happy(message):
+        if message["cmd"] == "getuserinfo":
+            return {"ret": "getuserinfo", "result": True, "record": TEMPLATE}
+        return {"ret": message["cmd"], "result": True}
+
+    def ids(self):
+        return sorted(BiometricIdentity.objects.filter(employee=self.employee, source_identifier=self.SN).values_list("external_user_id", flat=True))
+
+    def test_a_fingerprint_is_read_from_the_old_id_written_to_the_new_one_and_the_old_entry_removed(self):
+        job, ws = self.run_move([0], self.happy)
+
+        self.assertEqual(job.status, "acked")
+        self.assertEqual([(m["cmd"], m["enrollid"]) for m in ws.sent], [("getuserinfo", 1604), ("setuserinfo", 62), ("deleteuser", 1604)])
+        self.assertEqual(self.ids(), ["62"])
+
+    def test_a_face_the_terminal_calls_double_is_moved_after_the_old_entry_is_freed(self):
+        state = {"freed": False}
+
+        def responder(message):
+            if message["cmd"] == "deleteuser":
+                state["freed"] = True
+            if message["cmd"] == "setuserinfo" and message["backupnum"] == 50 and not state["freed"]:
+                return {"ret": "setuserinfo", "result": False, "reason": 12, "msg": "face is double,id=1604"}
+            return self.happy(message)
+
+        job, ws = self.run_move([0, 50], responder)
+
+        self.assertEqual(job.status, "acked")
+        sequence = [(m["cmd"], m["enrollid"], m.get("backupnum")) for m in ws.sent]
+        self.assertEqual(sequence[-3:], [("setuserinfo", 62, 50), ("deleteuser", 1604, 12), ("setuserinfo", 62, 50)])  # refused, old entry freed, accepted
+        self.assertEqual(self.ids(), ["62"])
+
+    def test_a_face_already_held_under_someone_elses_id_is_not_forced_and_nothing_is_deleted(self):
+        def responder(message):
+            if message["cmd"] == "setuserinfo" and message["backupnum"] == 50:
+                return {"ret": "setuserinfo", "result": False, "reason": 12, "msg": "face is double,id=999"}
+            return self.happy(message)
+
+        job, ws = self.run_move([0, 50], responder)
+
+        self.assertEqual(job.status, "failed")
+        self.assertNotIn("deleteuser", [m["cmd"] for m in ws.sent])
+        self.assertEqual(self.ids(), ["1604", "62"])  # both ids still resolve to the person: no scan is lost
+
+    def test_a_face_refused_even_after_the_old_entry_is_removed_is_put_back_on_the_old_id(self):
+        def responder(message):
+            if message["cmd"] == "setuserinfo" and message["backupnum"] == 50 and message["enrollid"] == 62:
+                return {"ret": "setuserinfo", "result": False, "reason": 12, "msg": "face is double,id=1604" if not any(m.get("cmd") == "deleteuser" for m in ws_sent()) else "face is double,id=5"}
+            return self.happy(message)
+
+        holder = {}
+        ws_sent = lambda: holder["ws"].sent
+        job = DeviceCommand.objects.create(
+            device=self.device, command_type="clone_enrollment", status="pending",
+            payload={"renumber": True, "employee_id": self.employee.id, "name": "Oliver Ekerette", "from_id": 1604, "to_id": 62, "slots": [50]},
+        )
+        ws = FakeTerminal(self.gateway, self.SN, responder)
+        holder["ws"] = ws
+        self.gateway._connections[self.SN] = ws
+        asyncio.run(self.gateway._run_renumber(ws, self.SN, job.id))
+        job.refresh_from_db()
+
+        self.assertEqual(job.status, "failed")
+        self.assertEqual([(m["cmd"], m["enrollid"]) for m in ws.sent][-1], ("setuserinfo", 1604))  # restored
+
+    def test_a_credential_that_cannot_be_read_from_the_old_id_stops_the_move_with_nothing_changed(self):
+        job, ws = self.run_move([0], lambda m: {"ret": m["cmd"], "result": False})
+
+        self.assertEqual(job.status, "failed")
+        self.assertNotIn("deleteuser", [m["cmd"] for m in ws.sent])
+        self.assertEqual(self.ids(), ["1604"])
+
+    def test_the_credential_is_never_stored_or_logged(self):
+        job, _ = self.run_move([0, 50], self.happy)
+
+        self.assertNotIn(TEMPLATE, json.dumps(job.result) + json.dumps(job.payload) + self.log.getvalue())
+
+    def test_nothing_to_move_just_removes_the_old_entry(self):
+        job, ws = self.run_move([], self.happy)
+
+        self.assertEqual(job.status, "acked")
+        self.assertEqual([m["cmd"] for m in ws.sent], ["deleteuser"])
+        self.assertEqual(self.ids(), ["62"])
+
+
+class PlanRenumbersTests(TestCase):
+    def setUp(self):
+        from attendance.services.device_sync import plan_renumbers
+
+        self.plan = plan_renumbers
+        self.device = BiometricDevice.objects.create(name="D", serial_number="D1", location="x", device_type="factory", purpose="attendance")
+        self.ada = Employee.objects.create(employee_id="000040", first_name="Ada", last_name="A", status="active")
+
+    def listing(self, slots):
+        DeviceCommand.objects.create(device=self.device, command_type="list_user_slots", status="acked", completed_at=timezone.now(), result={"slots": slots})
+
+    def identity(self, enrollid, employee=None):
+        return BiometricIdentity.objects.create(employee=employee or self.ada, system="vendor_flask_gateway", source_identifier="D1", external_user_id=str(enrollid))
+
+    def test_a_person_on_a_stray_id_is_planned_to_move_only_what_their_own_id_lacks(self):
+        self.identity(1500); self.listing([[1500, 0], [1500, 50], [40, 50]])
+        (move,) = self.plan([self.device])
+        self.assertEqual((move["from_id"], move["to_id"], move["slots"]), (1500, 40, [0]))
+        job = DeviceCommand.objects.get(payload__has_key="renumber")
+        self.assertEqual(job.payload["slots"], [0])
+
+    def test_someone_on_their_own_id_is_left_alone(self):
+        self.identity(40); self.listing([[40, 0]])
+        self.assertEqual(self.plan([self.device]), [])
+
+    def test_an_id_someone_else_holds_is_never_taken(self):
+        bob = Employee.objects.create(employee_id="000041", first_name="Bob", last_name="B", status="active")
+        self.identity(1500); self.identity(40, bob); self.listing([[1500, 0], [40, 0]])
+        moved = [(m["employee"].employee_id, m["to_id"]) for m in self.plan([self.device])]
+        self.assertNotIn(("000040", 40), moved)  # Ada may not take 40 while Bob is on it
+
+    def test_a_dry_run_queues_nothing_and_a_waiting_move_is_not_queued_twice(self):
+        self.identity(1500); self.listing([[1500, 0]])
+        self.assertEqual(len(self.plan([self.device], dry_run=True)), 1)
+        self.assertFalse(DeviceCommand.objects.filter(payload__has_key="renumber").exists())
+        self.plan([self.device])
+        self.assertEqual(self.plan([self.device]), [])
+
+    def test_a_stale_listing_plans_nothing(self):
+        self.identity(1500); self.listing([[1500, 0]])
+        DeviceCommand.objects.filter(command_type="list_user_slots").update(completed_at=timezone.now() - timedelta(hours=2))
+        self.assertEqual(self.plan([self.device]), [])
