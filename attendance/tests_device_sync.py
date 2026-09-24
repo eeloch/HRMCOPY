@@ -114,3 +114,56 @@ class SlotSyncTests(TestCase):
         command = DeviceCommand.objects.get(command_type="clone_enrollment")
         self.assertEqual(command.device, self.a)  # not the meal terminal, though it holds the same credentials
         self.assertEqual(command.payload["pushes"], [{"target_device_id": self.b.pk, "backupnums": [0, 50]}])
+
+
+class DuplicateRepairTests(TestCase):
+    def setUp(self):
+        from attendance.services.device_sync import find_duplicate_ids
+
+        self.find = find_duplicate_ids
+        self.dev = BiometricDevice.objects.create(name="D", serial_number="D1", location="x", device_type="factory", purpose="attendance")
+        self.ada = Employee.objects.create(employee_id="000040", first_name="Ada", last_name="A", status="active")
+
+    def listing(self, slots):
+        DeviceCommand.objects.create(device=self.dev, command_type="list_user_slots", status="acked", completed_at=timezone.now(), result={"slots": slots})
+
+    def identity(self, enrollid, employee=None):
+        return BiometricIdentity.objects.create(employee=employee or self.ada, system=IDENTITY_SYSTEM, source_identifier="D1", external_user_id=str(enrollid))
+
+    def test_a_copy_beside_the_persons_own_id_is_found_and_deletable(self):
+        self.identity(1488); self.listing([[40, 50], [40, 0], [1488, 0]])
+        (row,) = self.find(self.dev)
+        self.assertEqual((row["own_id"], row["copy_id"], row["deletable"]), (40, 1488, True))
+
+    def test_a_copy_holding_something_the_own_id_lacks_is_kept_for_review(self):
+        self.identity(1488); self.listing([[40, 50], [1488, 0]])
+        (row,) = self.find(self.dev)
+        self.assertFalse(row["deletable"])
+
+    def test_a_copy_that_is_another_persons_staff_number_is_never_deletable(self):
+        Employee.objects.create(employee_id="001488", first_name="Bob", last_name="B", status="active")
+        self.identity(1488); self.listing([[40, 50], [40, 0], [1488, 0]])
+        (row,) = self.find(self.dev)
+        self.assertFalse(row["deletable"])
+
+    def test_someone_on_their_own_id_or_without_it_on_the_terminal_is_left_alone(self):
+        self.identity(40); self.listing([[40, 50]])
+        self.assertEqual(self.find(self.dev), [])
+        BiometricIdentity.objects.all().delete()
+        self.identity(1488); self.listing([[1488, 50]])  # own id not on the terminal: nothing to re-point to
+        self.assertEqual(self.find(self.dev), [])
+
+    def test_the_command_repoints_and_queues_the_deletion_only_when_asked(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        self.identity(1488); self.listing([[40, 50], [40, 0], [1488, 0]])
+        call_command("repair_duplicate_ids", stdout=StringIO())
+        self.assertEqual(BiometricIdentity.objects.get().external_user_id, "1488")  # dry run changes nothing
+        call_command("repair_duplicate_ids", "--apply", stdout=StringIO())
+        self.assertEqual(BiometricIdentity.objects.get().external_user_id, "40")
+        self.assertFalse(DeviceCommand.objects.filter(command_type="purge_user").exists())
+        BiometricIdentity.objects.update(external_user_id="1488")
+        call_command("repair_duplicate_ids", "--apply", "--delete-copies", stdout=StringIO())
+        self.assertEqual(DeviceCommand.objects.get(command_type="purge_user").payload["enrollid"], 1488)

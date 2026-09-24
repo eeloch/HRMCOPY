@@ -232,3 +232,47 @@ def plan_slot_clones(devices, *, limit=None):
             )
             queued.append(employee_id)
     return queued
+
+
+# ---- repair: people the sync duplicated on a terminal under a brand-new id --------------------------------------
+
+
+def find_duplicate_ids(device, slots=None):
+    """People whose HRM identity on `device` points at an id other than their own staff number while the terminal also
+    holds them under that staff number (terminals were enrolled by staff number). That is the footprint of the old
+    "one past the highest id" fallback, which pushed a second copy and re-pointed the identity at it.
+
+    One dict per person: the employee, `own_id` (staff number, present on the terminal), `copy_id` (what HRM tracks
+    now) and whether the copy is safe to delete - it is only when nothing else claims it (no other identity, not
+    another person's staff number) and every kind of credential it holds is also held under the person's own id."""
+    slots = slots if slots is not None else latest_slots(device)
+    if not slots:
+        return []
+    owners = defaultdict(list)
+    for employee in Employee.objects.only("id", "employee_id", "status"):
+        if employee.employee_id.isdigit():
+            owners[int(employee.employee_id)].append(employee.pk)
+    identities = list(BiometricIdentity.objects.filter(system=IDENTITY_SYSTEM, source_identifier=device.serial_number, is_active=True).select_related("employee"))
+    claimed = defaultdict(set)
+    for identity in identities:
+        if identity.external_user_id.isdigit():
+            claimed[int(identity.external_user_id)].add(identity.employee_id)
+
+    found = []
+    for identity in identities:
+        employee = identity.employee
+        if employee.status != "active" or not employee.employee_id.isdigit() or not identity.external_user_id.isdigit():
+            continue
+        own_id, copy_id = int(employee.employee_id), int(identity.external_user_id)
+        if own_id == copy_id or owners[own_id] != [employee.pk] or own_id not in slots:
+            continue
+        if claimed[own_id] - {employee.pk}:
+            continue  # another identity already claims the staff number
+        own_kinds, copy_kinds = set(_held(slots[own_id])), set(_held(slots.get(copy_id, set())))
+        someone_elses = bool(claimed[copy_id] - {employee.pk}) or any(pk != employee.pk for pk in owners.get(copy_id, []))
+        found.append({
+            "employee": employee, "identity": identity, "own_id": own_id, "copy_id": copy_id,
+            "copy_present": copy_id in slots, "own_kinds": sorted(own_kinds), "copy_kinds": sorted(copy_kinds),
+            "deletable": copy_id in slots and not someone_elses and copy_kinds <= own_kinds,
+        })
+    return found
