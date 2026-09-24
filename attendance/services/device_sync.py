@@ -331,3 +331,144 @@ def plan_renumbers(devices, *, limit=None, dry_run=False):
                     payload={"renumber": True, "employee_id": employee.pk, "name": employee.full_name, "from_id": old_id, "to_id": own_id, "slots": to_move},
                 )
     return planned
+
+
+# ---- mirror: every terminal holds the same people, no leftovers ---------------------------------------------------
+
+PROBE_CHUNK = 40
+
+
+def name_key(name):
+    """Order- and case-insensitive key for comparing a name typed on a terminal with an employee's name."""
+    import re
+
+    return " ".join(sorted(re.sub(r"[^a-z ]", " ", (name or "").lower()).split()))
+
+
+def _probe_slot(backupnums):
+    """The smallest credential to ask for: password, card, a fingerprint, and a face only when nothing else exists."""
+    for number in (10, 11):
+        if number in backupnums:
+            return number
+    fingers = sorted(n for n in backupnums if 0 <= n <= 9)
+    if fingers:
+        return fingers[0]
+    faces = sorted(n for n in backupnums if n == 50 or 20 <= n <= 27)
+    return faces[0] if faces else None
+
+
+def _stray_ids(device, slots):
+    """Ids on the terminal that no active employee's identity there claims and that are not an active person's staff
+    number (those are their own, merely unlinked - link_ids_by_staff_number picks them up)."""
+    active_claimed = set()
+    for identity in BiometricIdentity.objects.filter(system=IDENTITY_SYSTEM, source_identifier=device.serial_number, is_active=True, employee__status="active"):
+        if identity.external_user_id.isdigit():
+            active_claimed.add(int(identity.external_user_id))
+    active_numbers = {int(e.employee_id) for e in Employee.objects.filter(status="active") if e.employee_id.isdigit()}
+    return sorted(i for i in slots if i not in active_claimed and i not in active_numbers)
+
+
+def queue_name_probes(devices, *, dry_run=False):
+    """Ask each terminal for the names behind its leftover entries whose owner cannot be told from the staff number."""
+    leaver_numbers = {int(e.employee_id) for e in Employee.objects.exclude(status="active") if e.employee_id.isdigit()}
+    queued = 0
+    for device in devices:
+        slots = latest_slots(device, max_age=LISTING_FRESH_FOR)
+        if not slots:
+            continue
+        unknown = [i for i in _stray_ids(device, slots) if i not in leaver_numbers]
+        already = latest_names(device)
+        items = [{"enrollid": i, "backupnum": _probe_slot(slots[i])} for i in unknown if str(i) not in already and _probe_slot(slots[i]) is not None]
+        for start in range(0, len(items), PROBE_CHUNK):
+            queued += 1
+            if not dry_run:
+                DeviceCommand.objects.create(device=device, command_type="clone_enrollment", payload={"name_probe": True, "items": items[start:start + PROBE_CHUNK]})
+    return queued
+
+
+def latest_names(device):
+    """{enrollid string: name} from every finished name probe of this terminal (newest answer wins)."""
+    names = {}
+    for command in DeviceCommand.objects.filter(device=device, command_type="clone_enrollment", status="acked", payload__has_key="name_probe").order_by("id"):
+        names.update((command.result or {}).get("names", {}))
+    return names
+
+
+def plan_mirror(devices, *, apply=False, limit=None):
+    """What it takes to leave each terminal holding exactly the active staff and nobody else. Returns per-terminal
+    lists; with apply=True the actions are queued: a leaver's entry is deleted, a leftover copy of an active person is
+    moved onto their staff-number id (which also drops the copy), a second copy that adds nothing is deleted.
+    Anything whose owner is not certain goes to `review` and is never touched."""
+    from collections import defaultdict as dd
+
+    everyone = dd(list)
+    for employee in Employee.objects.all():
+        everyone[name_key(employee.full_name)].append(employee)
+    by_number = dd(list)
+    for employee in Employee.objects.all():
+        if employee.employee_id.isdigit():
+            by_number[int(employee.employee_id)].append(employee)
+    waiting = {(c.device_id, c.payload.get("enrollid")) for c in DeviceCommand.objects.filter(command_type="purge_user", status__in=("pending", "sent"))}
+    waiting_moves = {(c.device_id, c.payload.get("from_id")) for c in DeviceCommand.objects.filter(command_type="clone_enrollment", status__in=("pending", "sent"), payload__has_key="renumber")}
+    report = {}
+    queued = 0
+    for device in devices:
+        slots = latest_slots(device, max_age=LISTING_FRESH_FOR)
+        if not slots:
+            continue
+        names = latest_names(device)
+        identity_id = {}
+        claimed_by = dd(set)
+        for identity in BiometricIdentity.objects.filter(system=IDENTITY_SYSTEM, source_identifier=device.serial_number, is_active=True):
+            if identity.external_user_id.isdigit():
+                claimed_by[int(identity.external_user_id)].add(identity.employee_id)
+        plan = {"leaver": [], "move": [], "extra_copy": [], "review": []}
+        per_person = dd(list)  # active employee -> stray ids
+        for stray in _stray_ids(device, slots):
+            owners = by_number.get(stray, [])
+            if owners:  # the id is a staff number: a leaver's entry
+                plan["leaver"].append({"id": stray, "who": owners[0].full_name})
+                continue
+            name = names.get(str(stray))
+            matches = everyone.get(name_key(name), []) if name else []
+            if len(matches) != 1:
+                plan["review"].append({"id": stray, "name": name, "reason": "not identified" if not name else ("no employee with this name" if not matches else "several employees share this name")})
+            elif matches[0].status != "active":
+                plan["leaver"].append({"id": stray, "who": matches[0].full_name})
+            else:
+                per_person[matches[0]].append(stray)
+        for employee, strays in per_person.items():
+            if not employee.employee_id.isdigit() or len(by_number[int(employee.employee_id)]) != 1:
+                plan["review"].extend({"id": s, "name": employee.full_name, "reason": "staff number is not a unique number"} for s in strays)
+                continue
+            own_id = int(employee.employee_id)
+            if claimed_by.get(own_id, set()) - {employee.pk}:
+                plan["review"].extend({"id": s, "name": employee.full_name, "reason": f"their staff number {own_id} is held by someone else here"} for s in strays)
+                continue
+            own_kinds = set(_held(slots.get(own_id, set())))
+            strays.sort(key=lambda s: -len(_held(slots[s])))
+            first = strays[0]
+            move_slots = sorted(n for kind, numbers in _held(slots[first]).items() if kind not in own_kinds for n in numbers)
+            plan["move"].append({"id": first, "to": own_id, "who": employee.full_name, "employee": employee, "slots": move_slots})
+            covered = own_kinds | set(_held(slots[first]))
+            for extra in strays[1:]:
+                if set(_held(slots[extra])) <= covered:
+                    plan["extra_copy"].append({"id": extra, "who": employee.full_name})
+                else:
+                    plan["review"].append({"id": extra, "name": employee.full_name, "reason": "holds a credential no other entry of theirs has"})
+        report[device] = plan
+        if not apply:
+            continue
+        for item in plan["leaver"] + plan["extra_copy"]:
+            if limit is not None and queued >= limit:
+                return report
+            if (device.pk, item["id"]) not in waiting:
+                DeviceCommand.objects.create(device=device, command_type="purge_user", payload={"enrollid": item["id"], "reason": "leftover entry: not an active person's own entry"})
+                queued += 1
+        for item in plan["move"]:
+            if limit is not None and queued >= limit:
+                return report
+            if (device.pk, item["id"]) not in waiting_moves:
+                DeviceCommand.objects.create(device=device, command_type="clone_enrollment", payload={"renumber": True, "employee_id": item["employee"].pk, "name": item["who"], "from_id": item["id"], "to_id": item["to"], "slots": item["slots"]})
+                queued += 1
+    return report

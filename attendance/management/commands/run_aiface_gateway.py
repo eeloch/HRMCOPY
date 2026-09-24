@@ -14,6 +14,7 @@ Requires the `websockets` package (see requirements.txt).
 
 import asyncio
 import json
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
@@ -268,6 +269,8 @@ class Command(BaseCommand):
                         await self._run_slot_clone(ws, sn, command_id)
                     elif kind == "renumber":
                         await self._run_renumber(ws, sn, command_id)
+                    elif kind == "name_probe":
+                        await self._run_name_probe(ws, sn, command_id)
                     else:
                         await self._run_clone_enrollment(ws, sn, command_id)
                     continue
@@ -378,6 +381,8 @@ class Command(BaseCommand):
             return "slot_clone"
         if command.command_type == "clone_enrollment" and command.payload.get("renumber"):
             return "renumber"
+        if command.command_type == "clone_enrollment" and command.payload.get("name_probe"):
+            return "name_probe"
         return command.command_type
 
     async def _run_slot_clone(self, ws, sn, command_id):
@@ -561,6 +566,26 @@ class Command(BaseCommand):
             if employee.pk in {e.pk for e in gated_employees(only=[employee.pk])}:
                 # The new entry starts switched on; make it match what the person has left today.
                 _queue(device, employee, to_id, tickets_left_today(employee) > 0)
+
+    async def _run_name_probe(self, ws, sn, command_id):
+        """Ask a terminal for the NAME it holds against some ids, to work out whose leftover entries they are. One
+        small credential is requested per id (never a face when anything smaller exists - the plan picks the slot);
+        only the name is kept. The credential in the reply is dropped at once: not stored, not logged."""
+        await self._run_db(self._mark_command_sent, command_id)
+        command = await self._run_db(lambda: DeviceCommand.objects.get(pk=command_id))
+        names, missing = {}, []
+        for item in command.payload["items"]:
+            try:
+                reply = await self._send_and_wait(ws, sn, build_getuserinfo_slot_command(sn, int(item["enrollid"]), int(item["backupnum"])), CLONE_REPLY_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                missing.append(item["enrollid"])
+                continue
+            if reply.get("result") and reply.get("name") is not None:
+                names[str(item["enrollid"])] = str(reply["name"])
+            else:
+                missing.append(item["enrollid"])
+            reply = None
+        await self._run_db(self._finish_clone_command, command_id, "acked" if names else "failed", {"names": names, "missing": missing})
 
     async def _run_list_user_slots(self, ws, sn, command_id):
         """Read every enrolled (enrollid, backupnum) slot off one terminal, a page at a time, and store the list

@@ -195,3 +195,71 @@ class BacklogAndPriorityTests(TestCase):
         move = DeviceCommand.objects.create(device=device, command_type="clone_enrollment", payload={"renumber": True, "employee_id": 2})
         self.assertEqual(Command._next_command_to_send("D9")[0], move.pk)
         self.assertNotEqual(relay.pk, move.pk)
+
+
+class MirrorPlanTests(TestCase):
+    def setUp(self):
+        from attendance.services import device_sync
+
+        self.ds = device_sync
+        self.dev = BiometricDevice.objects.create(name="D", serial_number="D1", location="x", device_type="factory", purpose="attendance")
+        self.ada = Employee.objects.create(employee_id="000040", first_name="Ada", last_name="Okafor", status="active")
+
+    def listing(self, slots):
+        DeviceCommand.objects.create(device=self.dev, command_type="list_user_slots", status="acked", completed_at=timezone.now(), result={"slots": slots})
+
+    def probe_result(self, names):
+        DeviceCommand.objects.create(device=self.dev, command_type="clone_enrollment", status="acked", completed_at=timezone.now(), payload={"name_probe": True, "items": []}, result={"names": names})
+
+    def own(self, enrollid=40):
+        BiometricIdentity.objects.create(employee=self.ada, system=IDENTITY_SYSTEM, source_identifier="D1", external_user_id=str(enrollid))
+
+    def test_names_compare_regardless_of_order_and_case(self):
+        self.assertEqual(self.ds.name_key("OKAFOR  ada"), self.ds.name_key("Ada Okafor"))
+
+    def test_the_smallest_credential_is_asked_for_and_a_face_only_when_nothing_else_exists(self):
+        self.assertEqual(self.ds._probe_slot({50, 0, 11}), 11)
+        self.assertEqual(self.ds._probe_slot({50, 3}), 3)
+        self.assertEqual(self.ds._probe_slot({50}), 50)
+
+    def test_only_unidentifiable_entries_are_probed_and_a_leavers_number_is_not(self):
+        Employee.objects.create(employee_id="000099", first_name="Gone", last_name="Leaver", status="inactive")
+        self.own(); self.listing([[40, 50], [1500, 0], [99, 0]])
+        self.assertEqual(self.ds.queue_name_probes([self.dev]), 1)
+        (job,) = DeviceCommand.objects.filter(payload__has_key="name_probe")
+        self.assertEqual(job.payload["items"], [{"enrollid": 1500, "backupnum": 0}])
+
+    def test_a_leftover_copy_of_an_active_person_is_moved_onto_their_staff_number(self):
+        self.own(); self.listing([[40, 50], [1500, 0], [1500, 50]]); self.probe_result({"1500": "ada OKAFOR"})
+        plan = self.ds.plan_mirror([self.dev])[self.dev]
+        self.assertEqual([(m["id"], m["to"], m["slots"]) for m in plan["move"]], [(1500, 40, [0])])
+        self.assertEqual(plan["leaver"] + plan["review"], [])
+
+    def test_a_leavers_entry_and_a_useless_second_copy_are_deleted_and_an_unknown_name_is_left_for_review(self):
+        Employee.objects.create(employee_id="000099", first_name="Gone", last_name="Leaver", status="inactive")
+        self.own(); self.listing([[40, 50], [40, 0], [1500, 0], [1501, 0], [99, 0], [1600, 0]])
+        self.probe_result({"1500": "Ada Okafor", "1501": "Ada Okafor", "1600": "Somebody Else"})
+        plan = self.ds.plan_mirror([self.dev])[self.dev]
+        self.assertEqual([i["id"] for i in plan["leaver"]], [99])
+        self.assertEqual([i["id"] for i in plan["move"]], [1500])
+        self.assertEqual([i["id"] for i in plan["extra_copy"]], [1501])
+        self.assertEqual([(i["id"], i["reason"]) for i in plan["review"]], [(1600, "no employee with this name")])
+
+    def test_apply_queues_the_deletions_and_moves_but_never_the_review_entries(self):
+        Employee.objects.create(employee_id="000099", first_name="Gone", last_name="Leaver", status="inactive")
+        self.own(); self.listing([[40, 50], [1500, 0], [99, 0], [1600, 0]]); self.probe_result({"1500": "Ada Okafor", "1600": "Nobody Known"})
+        self.ds.plan_mirror([self.dev], apply=True)
+        self.assertEqual(DeviceCommand.objects.get(command_type="purge_user").payload["enrollid"], 99)
+        move = DeviceCommand.objects.get(payload__has_key="renumber")
+        self.assertEqual((move.payload["from_id"], move.payload["to_id"]), (1500, 40))
+        self.assertFalse(DeviceCommand.objects.filter(payload__enrollid=1600).exists())
+        self.ds.plan_mirror([self.dev], apply=True)  # repeating queues nothing new
+        self.assertEqual(DeviceCommand.objects.filter(command_type="purge_user").count(), 1)
+
+    def test_an_active_persons_staff_number_held_by_someone_else_is_never_taken(self):
+        bob = Employee.objects.create(employee_id="000041", first_name="Bob", last_name="B", status="active")
+        BiometricIdentity.objects.create(employee=bob, system=IDENTITY_SYSTEM, source_identifier="D1", external_user_id="40")
+        self.listing([[40, 0], [1500, 0]]); self.probe_result({"1500": "Ada Okafor"})
+        plan = self.ds.plan_mirror([self.dev])[self.dev]
+        self.assertEqual(plan["move"], [])
+        self.assertEqual(plan["review"][0]["id"], 1500)

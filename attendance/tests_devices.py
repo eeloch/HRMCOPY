@@ -1324,3 +1324,29 @@ class PlanRenumbersTests(TestCase):
         self.identity(1500); self.listing([[1500, 0]])
         DeviceCommand.objects.filter(command_type="list_user_slots").update(completed_at=timezone.now() - timedelta(hours=2))
         self.assertEqual(self.plan([self.device]), [])
+
+
+class NameProbeTests(TransactionTestCase):
+    SN = "AYTK14145399"
+
+    def test_only_the_name_is_kept_and_the_credential_is_never_stored_or_logged(self):
+        device = BiometricDevice.objects.create(name="Terminal A", serial_number=self.SN, location="x", device_type="factory", is_online=True)
+        log = io.StringIO()
+        gateway = Command(stdout=log)
+        gateway._connections, gateway._pending_replies, gateway._locks = {}, {}, {}
+        job = DeviceCommand.objects.create(device=device, command_type="clone_enrollment", status="pending", payload={"name_probe": True, "items": [{"enrollid": 1500, "backupnum": 0}, {"enrollid": 1501, "backupnum": 0}]})
+
+        def responder(message):
+            if message["enrollid"] == 1500:
+                return {"ret": "getuserinfo", "result": True, "name": "Ada Okafor", "record": TEMPLATE}
+            return {"ret": "getuserinfo", "result": False}
+
+        ws = FakeTerminal(gateway, self.SN, responder)
+        gateway._connections[self.SN] = ws
+        asyncio.run(gateway._run_name_probe(ws, self.SN, job.id))
+        job.refresh_from_db()
+
+        self.assertEqual(job.status, "acked")
+        self.assertEqual(job.result, {"names": {"1500": "Ada Okafor"}, "missing": [1501]})
+        self.assertNotIn(TEMPLATE, json.dumps(job.result) + json.dumps(job.payload) + log.getvalue())
+        self.assertEqual({m["backupnum"] for m in ws.sent}, {0})  # it asked for a fingerprint slot, not a face
