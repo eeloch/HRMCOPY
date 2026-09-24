@@ -363,3 +363,48 @@ class ListUserSlotsTests(NextCommandPriorityTests):
     def test_a_slot_listing_is_handed_to_the_multi_message_handler_not_sent_as_one_wire_message(self):
         command = self.queue(self.attendance, "list_user_slots", {})
         self.assertEqual(self.next_command("ATT1"), (command.pk, None))
+
+
+class SlotListingCompletenessTests(SimpleTestCase):
+    """A listing that stops early must never be stored as the terminal's whole list (2026-09-24: a terminal holding
+    533 people was recorded as holding 48, which planned hundreds of pointless relays)."""
+
+    def run_listing(self, pages):
+        import asyncio
+
+        from attendance.management.commands.run_aiface_gateway import Command
+
+        command, finished = Command(), []
+        replies = iter(pages)
+
+        async def send_and_wait(ws, sn, message, timeout):
+            reply = next(replies)
+            if reply is None:
+                raise asyncio.TimeoutError
+            return reply
+
+        async def run_db(func, *args):
+            if func.__name__ == "_finish_clone_command":
+                finished.append(args[1:])
+
+        command._send_and_wait, command._run_db = send_and_wait, run_db
+        asyncio.run(command._run_list_user_slots(None, "S1", 1))
+        return finished
+
+    @staticmethod
+    def page(size):
+        return {"result": True, "record": [{"enrollid": n, "backupnum": 50} for n in range(size)]}
+
+    def test_a_short_last_page_ends_the_list(self):
+        finished = self.run_listing([self.page(100), self.page(100), self.page(24)])
+        self.assertEqual(finished[0][0], "acked")
+        self.assertEqual(len(finished[0][1]["slots"]), 224)
+
+    def test_going_quiet_after_a_full_page_is_a_failure_not_a_result(self):
+        finished = self.run_listing([self.page(100), None])
+        self.assertEqual(finished[0][0], "failed")
+        self.assertIn("incomplete", finished[0][1]["detail"])
+
+    def test_an_empty_page_ends_the_list(self):
+        finished = self.run_listing([self.page(100), {"result": True, "record": []}])
+        self.assertEqual(finished[0][0], "acked")
