@@ -642,7 +642,6 @@ class EmployeeImportAPIView(APIView):
             )
         }
 
-        can_set_salary = request.user.has_perm("employees.view_salary")
         can_set_bank_details = request.user.has_perm("employees.view_bank_details")
 
         serializers = []
@@ -652,14 +651,12 @@ class EmployeeImportAPIView(APIView):
         for item in rows_to_import:
             existing_id = item["data"].get("existing_employee_id")
             row_data = item["data"]
-            if not can_set_salary or row_data.get("basic_salary") is None:
-                # The importer always fills basic_salary (defaulting to 0
-                # when the sheet has no value), so treating its mere presence
-                # as "trying to set a salary" would fail every row for an
-                # importer without this permission, even on sheets that never
-                # mention pay. Drop it instead: creates get the model
-                # default, updates leave the employee's existing salary untouched.
-                row_data = {key: value for key, value in row_data.items() if key != "basic_salary"}
+            # The employee spreadsheet import never touches pay, whoever runs it and
+            # whatever the sheet contains: salaries are changed only through the
+            # dedicated salary import (or the employee form). On 2026-09-23 a re-import
+            # with a blank Amount column overwrote 471 salaries with 0. Creates get
+            # the model default; updates leave the stored salary alone.
+            row_data = {key: value for key, value in row_data.items() if key != "basic_salary"}
             if not can_set_bank_details:
                 # Same reasoning as basic_salary above - drop rather than fail the row.
                 row_data = {
