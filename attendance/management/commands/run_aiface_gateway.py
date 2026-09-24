@@ -770,6 +770,9 @@ class Command(BaseCommand):
                     When(command_type="set_user_enabled", then=0),
                     # A read-only listing is quick and must not wait behind a backlog of clone relays.
                     When(command_type="list_user_slots", then=1),
+                    # A move to the staff-number id fixes who a scan is counted for, so it goes ahead of the
+                    # coverage relays that would otherwise leave it waiting behind hundreds of them.
+                    When(command_type="clone_enrollment", payload__has_key="renumber", then=1),
                     When(command_type__in=DeviceCommand.BACKGROUND_TYPES, then=2),
                     default=1,
                 ),

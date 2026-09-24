@@ -1,3 +1,5 @@
+from unittest import mock
+
 from django.test import TestCase
 from django.utils import timezone
 
@@ -167,3 +169,29 @@ class DuplicateRepairTests(TestCase):
         BiometricIdentity.objects.update(external_user_id="1488")
         call_command("repair_duplicate_ids", "--apply", "--delete-copies", stdout=StringIO())
         self.assertEqual(DeviceCommand.objects.get(command_type="purge_user").payload["enrollid"], 1488)
+
+
+class BacklogAndPriorityTests(TestCase):
+    def test_the_planner_stops_adding_relays_to_a_terminal_that_already_has_a_long_queue(self):
+        from attendance.services import device_sync
+
+        a = BiometricDevice.objects.create(name="A", serial_number="A1", location="x", device_type="factory", purpose="attendance")
+        b = BiometricDevice.objects.create(name="B", serial_number="B1", location="x", device_type="factory", purpose="attendance")
+        for number in range(1, 6):
+            person = Employee.objects.create(employee_id=f"{number:06d}", first_name="P", last_name=str(number), status="active")
+            for device in (a, b):
+                BiometricIdentity.objects.create(employee=person, system=IDENTITY_SYSTEM, source_identifier=device.serial_number, external_user_id=str(number))
+        DeviceCommand.objects.create(device=a, command_type="list_user_slots", status="acked", completed_at=timezone.now(), result={"slots": [[n, 0] for n in range(1, 6)]})
+        DeviceCommand.objects.create(device=b, command_type="list_user_slots", status="acked", completed_at=timezone.now(), result={"slots": []})
+        with mock.patch.object(device_sync, "MAX_WAITING_PER_SOURCE", 3):
+            device_sync.plan_slot_clones([a, b])
+        self.assertEqual(DeviceCommand.objects.filter(command_type="clone_enrollment", status="pending").count(), 3)
+
+    def test_a_move_to_the_staff_number_goes_before_the_coverage_relays(self):
+        from attendance.management.commands.run_aiface_gateway import Command
+
+        device = BiometricDevice.objects.create(name="D", serial_number="D9", location="x", device_type="factory", purpose="attendance")
+        relay = DeviceCommand.objects.create(device=device, command_type="clone_enrollment", payload={"pushes": [], "employee_id": 1})
+        move = DeviceCommand.objects.create(device=device, command_type="clone_enrollment", payload={"renumber": True, "employee_id": 2})
+        self.assertEqual(Command._next_command_to_send("D9")[0], move.pk)
+        self.assertNotEqual(relay.pk, move.pk)

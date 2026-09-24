@@ -87,6 +87,9 @@ SYNC_SLOT_KINDS = (
 # A terminal that has refused the same credential for the same person this many times lately is left alone for the
 # cool-down: 2026-09-24, 79 refused pairs were retried three or more times each, keeping the queue busy with pushes
 # that were never going to be accepted.
+# Relays waiting on one source terminal before the planner stops adding more: the terminals work one job at a time
+# over a connection that keeps dropping, and 2026-09-24 the queues reached 258 (Dev 3) while it was still planning.
+MAX_WAITING_PER_SOURCE = 40
 REJECTION_LIMIT = 2
 REJECTION_COOLDOWN = timedelta(hours=6)
 
@@ -195,10 +198,10 @@ def plan_slot_clones(devices, *, limit=None):
         if identity.external_user_id.isdigit():
             enrollid_of[identity.employee_id][identity.source_identifier] = int(identity.external_user_id)
 
-    waiting = {
-        (command.payload.get("employee_id"), command.device_id)
-        for command in DeviceCommand.objects.filter(command_type="clone_enrollment", status__in=("pending", "sent"))
-    }
+    waiting, backlog = set(), defaultdict(int)
+    for command in DeviceCommand.objects.filter(command_type="clone_enrollment", status__in=("pending", "sent")):
+        waiting.add((command.payload.get("employee_id"), command.device_id))
+        backlog[command.device_id] += 1
     employees = {e.pk: e for e in Employee.objects.filter(pk__in=list(enrollid_of))}
     refused = recent_rejections(list(device_by_serial.values()))
 
@@ -220,8 +223,9 @@ def plan_slot_clones(devices, *, limit=None):
                     plans[source][target] |= have[source][kind]
         for source, targets in plans.items():
             source_device = device_by_serial[source]
-            if (employee_id, source_device.pk) in waiting:
+            if (employee_id, source_device.pk) in waiting or backlog[source_device.pk] >= MAX_WAITING_PER_SOURCE:
                 continue
+            backlog[source_device.pk] += 1
             DeviceCommand.objects.create(
                 device=source_device, command_type="clone_enrollment",
                 payload={
