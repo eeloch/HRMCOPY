@@ -276,24 +276,20 @@ class Command(BaseCommand):
             self.stderr.write(f"roster extension failed: {error}")
 
     def _auto_sync_enrollments(self):
-        """Keep the terminals identical without anyone pressing a button. Each pass: ask attendance terminals
+        """Keep every terminal - attendance and meal-ticket - identical without anyone pressing a button. Each pass: ask terminals
         for what they really hold (when the last answer is old), link ids that match a staff number (people
         enrolled at a terminal's own keypad are otherwise invisible - their scans are rejected as "unmapped"),
         then copy whatever credentials (face, fingerprint, card, password) any terminal lacks. Relays fail
         routinely (terminals drop their connection every ~30s), so the next pass simply retries what is left."""
         try:
-            from attendance.services.device_sync import link_ids_by_staff_number, plan_slot_clones, queue_listings, queue_missing_clones, reachable_devices
+            from attendance.services.device_sync import link_ids_by_staff_number, plan_slot_clones, queue_listings, reachable_devices
 
             devices = reachable_devices()
-            attendance_devices = [d for d in devices if d.purpose == "attendance"]
-            listed = queue_listings(attendance_devices)
-            linked = link_ids_by_staff_number(attendance_devices)
-            planned = plan_slot_clones(attendance_devices, limit=AUTO_SYNC_MAX_JOBS)
-            # New people also have to reach the meal terminals (face only there); attendance-to-attendance is
-            # handled slot by slot above.
-            legacy = queue_missing_clones(devices, limit=AUTO_SYNC_MAX_JOBS, target_purpose="meal_ticket") if len(devices) >= 2 else []
-            if listed or linked or planned or legacy:
-                self.stdout.write(f"auto sync: listings requested {listed}, ids linked {linked}, slot relays queued {len(planned)}, meal relays queued {len(legacy)}")
+            listed = queue_listings(devices)
+            linked = link_ids_by_staff_number(devices)
+            planned = plan_slot_clones(devices, limit=AUTO_SYNC_MAX_JOBS)
+            if listed or linked or planned:
+                self.stdout.write(f"auto sync: listings requested {listed}, ids linked {linked}, slot relays queued {len(planned)}")
         except Exception as error:  # never let this take the gateway down
             self.stderr.write(f"auto sync failed: {error}")
 

@@ -185,7 +185,9 @@ def plan_slot_clones(devices, *, limit=None):
             holders = [serial for serial in slots_by_serial if have[serial].get(kind)]
             if not holders:
                 continue
-            source = max(holders, key=lambda serial: sum(len(v) for v in have[serial].values()))
+            # Prefer an attendance terminal as the source: reading from a meal terminal competes with its
+            # switch-offs during service.
+            source = max(holders, key=lambda serial: (device_by_serial[serial].purpose != "meal_ticket", sum(len(v) for v in have[serial].values())))
             for target in slots_by_serial:
                 if target != source and not have[target].get(kind):
                     plans[source][target] |= have[source][kind]

@@ -65,3 +65,12 @@ class SlotSyncTests(TestCase):
         plan_slot_clones([self.a, self.b])
         self.assertEqual(plan_slot_clones([self.a, self.b]), [])
         self.assertEqual(DeviceCommand.objects.filter(command_type="clone_enrollment").count(), 1)
+
+    def test_meal_terminals_take_part_and_an_attendance_terminal_is_the_preferred_source(self):
+        meal = BiometricDevice.objects.create(name="M", serial_number="M1", location="x", device_type="factory", purpose="meal_ticket")
+        self.identity(self.a, 7); self.identity(meal, 7)
+        self.listing(self.a, [[7, 50], [7, 0]]); self.listing(meal, [[7, 50], [7, 0]]); self.listing(self.b, [])
+        plan_slot_clones([self.a, self.b, meal])
+        command = DeviceCommand.objects.get(command_type="clone_enrollment")
+        self.assertEqual(command.device, self.a)  # not the meal terminal, though it holds the same credentials
+        self.assertEqual(command.payload["pushes"], [{"target_device_id": self.b.pk, "backupnums": [0, 50]}])

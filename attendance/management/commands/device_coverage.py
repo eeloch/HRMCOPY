@@ -38,7 +38,7 @@ class Command(BaseCommand):
         """One pass of what the gateway does every 15 minutes: link ids, then queue the missing credentials."""
         from attendance.services.device_sync import link_ids_by_staff_number, plan_slot_clones
 
-        devices = list(BiometricDevice.objects.filter(purpose="attendance"))
+        devices = list(BiometricDevice.objects.all())
         linked = link_ids_by_staff_number(devices)
         planned = plan_slot_clones(devices)
         self.stdout.write(f"ids linked: {linked} | people with credentials queued for copying: {len(planned)}")
