@@ -47,7 +47,58 @@ class EmployeeMealEntitlementAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at",)
 
 
+class _EmployeeColumnsMixin:
+    """Staff number and name as their own columns, so a row says who it is about instead of 'object (771)'."""
+
+    @admin.display(description="Staff No.", ordering="employee__employee_id")
+    def staff_number(self, obj):
+        return obj.employee.employee_id
+
+    @admin.display(description="Employee", ordering="employee__first_name")
+    def employee_name(self, obj):
+        return obj.employee.full_name
+
+
+@admin.register(MealCollection)
+class MealCollectionAdmin(_EmployeeColumnsMixin, admin.ModelAdmin):
+    list_display = ("id", "staff_number", "employee_name", "work_date", "ticket", "status", "collected_at", "device", "voided_at")
+    list_filter = ("status", "work_date", "event__device")
+    search_fields = ("employee__employee_id", "employee__first_name", "employee__last_name", "employee__middle_name")
+    list_select_related = ("employee", "event", "event__device")
+    date_hierarchy = "work_date"
+    raw_id_fields = ("event", "employee", "excess_exception", "voided_by")
+    ordering = ("-event__timestamp",)
+
+    @admin.display(description="Ticket", ordering="sequence_number")
+    def ticket(self, obj):
+        return f"{obj.sequence_number} of {obj.entitlement_snapshot}"
+
+    @admin.display(description="Collected at", ordering="event__timestamp")
+    def collected_at(self, obj):
+        return obj.event.timestamp
+
+    @admin.display(description="Terminal", ordering="event__device__name")
+    def device(self, obj):
+        return obj.event.device.name
+
+
+@admin.register(MealEvent)
+class MealEventAdmin(_EmployeeColumnsMixin, admin.ModelAdmin):
+    list_display = ("id", "staff_number", "employee_name", "timestamp", "device", "verification_type")
+    list_filter = ("device", "verification_type")
+    search_fields = ("employee__employee_id", "employee__first_name", "employee__last_name", "employee__middle_name")
+    list_select_related = ("employee", "device")
+    date_hierarchy = "timestamp"
+    raw_id_fields = ("employee",)
+
+
+@admin.register(MealExcessException)
+class MealExcessExceptionAdmin(_EmployeeColumnsMixin, admin.ModelAdmin):
+    list_display = ("id", "staff_number", "employee_name", "work_date", "excess_quantity", "proposed_deduction", "status", "reviewer")
+    list_filter = ("status", "work_date")
+    search_fields = ("employee__employee_id", "employee__first_name", "employee__last_name", "employee__middle_name")
+    list_select_related = ("employee", "reviewer")
+    raw_id_fields = ("employee",)
+
+
 admin.site.register(MealEntitlementRule)
-admin.site.register(MealEvent)
-admin.site.register(MealCollection)
-admin.site.register(MealExcessException)

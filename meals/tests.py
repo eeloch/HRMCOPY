@@ -2175,3 +2175,29 @@ class ExtraTicketAuthorizationTests(TestCase):
         client.force_authenticate(viewer)
         self.assertEqual(client.get("/api/meals/extra-authorizations/").status_code, 200)
         self.assertEqual(client.post("/api/meals/extra-authorizations/", {"employee": self.person.pk, "quantity": 1, "pays": "employee"}, format="json").status_code, 403)
+
+
+class MealAdminListTests(TestCase):
+    """The admin lists show who each row is about, not 'MealCollection object (771)'."""
+
+    def test_collection_change_list_shows_the_employee(self):
+        from datetime import date
+
+        from django.contrib.auth import get_user_model
+        from django.utils import timezone
+
+        from employees.models import Employee
+        from meals.models import MealCollection, MealDevice, MealEvent
+
+        admin_user = get_user_model().objects.create_superuser("admin-x", "a@b.c", "pw")
+        employee = Employee.objects.create(employee_id="009999", first_name="Ada", last_name="Okafor", status="active")
+        device = MealDevice.objects.create(name="Canteen", serial_number="M-ADM", active=True)
+        event = MealEvent.objects.create(employee=employee, device=device, timestamp=timezone.now(), external_event_id="adm-1", source_system="t")
+        MealCollection.objects.create(event=event, employee=employee, work_date=date.today(), sequence_number=1, entitlement_snapshot=2, rate_snapshot="500", status="within_entitlement")
+        self.client.force_login(admin_user)
+        response = self.client.get("/admin/meals/mealcollection/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "009999")
+        self.assertContains(response, "Ada Okafor")
+        self.assertContains(response, "1 of 2")
+        self.assertContains(response, "Canteen")
