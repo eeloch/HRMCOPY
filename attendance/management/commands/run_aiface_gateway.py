@@ -51,6 +51,7 @@ COMMAND_POLL_INTERVAL_SECONDS = 2
 # hangs up when no pong comes back within 20s, and the terminals do not answer WebSocket pings. Server pings are
 # off; instead a connection is dropped only when the terminal has sent nothing at all for DEVICE_SILENCE_LIMIT.
 DEVICE_SILENCE_LIMIT_SECONDS = 180
+LISTING_MIN_FRACTION_OF_PREVIOUS = 0.8
 DEVICE_TOUCH_EVERY_SECONDS = 20
 ATTENDANCE_REFRESH_SECONDS = 300  # turn punches into attendance records this often (today and yesterday)
 ROSTER_EXTEND_CHECK_SECONDS = 3600  # once an hour we check whether today's roster extension has run
@@ -274,6 +275,11 @@ class Command(BaseCommand):
             pass
 
     @staticmethod
+    def _previous_listing_size(serial_number):
+        last = DeviceCommand.objects.filter(device__serial_number=serial_number, command_type="list_user_slots", status="acked").order_by("-id").first()
+        return len(last.result.get("slots", [])) if last else 0
+
+    @staticmethod
     def _requeue_lost_switches(serial_number):
         DeviceCommand.objects.filter(device__serial_number=serial_number, command_type="set_user_enabled", status="sent").update(status="pending", sent_at=None)
 
@@ -429,10 +435,9 @@ class Command(BaseCommand):
     async def _run_list_user_slots(self, ws, sn, command_id):
         """Read every enrolled (enrollid, backupnum) slot off one terminal, a page at a time, and store the list
         on the command. Read-only: it changes nothing on the terminal. The end of the list is a page with no
-        records or a page shorter than the first one. Going quiet after a full page is NOT an end: that is a
-        dropped connection and the partial list is discarded."""
+        records; going quiet is accepted as the end only if the list is not much smaller than the previous one."""
         await self._run_db(self._mark_command_sent, command_id)
-        slots, pages, first, first_page_size, last_page_size, ended = [], 0, True, 0, 0, False
+        slots, pages, first, ended = [], 0, True, False
         try:
             while pages < LIST_USER_SLOTS_MAX_PAGES:
                 timeout = CLONE_REPLY_TIMEOUT_SECONDS if first else LIST_USER_SLOTS_NEXT_PAGE_WAIT_SECONDS
@@ -452,20 +457,18 @@ class Command(BaseCommand):
                     break
                 slots.extend([record.get("enrollid"), record.get("backupnum")] for record in records)
                 pages += 1
-                first_page_size = first_page_size or len(records)
-                last_page_size = len(records)
-                if last_page_size < first_page_size:
-                    ended = True  # a short page is the last one
-                    break
         except asyncio.TimeoutError:
             await self._run_db(self._finish_clone_command, command_id, "failed", {"detail": "The terminal did not answer the user-list request."})
             return
         if not ended and pages < LIST_USER_SLOTS_MAX_PAGES:
-            # The terminal went quiet (usually its ~30s reconnect) after a full page. Storing this as if it were
-            # the whole list made a terminal that holds 533 people look like it held 48, which planned hundreds
-            # of pointless relays - so an unfinished list is a failure, never a result.
-            await self._run_db(self._finish_clone_command, command_id, "failed", {"detail": f"The terminal stopped answering after {pages} page(s); the list is incomplete and was discarded."})
-            return
+            # Silence after a page can be the end of the list (the vendor's own server relies on that) or a dropped
+            # connection. Page sizes vary, so a short page proves nothing. Told apart by size: a list far smaller
+            # than the last one we read is a cut-off list. Storing one made a terminal holding 533 people look like
+            # it held 48 and another look like it held 103, which planned hundreds of pointless relays.
+            previous = await self._run_db(self._previous_listing_size, sn)
+            if previous and len(slots) < previous * LISTING_MIN_FRACTION_OF_PREVIOUS:
+                await self._run_db(self._finish_clone_command, command_id, "failed", {"detail": f"The terminal stopped answering after {pages} page(s) with {len(slots)} slots, against {previous} last time; the list is incomplete and was discarded."})
+                return
         self.stdout.write(f"[{sn}] list_user_slots: {len(slots)} slot(s) in {pages} page(s)")
         await self._run_db(self._finish_clone_command, command_id, "acked", {"slots": slots, "pages": pages})
 

@@ -367,9 +367,9 @@ class ListUserSlotsTests(NextCommandPriorityTests):
 
 class SlotListingCompletenessTests(SimpleTestCase):
     """A listing that stops early must never be stored as the terminal's whole list (2026-09-24: a terminal holding
-    533 people was recorded as holding 48, which planned hundreds of pointless relays)."""
+    533 people was recorded as holding 48, another as holding 103, which planned hundreds of pointless relays)."""
 
-    def run_listing(self, pages):
+    def run_listing(self, pages, previous=0):
         import asyncio
 
         from attendance.management.commands.run_aiface_gateway import Command
@@ -386,6 +386,8 @@ class SlotListingCompletenessTests(SimpleTestCase):
         async def run_db(func, *args):
             if func.__name__ == "_finish_clone_command":
                 finished.append(args[1:])
+            elif func.__name__ == "_previous_listing_size":
+                return previous
 
         command._send_and_wait, command._run_db = send_and_wait, run_db
         asyncio.run(command._run_list_user_slots(None, "S1", 1))
@@ -395,16 +397,20 @@ class SlotListingCompletenessTests(SimpleTestCase):
     def page(size):
         return {"result": True, "record": [{"enrollid": n, "backupnum": 50} for n in range(size)]}
 
-    def test_a_short_last_page_ends_the_list(self):
-        finished = self.run_listing([self.page(100), self.page(100), self.page(24)])
+    def test_an_empty_page_ends_the_list(self):
+        finished = self.run_listing([self.page(100), self.page(60), {"result": True, "record": []}], previous=160)
         self.assertEqual(finished[0][0], "acked")
-        self.assertEqual(len(finished[0][1]["slots"]), 224)
+        self.assertEqual(len(finished[0][1]["slots"]), 160)
 
-    def test_going_quiet_after_a_full_page_is_a_failure_not_a_result(self):
-        finished = self.run_listing([self.page(100), None])
+    def test_silence_after_the_last_page_is_accepted_when_the_size_matches_last_time(self):
+        finished = self.run_listing([self.page(100), self.page(60), None], previous=165)
+        self.assertEqual(finished[0][0], "acked")
+
+    def test_silence_that_leaves_a_far_smaller_list_than_last_time_is_a_failure(self):
+        finished = self.run_listing([self.page(100), self.page(100), None], previous=1000)
         self.assertEqual(finished[0][0], "failed")
         self.assertIn("incomplete", finished[0][1]["detail"])
 
-    def test_an_empty_page_ends_the_list(self):
-        finished = self.run_listing([self.page(100), {"result": True, "record": []}])
+    def test_the_first_ever_listing_is_accepted(self):
+        finished = self.run_listing([self.page(100), None], previous=0)
         self.assertEqual(finished[0][0], "acked")
