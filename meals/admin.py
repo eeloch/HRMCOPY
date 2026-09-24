@@ -61,7 +61,8 @@ class _EmployeeColumnsMixin:
 
 @admin.register(MealCollection)
 class MealCollectionAdmin(_EmployeeColumnsMixin, admin.ModelAdmin):
-    list_display = ("id", "staff_number", "employee_name", "work_date", "ticket", "status", "collected_at", "device", "voided_at")
+    list_display = ("staff_number", "employee_name", "work_date", "ticket", "status", "collected_at", "device", "voided_at")
+    list_display_links = ("staff_number", "employee_name")
     list_filter = ("status", "work_date", "event__device")
     search_fields = ("employee__employee_id", "employee__first_name", "employee__last_name", "employee__middle_name")
     list_select_related = ("employee", "event", "event__device")
@@ -84,7 +85,8 @@ class MealCollectionAdmin(_EmployeeColumnsMixin, admin.ModelAdmin):
 
 @admin.register(MealEvent)
 class MealEventAdmin(_EmployeeColumnsMixin, admin.ModelAdmin):
-    list_display = ("id", "staff_number", "employee_name", "timestamp", "device", "verification_type")
+    list_display = ("staff_number", "employee_name", "timestamp", "device", "verification_type")
+    list_display_links = ("staff_number", "employee_name")
     list_filter = ("device", "verification_type")
     search_fields = ("employee__employee_id", "employee__first_name", "employee__last_name", "employee__middle_name")
     list_select_related = ("employee", "device")
@@ -94,7 +96,8 @@ class MealEventAdmin(_EmployeeColumnsMixin, admin.ModelAdmin):
 
 @admin.register(MealExcessException)
 class MealExcessExceptionAdmin(_EmployeeColumnsMixin, admin.ModelAdmin):
-    list_display = ("id", "staff_number", "employee_name", "work_date", "excess_quantity", "proposed_deduction", "status", "reviewer")
+    list_display = ("staff_number", "employee_name", "work_date", "excess_quantity", "proposed_deduction", "status", "reviewer")
+    list_display_links = ("staff_number", "employee_name")
     list_filter = ("status", "work_date")
     search_fields = ("employee__employee_id", "employee__first_name", "employee__last_name", "employee__middle_name")
     list_select_related = ("employee", "reviewer")

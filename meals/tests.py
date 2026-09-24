@@ -2201,3 +2201,4 @@ class MealAdminListTests(TestCase):
         self.assertContains(response, "Ada Okafor")
         self.assertContains(response, "1 of 2")
         self.assertContains(response, "Canteen")
+        self.assertNotContains(response, "column-id")  # the row's database id is not shown: the staff number identifies the person
