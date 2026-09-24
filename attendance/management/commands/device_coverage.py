@@ -24,13 +24,24 @@ class Command(BaseCommand):
     help = "queue: ask each terminal for its enrolled slots. report: compare the latest answers."
 
     def add_arguments(self, parser):
-        parser.add_argument("action", choices=["queue", "report"])
+        parser.add_argument("action", choices=["queue", "report", "sync"])
         parser.add_argument("--all-devices", action="store_true", help="Include meal terminals in the report.")
 
     def handle(self, *args, **options):
         if options["action"] == "queue":
             return self.queue()
+        if options["action"] == "sync":
+            return self.sync()
         return self.report(include_meal=options["all_devices"])
+
+    def sync(self):
+        """One pass of what the gateway does every 15 minutes: link ids, then queue the missing credentials."""
+        from attendance.services.device_sync import link_ids_by_staff_number, plan_slot_clones
+
+        devices = list(BiometricDevice.objects.filter(purpose="attendance"))
+        linked = link_ids_by_staff_number(devices)
+        planned = plan_slot_clones(devices)
+        self.stdout.write(f"ids linked: {linked} | people with credentials queued for copying: {len(planned)}")
 
     def queue(self):
         queued = 0

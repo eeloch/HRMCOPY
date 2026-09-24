@@ -145,6 +145,16 @@ def build_setuserinfo_command(sn: str, enrollid: int, name: str, biometric_type:
     }
 
 
+def build_getuserinfo_slot_command(sn: str, enrollid: int, backupnum: int) -> dict:
+    """Ask a terminal for one exact slot of one person (0-9 fingerprint, 10 password, 11 card, 50 face photo)."""
+    return {"cmd": "getuserinfo", "sn": sn, "enrollid": enrollid, "backupnum": int(backupnum)}
+
+
+def build_setuserinfo_slot_command(sn: str, enrollid: int, name: str, backupnum: int, record) -> dict:
+    """Push one exact slot (from build_getuserinfo_slot_command's reply) to a terminal without a live scan."""
+    return {"cmd": "setuserinfo", "sn": sn, "enrollid": enrollid, "name": name, "backupnum": int(backupnum), "admin": 0, "record": record}
+
+
 def build_enableuser_command(sn: str, enrollid: int, enabled: bool) -> dict:
     """Server -> device: switch one enrolled person on or off via the legacy `enableuser` command
     (protocol v1.7, 2017). The vendor doc's Disable example spells the key "enrolled"; both examples

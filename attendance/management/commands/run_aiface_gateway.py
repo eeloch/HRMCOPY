@@ -29,12 +29,14 @@ from attendance.integrations.aiface_protocol import (
     IDENTITY_SYSTEM,
     build_device_command,
     build_getuserinfo_command,
+    build_getuserinfo_slot_command,
     build_getuserlist_command,
     build_reg_ack,
     build_sendlog_ack,
     choose_terminal_reply,
     build_senduser_ack,
     build_setuserinfo_command,
+    build_setuserinfo_slot_command,
     translate_sendlog_record,
 )
 
@@ -49,7 +51,7 @@ ATTENDANCE_REFRESH_SECONDS = 300  # turn punches into attendance records this of
 ROSTER_EXTEND_CHECK_SECONDS = 3600  # once an hour we check whether today's roster extension has run
 MEAL_IDLE_BEFORE_BACKGROUND = timedelta(minutes=10)  # no meal scan for this long = safe to run bulk jobs on a meal terminal
 BACKGROUND_QUIET_HOURS_END = 5  # local hour before which bulk clone/purge jobs may use a meal terminal
-AUTO_SYNC_SECONDS = 1800  # every 30 min, queue clone relays for anyone still missing from a terminal
+AUTO_SYNC_SECONDS = 900  # every 30 min, queue clone relays for anyone still missing from a terminal
 AUTO_SYNC_MAX_JOBS = 60  # per pass, so a big gap fills steadily instead of flooding the queues
 GATING_FULL_CHECK_SECONDS = 300  # everyone is re-checked this often; a person's own scan re-checks them at once
 
@@ -227,9 +229,11 @@ class Command(BaseCommand):
                     continue
                 command_id, wire_message = next_command
                 if wire_message is None:
-                    command_type = await self._run_db(self._command_type, command_id)
-                    if command_type == "list_user_slots":
+                    kind = await self._run_db(self._command_kind, command_id)
+                    if kind == "list_user_slots":
                         await self._run_list_user_slots(ws, sn, command_id)
+                    elif kind == "slot_clone":
+                        await self._run_slot_clone(ws, sn, command_id)
                     else:
                         await self._run_clone_enrollment(ws, sn, command_id)
                     continue
@@ -272,18 +276,24 @@ class Command(BaseCommand):
             self.stderr.write(f"roster extension failed: {error}")
 
     def _auto_sync_enrollments(self):
-        """Relays fail for ordinary reasons (terminals drop their connection every ~30s and a relay needs
-        several round trips), and a failed one used to stay failed until someone pressed Sync All Devices.
-        Re-queue whatever is still missing, a bounded batch at a time."""
+        """Keep the terminals identical without anyone pressing a button. Each pass: ask attendance terminals
+        for what they really hold (when the last answer is old), link ids that match a staff number (people
+        enrolled at a terminal's own keypad are otherwise invisible - their scans are rejected as "unmapped"),
+        then copy whatever credentials (face, fingerprint, card, password) any terminal lacks. Relays fail
+        routinely (terminals drop their connection every ~30s), so the next pass simply retries what is left."""
         try:
-            from attendance.services.device_sync import queue_missing_clones, reachable_devices
+            from attendance.services.device_sync import link_ids_by_staff_number, plan_slot_clones, queue_listings, queue_missing_clones, reachable_devices
 
             devices = reachable_devices()
-            if len(devices) < 2:
-                return
-            queued = queue_missing_clones(devices, limit=AUTO_SYNC_MAX_JOBS)
-            if queued:
-                self.stdout.write(f"auto sync: queued {len(queued)} enrollment relay(s)")
+            attendance_devices = [d for d in devices if d.purpose == "attendance"]
+            listed = queue_listings(attendance_devices)
+            linked = link_ids_by_staff_number(attendance_devices)
+            planned = plan_slot_clones(attendance_devices, limit=AUTO_SYNC_MAX_JOBS)
+            # New people also have to reach the meal terminals (face only there); attendance-to-attendance is
+            # handled slot by slot above.
+            legacy = queue_missing_clones(devices, limit=AUTO_SYNC_MAX_JOBS, target_purpose="meal_ticket") if len(devices) >= 2 else []
+            if listed or linked or planned or legacy:
+                self.stdout.write(f"auto sync: listings requested {listed}, ids linked {linked}, slot relays queued {len(planned)}, meal relays queued {len(legacy)}")
         except Exception as error:  # never let this take the gateway down
             self.stderr.write(f"auto sync failed: {error}")
 
@@ -325,8 +335,70 @@ class Command(BaseCommand):
         return self._connections.get(serial_number)
 
     @staticmethod
-    def _command_type(command_id):
-        return DeviceCommand.objects.filter(pk=command_id).values_list("command_type", flat=True).first()
+    def _command_kind(command_id):
+        command = DeviceCommand.objects.filter(pk=command_id).only("command_type", "payload").first()
+        if command is None:
+            return None
+        if command.command_type == "clone_enrollment" and command.payload.get("pushes"):
+            return "slot_clone"
+        return command.command_type
+
+    async def _run_slot_clone(self, ws, sn, command_id):
+        """Copy exactly the credentials (backupnums) a person has on this terminal and lacks on others: read each
+        slot from this terminal once, push it to every terminal that needs it. Nothing read is stored or logged.
+        The plan came from what the terminals really hold (see attendance/services/device_sync.plan_slot_clones),
+        so it is safe to repeat - a relay cut off by a dropped connection just runs again and pushes what is
+        still missing."""
+        await self._run_db(self._mark_command_sent, command_id)
+        command = await self._run_db(lambda: DeviceCommand.objects.get(pk=command_id))
+        payload = command.payload
+        enrollid, employee_id, name = payload["enrollid"], payload["employee_id"], payload.get("name", "")
+        pushes = payload["pushes"]
+        targets = {t.pk: t for t in await self._run_db(lambda: list(BiometricDevice.objects.filter(pk__in=[p["target_device_id"] for p in pushes])))}
+
+        pushed, failed, skipped_offline, linked = 0, [], [], set()
+        needs = {}
+        for push in pushes:
+            target = targets.get(push["target_device_id"])
+            if target is None:
+                continue
+            if await self._wait_for_connection(target.serial_number, CLONE_TARGET_WAIT_SECONDS) is None:
+                skipped_offline.append(target.name)
+                continue
+            for backupnum in push["backupnums"]:
+                needs.setdefault(backupnum, []).append(target)
+
+        for backupnum, wanting in needs.items():
+            try:
+                reply = await self._send_and_wait(ws, sn, build_getuserinfo_slot_command(sn, enrollid, backupnum), CLONE_REPLY_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                failed.append({"backupnum": backupnum, "reason": "source did not answer"})
+                continue
+            if not reply.get("result"):
+                failed.append({"backupnum": backupnum, "reason": "source could not return it"})
+                continue
+            record = reply.get("record")
+            for target in wanting:
+                target_ws = self._connections.get(target.serial_number)
+                if target_ws is None:
+                    skipped_offline.append(target.name)
+                    continue
+                target_enrollid = await self._run_db(self._enrollid_for_target, target, enrollid)
+                try:
+                    push_reply = await self._send_and_wait(target_ws, target.serial_number, build_setuserinfo_slot_command(target.serial_number, target_enrollid, name, backupnum, record), CLONE_REPLY_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError:
+                    failed.append({"backupnum": backupnum, "target": target.name, "reason": "timed out"})
+                    continue
+                if not push_reply.get("result"):
+                    failed.append({"backupnum": backupnum, "target": target.name, "reason": "rejected"})
+                    continue
+                pushed += 1
+                if target.pk not in linked:
+                    await self._run_db(self._link_cloned_identity, employee_id, target, target_enrollid)
+                    linked.add(target.pk)
+            record = None  # drop the only reference to the credential as soon as it has been relayed
+        self.stdout.write(f"[{sn}] slot_clone: pushed={pushed} failed={len(failed)} offline={len(skipped_offline)}")
+        await self._run_db(self._finish_clone_command, command_id, "acked" if pushed else "failed", {"pushed": pushed, "failed": failed, "skipped_offline": skipped_offline})
 
     async def _run_list_user_slots(self, ws, sn, command_id):
         """Read every enrolled (enrollid, backupnum) slot off one terminal, a page at a time, and store the list
