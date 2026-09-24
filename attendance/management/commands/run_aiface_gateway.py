@@ -47,6 +47,11 @@ LIST_USER_SLOTS_MAX_PAGES = 600  # 40 records a page: room for 24,000 slots
 LIST_USER_SLOTS_NEXT_PAGE_WAIT_SECONDS = 8
 
 COMMAND_POLL_INTERVAL_SECONDS = 2
+# The terminals were being cut off about every 40s: the websockets library pings each connection every 20s and
+# hangs up when no pong comes back within 20s, and the terminals do not answer WebSocket pings. Server pings are
+# off; instead a connection is dropped only when the terminal has sent nothing at all for DEVICE_SILENCE_LIMIT.
+DEVICE_SILENCE_LIMIT_SECONDS = 180
+DEVICE_TOUCH_EVERY_SECONDS = 20
 ATTENDANCE_REFRESH_SECONDS = 300  # turn punches into attendance records this often (today and yesterday)
 ROSTER_EXTEND_CHECK_SECONDS = 3600  # once an hour we check whether today's roster extension has run
 MEAL_IDLE_BEFORE_BACKGROUND = timedelta(minutes=10)  # no meal scan for this long = safe to run bulk jobs on a meal terminal
@@ -120,7 +125,7 @@ class Command(BaseCommand):
         async def handler(websocket):
             await self._handle_connection(websocket, bridge_url, meal_bridge_url, secret)
 
-        async with websockets.serve(handler, host, port):
+        async with websockets.serve(handler, host, port, ping_interval=None):
             await asyncio.Future()
 
     @staticmethod
@@ -142,9 +147,16 @@ class Command(BaseCommand):
     async def _handle_connection(self, ws, bridge_url, meal_bridge_url, secret):
         sn = None
         peer = ws.remote_address
-        poller_task = None
+        poller_task = watchdog_task = None
+        loop = asyncio.get_running_loop()
+        activity = {"seen": loop.time(), "touched": loop.time()}
         try:
             async for raw_message in ws:
+                activity["seen"] = loop.time()
+                if sn and activity["seen"] - activity["touched"] >= DEVICE_TOUCH_EVERY_SECONDS:
+                    # A connection that now lasts for hours has no fresh `reg` to show the terminal is alive.
+                    activity["touched"] = activity["seen"]
+                    await self._run_db(self._mark_device_online, sn, peer[0] if peer else None)
                 try:
                     message = json.loads(raw_message)
                 except (TypeError, ValueError):
@@ -162,8 +174,10 @@ class Command(BaseCommand):
                     minimal = await self._run_db(self._minimal_reg_for_device, sn)
                     self.stdout.write(f"[{sn}] reg ack: {'minimal (vendor demo style)' if minimal else 'standard'}")
                     await ws.send(json.dumps(build_reg_ack(datetime.now(), minimal=minimal)))
+                    activity["touched"] = activity["seen"]
                     if poller_task is None:
                         poller_task = asyncio.create_task(self._poll_commands(ws, sn))
+                        watchdog_task = asyncio.create_task(self._drop_if_silent(ws, activity))
                 elif cmd == "sendlog":
                     await self._handle_sendlog(ws, message, bridge_url, meal_bridge_url, secret)
                 elif cmd == "senduser":
@@ -185,7 +199,9 @@ class Command(BaseCommand):
         finally:
             if poller_task is not None:
                 poller_task.cancel()
-            self.stdout.write(f"[{peer}] disconnected (sn={sn})")
+            if watchdog_task is not None:
+                watchdog_task.cancel()
+            self.stdout.write(f"[{peer}] disconnected (sn={sn}) close_code={getattr(ws, 'close_code', None)} reason={getattr(ws, 'close_reason', None)!r}")
             if sn:
                 # A switch on/off that was on the wire when the terminal dropped never got an answer: retry it
                 # straight away on the next connection instead of waiting for it to time out.
@@ -196,6 +212,20 @@ class Command(BaseCommand):
             if sn and self._connections.get(sn) is ws:
                 self._connections.pop(sn, None)
                 await self._run_db(self._mark_device_offline, sn)
+
+    @staticmethod
+    async def _drop_if_silent(ws, activity):
+        """Hang up on a terminal that has sent nothing for DEVICE_SILENCE_LIMIT_SECONDS (a half-dead connection);
+        it reconnects on its own. With server pings off this is the only dead-connection check."""
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                await asyncio.sleep(15)
+                if loop.time() - activity["seen"] > DEVICE_SILENCE_LIMIT_SECONDS:
+                    await ws.close()
+                    return
+        except asyncio.CancelledError:
+            pass
 
     async def _poll_commands(self, ws, sn):
         """Deliver queued admin commands (enroll/delete/refresh) one at a time.
