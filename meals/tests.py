@@ -2216,3 +2216,26 @@ class MealAdminListTests(TestCase):
         self.assertContains(response, "1 of 2")
         self.assertContains(response, "Canteen")
         self.assertNotContains(response, "column-id")  # the row's database id is not shown: the staff number identifies the person
+
+
+class ResendSwitchesTests(TestCase):
+    def test_everyone_recorded_as_off_gets_one_legacy_switch_off_and_repeating_adds_none(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        from attendance.models import BiometricDevice, DeviceCommand
+        from meals.models import MealTerminalUserState
+
+        device = BiometricDevice.objects.create(name="Canteen 2", serial_number="MEALRS1", purpose="meal_ticket")
+        off = Employee.objects.create(employee_id="RS-1", first_name="Off", last_name="Person")
+        on = Employee.objects.create(employee_id="RS-2", first_name="On", last_name="Person")
+        for number, person, enabled in ((5, off, False), (6, on, True)):
+            BiometricIdentity.objects.create(employee=person, system=IDENTITY_SYSTEM, source_identifier="MEALRS1", external_user_id=str(number))
+            MealTerminalUserState.objects.create(employee=person, device_serial="MEALRS1", enabled=enabled)
+        call_command("resend_switches", "--device", "Canteen 2", stdout=StringIO())
+        self.assertEqual(DeviceCommand.objects.count(), 0)  # dry run
+        call_command("resend_switches", "--device", "Canteen 2", "--apply", stdout=StringIO())
+        call_command("resend_switches", "--device", "Canteen 2", "--apply", stdout=StringIO())
+        (command,) = DeviceCommand.objects.all()
+        self.assertEqual((command.payload["enrollid"], command.payload["enabled"], command.payload["legacy"]), (5, False, True))
