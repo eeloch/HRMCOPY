@@ -419,10 +419,14 @@ class Command(BaseCommand):
                 try:
                     push_reply = await self._send_and_wait(target_ws, target.serial_number, build_setuserinfo_slot_command(target.serial_number, target_enrollid, name, backupnum, record), CLONE_REPLY_TIMEOUT_SECONDS)
                 except asyncio.TimeoutError:
-                    failed.append({"backupnum": backupnum, "target": target.name, "reason": "timed out"})
+                    failed.append({"backupnum": backupnum, "target": target.name, "target_device_id": target.pk, "reason": "timed out"})
                     continue
                 if not push_reply.get("result"):
-                    failed.append({"backupnum": backupnum, "target": target.name, "reason": "rejected"})
+                    # The terminal's own words (never the credential): 526 face pushes were refused on 2026-09-24
+                    # and "rejected" alone does not say why.
+                    reply = {key: value for key, value in push_reply.items() if key not in ("record", "sn")}
+                    self.stdout.write(f"[{target.serial_number}] setuserinfo slot {backupnum} for enrollid {target_enrollid} refused: {reply}")
+                    failed.append({"backupnum": backupnum, "target": target.name, "target_device_id": target.pk, "reason": "rejected", "reply": reply})
                     continue
                 pushed += 1
                 if target.pk not in linked:

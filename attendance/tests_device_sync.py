@@ -59,6 +59,46 @@ class SlotSyncTests(TestCase):
         self.listing(self.a, [[7, 50]])
         self.assertEqual(plan_slot_clones([self.a, self.b]), [])  # b never answered: we don't guess what it holds
 
+    def refused_face(self, times, *, source=None, by="id"):
+        for _ in range(times):
+            failure = {"backupnum": 50, "reason": "rejected", "target": self.b.name}
+            if by == "id":
+                failure["target_device_id"] = self.b.pk
+            DeviceCommand.objects.create(
+                device=source or self.a, command_type="clone_enrollment", status="failed", completed_at=timezone.now(),
+                payload={"employee_id": self.person.pk, "pushes": [{"target_device_id": self.b.pk, "backupnums": [50]}]},
+                result={"failed": [failure]},
+            )
+
+    def face_only_on_a(self):
+        self.identity(self.a, 7); self.identity(self.b, 7)
+        self.listing(self.a, [[7, 50], [7, 0]]); self.listing(self.b, [[7, 0]])
+
+    def test_a_face_the_target_keeps_refusing_is_left_alone_for_a_while(self):
+        self.face_only_on_a(); self.refused_face(2)
+        self.assertEqual(plan_slot_clones([self.a, self.b]), [])
+
+    def test_one_refusal_is_retried(self):
+        self.face_only_on_a(); self.refused_face(1)
+        self.assertEqual(plan_slot_clones([self.a, self.b]), [self.person.pk])
+
+    def test_refusals_recorded_only_by_terminal_name_still_count(self):
+        self.face_only_on_a(); self.refused_face(2, by="name")
+        self.assertEqual(plan_slot_clones([self.a, self.b]), [])
+
+    def test_old_refusals_are_forgotten_after_the_cooldown(self):
+        from datetime import timedelta
+        self.face_only_on_a(); self.refused_face(3)
+        DeviceCommand.objects.filter(command_type="clone_enrollment").update(completed_at=timezone.now() - timedelta(hours=7))
+        self.assertEqual(plan_slot_clones([self.a, self.b]), [self.person.pk])
+
+    def test_a_refused_face_does_not_stop_the_fingerprint_going_across(self):
+        self.identity(self.a, 7); self.identity(self.b, 7)
+        self.listing(self.a, [[7, 50], [7, 0]]); self.listing(self.b, [])
+        self.refused_face(2)
+        plan_slot_clones([self.a, self.b])
+        self.assertEqual(DeviceCommand.objects.get(command_type="clone_enrollment", status="pending").payload["pushes"][0]["backupnums"], [0])
+
     def test_a_relay_already_waiting_is_not_queued_twice(self):
         self.identity(self.a, 7); self.identity(self.b, 7)
         self.listing(self.a, [[7, 50], [7, 0]]); self.listing(self.b, [[7, 50]])

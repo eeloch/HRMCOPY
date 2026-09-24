@@ -84,6 +84,32 @@ SYNC_SLOT_KINDS = (
 )
 
 
+# A terminal that has refused the same credential for the same person this many times lately is left alone for the
+# cool-down: 2026-09-24, 79 refused pairs were retried three or more times each, keeping the queue busy with pushes
+# that were never going to be accepted.
+REJECTION_LIMIT = 2
+REJECTION_COOLDOWN = timedelta(hours=6)
+
+
+def recent_rejections(devices):
+    """{(employee id, target serial, kind): times refused within the cool-down}, from finished relay jobs."""
+    by_id = {device.pk: device for device in devices}
+    by_name = {device.name: device for device in devices}
+    counts = defaultdict(int)
+    finished = DeviceCommand.objects.filter(
+        command_type="clone_enrollment", payload__has_key="pushes", completed_at__gte=timezone.now() - REJECTION_COOLDOWN,
+    )
+    for command in finished:
+        for failure in (command.result or {}).get("failed", []):
+            if not isinstance(failure, dict) or failure.get("reason") != "rejected":
+                continue
+            target = by_id.get(failure.get("target_device_id")) or by_name.get(failure.get("target"))
+            kind = _kind(failure["backupnum"]) if isinstance(failure.get("backupnum"), int) else None
+            if target and kind:
+                counts[(command.payload.get("employee_id"), target.serial_number, kind)] += 1
+    return counts
+
+
 def latest_slots(device, *, max_age=None):
     """{enrollid: {backupnum, ...}} from the terminal's most recent completed listing, or None when there is
     none (or it is older than max_age)."""
@@ -174,6 +200,7 @@ def plan_slot_clones(devices, *, limit=None):
         for command in DeviceCommand.objects.filter(command_type="clone_enrollment", status__in=("pending", "sent"))
     }
     employees = {e.pk: e for e in Employee.objects.filter(pk__in=list(enrollid_of))}
+    refused = recent_rejections(list(device_by_serial.values()))
 
     queued = []
     for employee_id, ids in enrollid_of.items():
@@ -189,7 +216,7 @@ def plan_slot_clones(devices, *, limit=None):
             # switch-offs during service.
             source = max(holders, key=lambda serial: (device_by_serial[serial].purpose != "meal_ticket", sum(len(v) for v in have[serial].values())))
             for target in slots_by_serial:
-                if target != source and not have[target].get(kind):
+                if target != source and not have[target].get(kind) and refused.get((employee_id, target, kind), 0) < REJECTION_LIMIT:
                     plans[source][target] |= have[source][kind]
         for source, targets in plans.items():
             source_device = device_by_serial[source]
