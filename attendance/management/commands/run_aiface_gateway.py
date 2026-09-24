@@ -520,6 +520,8 @@ class Command(BaseCommand):
             .order_by(
                 Case(
                     When(command_type="set_user_enabled", then=0),
+                    # A read-only listing is quick and must not wait behind a backlog of clone relays.
+                    When(command_type="list_user_slots", then=1),
                     When(command_type__in=DeviceCommand.BACKGROUND_TYPES, then=2),
                     default=1,
                 ),
@@ -556,7 +558,7 @@ class Command(BaseCommand):
         still "sent" lost its connection mid-relay (they cycle every ~20-30s).
         Put the row back to "pending" so it retries, up to CLONE_MAX_ATTEMPTS
         before giving up."""
-        for command in DeviceCommand.objects.filter(device__serial_number=serial_number, command_type="clone_enrollment", status="sent"):
+        for command in DeviceCommand.objects.filter(device__serial_number=serial_number, command_type__in=("clone_enrollment", "list_user_slots"), status="sent"):
             attempts = command.payload.get("attempts", 0) + 1
             if attempts >= CLONE_MAX_ATTEMPTS:
                 DeviceCommand.objects.filter(pk=command.pk).update(

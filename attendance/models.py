@@ -622,8 +622,8 @@ class DeviceCommand(models.Model):
             else:
                 cls.objects.filter(pk=command.pk).update(status="pending", sent_at=None, payload={**command.payload, "attempts": attempts})
         stale = cls.objects.filter(status="sent").filter(
-            (~Q(command_type__in=["clone_enrollment", "set_user_enabled"]) & Q(sent_at__lt=now - cls.STALE_AFTER))
-            | Q(command_type="clone_enrollment", sent_at__lt=now - cls.CLONE_STALE_AFTER)
+            (~Q(command_type__in=["clone_enrollment", "set_user_enabled", "list_user_slots"]) & Q(sent_at__lt=now - cls.STALE_AFTER))
+            | Q(command_type__in=["clone_enrollment", "list_user_slots"], sent_at__lt=now - cls.CLONE_STALE_AFTER)
         )
         if device is not None:
             stale = stale.filter(device=device)
