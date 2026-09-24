@@ -12,6 +12,7 @@ from attendance.integrations.aiface_protocol import (
     build_enableuser_command,
     build_getuserids_command,
     build_getuserinfo_command,
+    build_getuserlist_command,
     build_reg_ack,
     build_setuserinfo_command,
     build_sendlog_ack,
@@ -352,3 +353,13 @@ class NextCommandPriorityTests(TestCase):
         clone = self.queue(self.attendance, "clone_enrollment", {"employee_id": 1, "enrollid": 1, "target_device_ids": [self.attendance.pk]})
         with self.at_hour(12):
             self.assertEqual(self.next_command("ATT1")[0], clone.pk)
+
+
+class ListUserSlotsTests(NextCommandPriorityTests):
+    def test_the_request_pages_like_the_vendor_reference_server(self):
+        self.assertEqual(build_getuserlist_command("S1", True), {"cmd": "getuserlist", "sn": "S1", "stn": True})
+        self.assertEqual(build_getuserlist_command("S1", False)["stn"], False)
+
+    def test_a_slot_listing_is_handed_to_the_multi_message_handler_not_sent_as_one_wire_message(self):
+        command = self.queue(self.attendance, "list_user_slots", {})
+        self.assertEqual(self.next_command("ATT1"), (command.pk, None))

@@ -29,6 +29,7 @@ from attendance.integrations.aiface_protocol import (
     IDENTITY_SYSTEM,
     build_device_command,
     build_getuserinfo_command,
+    build_getuserlist_command,
     build_reg_ack,
     build_sendlog_ack,
     choose_terminal_reply,
@@ -40,6 +41,8 @@ from attendance.integrations.aiface_protocol import (
 CLONE_REPLY_TIMEOUT_SECONDS = 20
 CLONE_TARGET_WAIT_SECONDS = 6
 CLONE_MAX_ATTEMPTS = 3
+LIST_USER_SLOTS_MAX_PAGES = 600  # 40 records a page: room for 24,000 slots
+LIST_USER_SLOTS_NEXT_PAGE_WAIT_SECONDS = 8
 
 COMMAND_POLL_INTERVAL_SECONDS = 2
 ATTENDANCE_REFRESH_SECONDS = 300  # turn punches into attendance records this often (today and yesterday)
@@ -224,7 +227,11 @@ class Command(BaseCommand):
                     continue
                 command_id, wire_message = next_command
                 if wire_message is None:
-                    await self._run_clone_enrollment(ws, sn, command_id)
+                    command_type = await self._run_db(self._command_type, command_id)
+                    if command_type == "list_user_slots":
+                        await self._run_list_user_slots(ws, sn, command_id)
+                    else:
+                        await self._run_clone_enrollment(ws, sn, command_id)
                     continue
                 self.stdout.write(f"[{sn}] sending queued command: {wire_message}")
                 await ws.send(json.dumps(wire_message))
@@ -316,6 +323,39 @@ class Command(BaseCommand):
                 return self._connections[serial_number]
             await asyncio.sleep(0.5)
         return self._connections.get(serial_number)
+
+    @staticmethod
+    def _command_type(command_id):
+        return DeviceCommand.objects.filter(pk=command_id).values_list("command_type", flat=True).first()
+
+    async def _run_list_user_slots(self, ws, sn, command_id):
+        """Read every enrolled (enrollid, backupnum) slot off one terminal, a page at a time, and store the list
+        on the command. Read-only: it changes nothing on the terminal. The end of the list is a page with no
+        records, or - as in the vendor's own reference server - no reply to the request for the next page."""
+        await self._run_db(self._mark_command_sent, command_id)
+        slots, pages, first = [], 0, True
+        try:
+            while pages < LIST_USER_SLOTS_MAX_PAGES:
+                timeout = CLONE_REPLY_TIMEOUT_SECONDS if first else LIST_USER_SLOTS_NEXT_PAGE_WAIT_SECONDS
+                try:
+                    reply = await self._send_and_wait(ws, sn, build_getuserlist_command(sn, first), timeout)
+                except asyncio.TimeoutError:
+                    if first:
+                        raise
+                    break
+                first = False
+                if not reply.get("result"):
+                    break
+                records = reply.get("record") or []
+                if not records:
+                    break
+                slots.extend([record.get("enrollid"), record.get("backupnum")] for record in records)
+                pages += 1
+        except asyncio.TimeoutError:
+            await self._run_db(self._finish_clone_command, command_id, "failed", {"detail": "The terminal did not answer the user-list request."})
+            return
+        self.stdout.write(f"[{sn}] list_user_slots: {len(slots)} slot(s) in {pages} page(s)")
+        await self._run_db(self._finish_clone_command, command_id, "acked", {"slots": slots, "pages": pages})
 
     async def _run_clone_enrollment(self, ws, sn, command_id):
         """Relay an enrollment to every other device that doesn't have it yet,
@@ -489,8 +529,8 @@ class Command(BaseCommand):
         command = next((c for c in candidates if not Command._background_job_held(c, purpose)), None)
         if command is None:
             return None
-        if command.command_type == "clone_enrollment":
-            # Needs custom multi-device async handling (_run_clone_enrollment),
+        if command.command_type in ("clone_enrollment", "list_user_slots"):
+            # Needs custom multi-message async handling (_run_clone_enrollment, _run_list_user_slots),
             # not a single wire message - signal that to the caller with None.
             return command.id, None
         return command.id, build_device_command(serial_number, command.command_type, command.payload)

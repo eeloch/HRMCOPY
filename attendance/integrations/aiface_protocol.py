@@ -115,6 +115,14 @@ def build_getuserids_command(sn: str) -> dict:
     return {"cmd": "getuserids", "sn": sn}
 
 
+def build_getuserlist_command(sn: str, first: bool) -> dict:
+    """Server -> device: one page (up to 40 records) of every enrolled slot, as {enrollid, admin,
+    backupnum}. `first` is true for the opening request and false to ask for the next page, exactly as
+    the vendor's reference server does (Flask app.py get_user_list). Unlike getuserids this says which
+    kind of thing is enrolled: backupnum 0-9 fingerprint, 10 password, 11 card, 20-27/50 face."""
+    return {"cmd": "getuserlist", "sn": sn, "stn": bool(first)}
+
+
 def build_getuserinfo_command(sn: str, enrollid: int, biometric_type: str) -> dict:
     """Server -> device: ask a device to send back one enrolled person's raw
     biometric data (a base64 photo for face, a fingerprint template for
