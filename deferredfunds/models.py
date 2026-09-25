@@ -63,7 +63,7 @@ class DeferredFundAccount(models.Model):
         return self.balance - self.pending_withdrawals
 
     def __str__(self):
-        return f"{self.employee.employee_id} deferred fund ({self.percent}%)"
+        return f"{self.employee.employee_id} {self.employee.full_name} - deferred fund ({self.percent.normalize():f}%)"
 
 
 class EntryType(models.TextChoices):
@@ -94,6 +94,11 @@ class DeferredFundEntry(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["account", "payroll_period"], condition=models.Q(entry_type="contribution"), name="one_contribution_per_period"),
         ]
+
+    def __str__(self):
+        employee = self.account.employee
+        sign = "-" if self.amount < 0 else "+"
+        return f"{employee.employee_id} {employee.full_name} - {self.get_entry_type_display()} {sign}N {abs(self.amount):,.2f} ({self.entry_date})"
 
 
 class WithdrawalKind(models.TextChoices):
@@ -133,3 +138,8 @@ class DeferredFundWithdrawal(models.Model):
 
     class Meta:
         ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        employee = self.account.employee
+        amount = f"N {self.amount:,.2f}" if self.amount is not None else "whole balance"
+        return f"{employee.employee_id} {employee.full_name} - {self.get_kind_display()} {amount} ({self.get_status_display()})"

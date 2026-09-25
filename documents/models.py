@@ -91,7 +91,9 @@ class EmployeeDocument(models.Model):
         ]
 
     def __str__(self):
+        # "000684 Ada Okafor - Medical Certificate - Fit to work 2026"
         return (
-            f"{self.employee.full_name} - "
+            f"{self.employee.employee_id} {self.employee.full_name} - "
+            f"{self.get_document_type_display()} - "
             f"{self.title}"
         )

@@ -57,6 +57,9 @@ class Bonus(models.Model):
             ("approve_bonus", "Can approve or decline bonuses and employees of the month"),
         ]
 
+    def __str__(self):
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.get_kind_display()} N {self.amount:,.2f} ({self.performance_month:02d}/{self.performance_year})"
+
 
 class EotmStatus(models.TextChoices):
     PROPOSED = "proposed", "Awaiting management approval"
@@ -90,3 +93,6 @@ class EmployeeOfTheMonth(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["department", "year", "month"], condition=models.Q(status__in=["proposed", "approved"]), name="one_employee_of_the_month_per_department"),
         ]
+
+    def __str__(self):
+        return f"{self.department.name} {self.month:02d}/{self.year} - {self.employee.employee_id} {self.employee.full_name}"

@@ -64,7 +64,7 @@ class LeavePolicy(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.leave_type.name} policy - {self.get_employment_type_display()}"
+        return f"{self.leave_type.name} policy - {self.get_employment_type_display() or 'any employment type'}"
 
 
 class LeaveBalance(models.Model):
@@ -95,7 +95,8 @@ class LeaveBalance(models.Model):
         return self.allocated_days - self.used_days
 
     def __str__(self):
-        return f"{self.employee} - {self.leave_type} ({self.year})"
+        # "000684 Ada Okafor - Annual Leave - 2026"
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.leave_type.name} - {self.year}"
 
 
 class LeaveStatus(models.TextChoices):
@@ -177,4 +178,5 @@ class LeaveRequest(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.employee} - {self.leave_type} ({self.start_date})"
+        # "000684 Ada Okafor - Annual Leave - 24 Sep 2026"
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.leave_type.name} - {self.start_date:%d %b %Y}"

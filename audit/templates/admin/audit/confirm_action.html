@@ -1,0 +1,39 @@
+{% extends "admin/base_site.html" %}
+{% load admin_urls %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a>
+  &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+  &rsaquo; <a href="{{ cancel_url }}">{{ opts.verbose_name_plural|capfirst }}</a>
+  &rsaquo; {{ title }}
+</div>
+{% endblock %}
+
+{% block content %}
+{% if error %}<p class="errornote">{{ error }}</p>{% endif %}
+<p>{{ intro }}</p>
+<p><strong>{{ total }}</strong> selected:</p>
+<ul>
+  {% for line in lines %}<li>{{ line }}</li>{% endfor %}
+  {% if more %}<li>...and {{ more }} more.</li>{% endif %}
+</ul>
+<form method="post" action="">
+  {% csrf_token %}
+  {% for pk in selected %}<input type="hidden" name="_selected_action" value="{{ pk }}">{% endfor %}
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="select_across" value="{{ select_across }}">
+  <input type="hidden" name="confirm" value="yes">
+  {% if reason_mode != "none" %}
+  <div class="form-row">
+    <label for="reason"{% if reason_mode == "required" %} class="required"{% endif %}><strong>{{ reason_label }}{% if reason_mode == "required" %} (required){% else %} (optional){% endif %}</strong></label>
+    <div><textarea name="reason" id="reason" rows="3" cols="70">{{ reason_value }}</textarea></div>
+    {% if reason_help %}<div class="help">{{ reason_help }}</div>{% endif %}
+  </div>
+  {% endif %}
+  <div class="submit-row">
+    <input type="submit" class="default" value="{{ submit_label }}">
+    <a href="{{ cancel_url }}" class="button cancel-link">Cancel - change nothing</a>
+  </div>
+</form>
+{% endblock %}

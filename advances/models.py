@@ -64,7 +64,7 @@ class SalaryAdvance(models.Model):
         return (self.amount / self.repayment_months).quantize(Decimal("0.01"))
 
     def __str__(self):
-        return f"{self.employee.employee_id} - {self.amount} ({self.status})"
+        return f"{self.employee.employee_id} {self.employee.full_name} - advance N {self.amount:,.2f} ({self.get_status_display()})"
 
 
 class AdvanceRepayment(models.Model):
@@ -84,3 +84,7 @@ class AdvanceRepayment(models.Model):
     class Meta:
         ordering = ["payroll_period__year", "payroll_period__month", "id"]
         constraints = [models.UniqueConstraint(fields=["advance", "payroll_period"], name="one_advance_repayment_per_period")]
+
+    def __str__(self):
+        employee = self.advance.employee
+        return f"{employee.employee_id} {employee.full_name} - repayment N {self.amount:,.2f} ({self.payroll_period.start_date:%b %Y})"

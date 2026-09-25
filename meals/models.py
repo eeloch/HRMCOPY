@@ -26,7 +26,7 @@ class MealTicketRate(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     class Meta: ordering = ["-effective_from", "-id"]
-    def __str__(self): return f"{self.amount} from {self.effective_from}"
+    def __str__(self): return f"N {self.amount:,.2f} from {self.effective_from}"
 
 
 class MealEntitlementRule(models.Model):
@@ -53,6 +53,7 @@ class EmployeeMealEntitlement(models.Model):
     set_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="meal_entitlements_set")
     created_at = models.DateTimeField(auto_now_add=True)
     class Meta: ordering = ["-effective_from", "-id"]
+    def __str__(self): return f"{self.employee.employee_id} {self.employee.full_name} - {self.tickets_per_work_day} ticket(s)/day from {self.effective_from}"
 
 
 class MealEvent(models.Model):
@@ -67,6 +68,7 @@ class MealEvent(models.Model):
     class Meta:
         ordering = ["-timestamp", "-id"]
         constraints = [models.UniqueConstraint(fields=["device", "external_event_id"], name="unique_meal_device_event")]
+    def __str__(self): return f"{self.employee.employee_id} {self.employee.full_name} - {self.timestamp:%Y-%m-%d %H:%M} - {self.device.name}"
 
 
 class MealCollectionStatus(models.TextChoices):
@@ -96,6 +98,7 @@ class MealCollection(models.Model):
     voided_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="meal_collections_voided")
     void_reason = models.TextField(blank=True)
     class Meta: ordering = ["-event__timestamp"]
+    def __str__(self): return f"{self.employee.employee_id} {self.employee.full_name} - {self.work_date} - ticket {self.sequence_number} of {self.entitlement_snapshot}" + (" (voided)" if self.voided_at else "")
 
 
 class MealExcessStatus(models.TextChoices):
@@ -125,6 +128,7 @@ class MealExcessException(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     class Meta:
         permissions = [("record_meal_operations", "Can record meal operations"), ("review_meal_excess", "Can review meal excess deductions"), ("manage_meal_configuration", "Can manage meal configuration")]
+    def __str__(self): return f"{self.employee.employee_id} {self.employee.full_name} - {self.work_date} - {self.excess_quantity} extra - N {self.proposed_deduction:,.2f} ({self.get_status_display()})"
 
 
 class MealAbsencePenaltyType(models.TextChoices):
@@ -225,7 +229,7 @@ class MealVendorPayment(models.Model):
         ordering = ["-payment_date", "-id"]
 
     def __str__(self):
-        return f"{self.payroll_period} - {self.amount}"
+        return f"{self.payroll_period} - N {self.amount:,.2f}"
 
 class MealTerminalUserState(models.Model):
     """Whether a person is currently switched on at a meal terminal, as last confirmed by the terminal.
@@ -235,6 +239,9 @@ class MealTerminalUserState(models.Model):
     device_serial = models.CharField(max_length=100)
     enabled = models.BooleanField()
     updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.device_serial} {'on' if self.enabled else 'off'}"
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["employee", "device_serial"], name="one_terminal_state_per_person_per_device")]
@@ -259,6 +266,9 @@ class MealExtraAuthorization(models.Model):
     authorised_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.quantity} extra on {self.work_date} ({self.pays} pays)"
 
     class Meta:
         ordering = ["-work_date", "-created_at"]

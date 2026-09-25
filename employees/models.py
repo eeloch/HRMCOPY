@@ -302,8 +302,9 @@ class BiometricIdentity(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
+        # "000684 Ada Okafor - Vendor Flask Gateway AYTJ22130775 - id 684"
         return (
-            f"{self.employee.employee_id} - "
-            f"{self.system} - "
-            f"{self.external_user_id}"
+            f"{self.employee.employee_id} {self.employee.full_name} - "
+            f"{self.get_system_display()} {self.source_identifier} - "
+            f"id {self.external_user_id}"
         )

@@ -58,4 +58,5 @@ class EmployeeOffence(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.employee.employee_id} - {self.offence_type.name} ({self.incident_date})"
+        # "000684 Ada Okafor - Late arrival - 24 Sep 2026"
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.offence_type.name} - {self.incident_date:%d %b %Y}"

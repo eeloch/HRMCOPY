@@ -30,7 +30,10 @@ class Shift(models.Model):
     )
 
     def __str__(self):
-        return self.name
+        def clock(value):  # a time, or the raw "07:00" string on an instance that was just created from one
+            return value.strftime("%H:%M") if hasattr(value, "strftime") else str(value)[:5]
+
+        return f"{self.name} ({clock(self.start_time)}-{clock(self.end_time)}{', overnight' if self.is_overnight else ''})"
 
 
 class ShiftAssignment(models.Model):
@@ -67,7 +70,8 @@ class ShiftAssignment(models.Model):
         permissions = [("manage_shifts", "Can assign and change employee shifts")]
 
     def __str__(self):
-        return f"{self.employee.employee_id} - {self.shift.name}"
+        until = f" to {self.end_date}" if self.end_date else " onwards"
+        return f"{self.employee.employee_id} {self.employee.full_name}: {self.shift.name} from {self.start_date}{until}"
 
 
 class ShiftPlan(models.Model):
@@ -93,7 +97,7 @@ class ShiftPlan(models.Model):
     active = models.BooleanField(default=True)
 
     def __str__(self):
-        return self.name
+        return f"{self.name} ({self.get_kind_display()})"
 
 
 class ShiftPlanAssignment(models.Model):
@@ -107,6 +111,11 @@ class ShiftPlanAssignment(models.Model):
 
     class Meta:
         ordering = ["-start_date", "-id"]
+
+    def __str__(self):
+        group = f" (group {self.group})" if self.group else ""
+        until = f" to {self.end_date}" if self.end_date else " onwards"
+        return f"{self.employee.employee_id} {self.employee.full_name}: {self.plan.name}{group} from {self.start_date}{until}"
 
 
 class RosterDayStatus(models.TextChoices):
@@ -152,7 +161,7 @@ class EmployeeRosterDay(models.Model):
             raise ValidationError({"shift": "A rest day cannot have a working shift."})
 
     def __str__(self):
-        return f"{self.employee.employee_id} - {self.date} ({self.status})"
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.date} ({self.status})"
 
 class BiometricDevice(models.Model):
 
@@ -219,7 +228,7 @@ class BiometricDevice(models.Model):
         permissions = [("manage_devices", "Can register and manage biometric devices")]
 
     def __str__(self):
-        return f"{self.name} - {self.serial_number}"
+        return f"{self.name} ({self.serial_number}, {self.get_purpose_display()})"
 
     @property
     def is_reachable(self):
@@ -314,7 +323,12 @@ class AttendanceEvent(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.employee.employee_id} - {self.timestamp}"  
+        stamp = self.timestamp
+        try:
+            stamp = timezone.localtime(stamp).strftime("%Y-%m-%d %H:%M:%S")
+        except (AttributeError, TypeError, ValueError):
+            pass  # not a saved/aware datetime (e.g. an unsaved instance): show it as given
+        return f"{self.employee.employee_id} {self.employee.full_name} - {stamp}"
 
 
 class DailyAttendance(models.Model):
@@ -399,7 +413,7 @@ class DailyAttendance(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.employee.employee_id} - {self.date}"
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.date}"
 
 class AttendanceException(models.Model):
 
@@ -479,9 +493,10 @@ class AttendanceException(models.Model):
         ]
 
     def __str__(self):
+        employee = self.attendance.employee
         return (
-            f"{self.attendance.employee.employee_id} "
-            f"- {self.exception_type}"
+            f"{employee.employee_id} {employee.full_name} "
+            f"- {self.exception_type} - {self.attendance.date:%d %b %Y}"
         )
 
 
@@ -533,7 +548,7 @@ class OvertimeRecord(models.Model):
         permissions = [("review_overtime", "Can review overtime records")]
 
     def __str__(self):
-        return f"{self.employee.employee_id} - overtime {self.work_date}"
+        return f"{self.employee.employee_id} {self.employee.full_name} - overtime {self.work_date}"
 
 
 class DeviceCommand(models.Model):
@@ -591,7 +606,8 @@ class DeviceCommand(models.Model):
         ordering = ["created_at"]
 
     def __str__(self):
-        return f"{self.command_type} -> {self.device.serial_number} ({self.status})"
+        number = f"#{self.pk} " if self.pk else ""
+        return f"{number}{self.get_command_type_display()} on {self.device.name} ({self.get_status_display()})"
 
     @classmethod
     def expire_stale(cls, device=None):

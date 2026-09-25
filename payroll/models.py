@@ -83,7 +83,7 @@ class EmployeePayroll(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.employee.employee_id} - {self.payroll_period}"
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.payroll_period.start_date:%b %Y} - N {self.net_pay:,.2f}"
 
 
 class PayrollLineItemType(models.TextChoices):
@@ -119,7 +119,8 @@ class PayrollLineItem(models.Model):
             raise ValidationError({"amount": "Payroll line item amounts cannot be negative."})
 
     def __str__(self):
-        return f"{self.payroll} - {self.code}"
+        employee = self.payroll.employee
+        return f"{employee.employee_id} {employee.full_name} - {self.payroll.payroll_period.start_date:%b %Y} - {self.code} N {self.amount:,.2f}"
 
 
 class PayrollSetting(models.Model):

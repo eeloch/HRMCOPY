@@ -66,4 +66,5 @@ class EmployeePPEIssue(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.employee.employee_id} - {self.ppe_type.code} ({self.issue_date})"
+        # "000684 Ada Okafor - Safety boots x2 - 24 Sep 2026"
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.ppe_type.name} x{self.quantity} - {self.issue_date:%d %b %Y}"

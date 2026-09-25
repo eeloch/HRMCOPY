@@ -66,3 +66,8 @@ class RoomAssignment(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["room", "bed_number"], condition=models.Q(bed_number__isnull=False), name="one_person_per_bed"),
         ]
+
+    def __str__(self):
+        # "000684 Ada Okafor - Main Hostel Room 301, bed 2"
+        bed = f", bed {self.bed_number}" if self.bed_number else ""
+        return f"{self.employee.employee_id} {self.employee.full_name} - {self.room}{bed}"
