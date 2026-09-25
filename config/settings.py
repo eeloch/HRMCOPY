@@ -142,6 +142,17 @@ else:
         }
     }
 
+# Login throttling counts attempts in the cache. The default in-process cache is per gunicorn worker, so with two
+# workers the real limit was double what was configured. In production (Postgres configured) use a file cache that
+# every worker on the host shares.
+if os.environ.get("DB_NAME"):
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.filebased.FileBasedCache",
+            "LOCATION": os.environ.get("DJANGO_CACHE_DIR", "/var/tmp/rotic_hrm_cache"),
+        }
+    }
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
@@ -191,6 +202,9 @@ MAILERS = {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
 }
+# Nothing in the app sends email (notifications are in-app), so the console backend is deliberate and
+# `check --deploy` should not fail on it. Remove this the day something starts sending mail.
+SILENCED_SYSTEM_CHECKS = ["mail.E001"]
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
@@ -208,7 +222,12 @@ REST_FRAMEWORK = {
     ),
     "DEFAULT_THROTTLE_RATES": {
         "login": os.environ.get("DJANGO_LOGIN_THROTTLE_RATE", "5/min"),
+        # Per account, whatever address the attempts come from (password guessing against one username).
+        "login_user": os.environ.get("DJANGO_LOGIN_USER_THROTTLE_RATE", "20/hour"),
     },
+    # The app only ever sits behind one proxy (nginx), which appends the real client address to X-Forwarded-For.
+    # Trusting exactly that last entry means a client cannot dodge the login throttle by sending its own header.
+    "NUM_PROXIES": int(os.environ.get("DJANGO_NUM_PROXIES", "1")),
 }
 
 SIMPLE_JWT = {

@@ -591,3 +591,47 @@ class ResolveCommandNeverKeepsCredentialsTests(TestCase):
         Command._resolve_command("RS2", {"ret": "getuserids", "result": True, "record": [1, 2, 3], "sn": "RS2"})
         command.refresh_from_db()
         self.assertEqual(command.result["record"], [1, 2, 3])
+
+
+class GatewayIdentityChecksTests(SimpleTestCase):
+    """2026-09-25 review, S-01: a client could claim a registered terminal's serial number."""
+
+    def setUp(self):
+        import io
+        from types import SimpleNamespace
+
+        from attendance.management.commands.run_aiface_gateway import Command
+
+        self.Command, self.ns = Command, SimpleNamespace
+        self.gateway = Command(stdout=io.StringIO())
+        self.gateway._connections = {}
+
+    def ws(self, ip, closed=False):
+        return self.ns(remote_address=(ip, 5555), close_code=1000 if closed else None)
+
+    def test_a_terminal_that_is_online_cannot_be_taken_over_from_another_address(self):
+        real = self.ws("129.222.206.132")
+        self.gateway._connections["SN1"] = real
+        attacker = self.ws("198.51.100.9")
+        self.assertIn("already connected", self.gateway._reg_refusal(attacker, ("198.51.100.9", 1), "SN1", None))
+
+    def test_the_same_terminal_reconnecting_or_a_dead_connection_being_replaced_is_fine(self):
+        self.gateway._connections["SN1"] = self.ws("129.222.206.132")
+        self.assertIsNone(self.gateway._reg_refusal(self.ws("129.222.206.132"), ("129.222.206.132", 2), "SN1", None))
+        self.gateway._connections["SN2"] = self.ws("129.222.206.132", closed=True)
+        self.assertIsNone(self.gateway._reg_refusal(self.ws("198.51.100.9"), ("198.51.100.9", 3), "SN2", None))
+
+    def test_one_connection_cannot_switch_to_another_serial_and_a_serial_is_required(self):
+        self.assertIn("already registered", self.gateway._reg_refusal(self.ws("1.1.1.1"), ("1.1.1.1", 1), "SN2", "SN1"))
+        self.assertEqual(self.gateway._reg_refusal(self.ws("1.1.1.1"), ("1.1.1.1", 1), "", None), "no serial number")
+        self.assertEqual(self.gateway._reg_refusal(self.ws("1.1.1.1"), ("1.1.1.1", 1), None, None), "no serial number")
+
+    def test_the_optional_address_allow_list(self):
+        with mock.patch.dict("os.environ", {"AIFACE_ALLOWED_NETWORKS": "129.222.206.0/24, 10.0.0.0/8"}):
+            self.assertTrue(self.Command._network_allowed("129.222.206.187"))
+            self.assertTrue(self.Command._network_allowed("10.1.2.3"))
+            self.assertFalse(self.Command._network_allowed("198.51.100.9"))
+            self.assertFalse(self.Command._network_allowed(None))
+            self.assertIn("AIFACE_ALLOWED_NETWORKS", self.gateway._reg_refusal(self.ws("198.51.100.9"), ("198.51.100.9", 1), "SN1", None))
+        with mock.patch.dict("os.environ", {"AIFACE_ALLOWED_NETWORKS": ""}):
+            self.assertTrue(self.Command._network_allowed("198.51.100.9"))

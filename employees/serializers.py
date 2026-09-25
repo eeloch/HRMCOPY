@@ -44,6 +44,23 @@ def service_award_for_years(years):
     return "25 Years"
 
 
+# Personal details (contact, date of birth, housing, terminal ids) are only returned to users who hold
+# employees.view_employee (2026-09-25 review, S-03: any signed-in account could enumerate them for every employee).
+# Name, staff number, department, position, status and the like stay visible: pickers and rosters need them.
+PERSONAL_DETAIL_FIELDS = (
+    "phone", "email", "date_of_birth", "biometric_user_id", "biometric", "biometric_identities",
+    "lives_in_company_hostel", "hostel_room_number", "lives_in_external_accommodation",
+    "external_accommodation_address", "hostel", "accommodation",
+)
+
+
+def hide_personal_details(data, request):
+    if not (request and request.user.has_perm("employees.view_employee")):
+        for field in PERSONAL_DETAIL_FIELDS:
+            data.pop(field, None)
+    return data
+
+
 class DepartmentSerializer(serializers.ModelSerializer):
 
     class Meta:
@@ -226,7 +243,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
             data.pop("bank_name", None)
             data.pop("account_number", None)
             data.pop("bank_code", None)
-        return data
+        return hide_personal_details(data, request)
 
     def get_current_shift(self, employee):
         """Today's actual roster shift - the live source of truth, including a rotation plan's weekly
@@ -352,6 +369,12 @@ class EmployeeCreateUpdateSerializer(
 
             "status",
         ]
+
+    def validate_employee_id(self, value):
+        # A staff number is written into exported spreadsheets; one that starts like a formula is never valid.
+        if value and str(value).startswith(("=", "+", "-", "@", "\t", "\r")):
+            raise serializers.ValidationError("A staff number cannot start with =, +, - or @.")
+        return value
 
     def validate_basic_salary(self, value):
         request = self.context.get("request")
@@ -532,7 +555,7 @@ class EmployeeProfileSerializer(serializers.ModelSerializer):
             data.pop("bank_name", None)
             data.pop("account_number", None)
             data.pop("bank_code", None)
-        return data
+        return hide_personal_details(data, request)
 
     def get_full_name(self, obj):
         return " ".join(

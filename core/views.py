@@ -1,3 +1,4 @@
+import hashlib
 import secrets
 import string
 
@@ -6,7 +7,7 @@ from django.contrib.auth.models import Group, Permission
 from rest_framework import status
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -26,10 +27,22 @@ MEAL_PERMISSION_CODES = (
 )
 
 
-class ThrottledTokenObtainPairView(TokenObtainPairView):
-    """Login, rate-limited separately from every other endpoint."""
+class LoginUsernameThrottle(SimpleRateThrottle):
+    """Attempts against one username are limited however many addresses they come from."""
 
-    throttle_classes = [ScopedRateThrottle]
+    scope = "login_user"
+
+    def get_cache_key(self, request, view):
+        username = str(request.data.get("username", "")).strip().lower()[:150] if hasattr(request, "data") else ""
+        if not username:
+            return None
+        return self.cache_format % {"scope": self.scope, "ident": hashlib.sha256(username.encode()).hexdigest()[:32]}
+
+
+class ThrottledTokenObtainPairView(TokenObtainPairView):
+    """Login, rate-limited separately from every other endpoint: per client address and per account."""
+
+    throttle_classes = [ScopedRateThrottle, LoginUsernameThrottle]
     throttle_scope = "login"
 
 

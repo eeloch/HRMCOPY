@@ -656,6 +656,9 @@ class EmployeeImportAPIView(APIView):
         }
 
         can_set_bank_details = request.user.has_perm("employees.view_bank_details")
+        # Room placement is housing's decision (capacity, gender, beds): an employee editor's spreadsheet must not
+        # be able to move people in or out of rooms without the housing permission (2026-09-25 review, S-05).
+        can_place_in_rooms = request.user.has_perm("accommodation.manage_accommodation")
 
         serializers = []
         serialization_errors = []
@@ -670,6 +673,11 @@ class EmployeeImportAPIView(APIView):
             # with a blank Amount column overwrote 471 salaries with 0. Creates get
             # the model default; updates leave the stored salary alone.
             row_data = {key: value for key, value in row_data.items() if key != "basic_salary"}
+            if not can_place_in_rooms:
+                row_data = {
+                    key: value for key, value in row_data.items()
+                    if key not in ("accommodation_placement", "room_allocated", "lives_in_company_hostel", "hostel_room_number")
+                }
             if not can_set_bank_details:
                 # Same reasoning as basic_salary above - drop rather than fail the row.
                 row_data = {
@@ -729,7 +737,7 @@ class EmployeeImportAPIView(APIView):
             else:
                 created_count += 1
             placement, room_label = placements.get(id(serializer), (None, None))
-            outcome = apply_import_placement(employee, placement, room_label, actor=request.user)
+            outcome = apply_import_placement(employee, placement, room_label, actor=request.user) if can_place_in_rooms else None
             if outcome:
                 accommodation[outcome] += 1
 
@@ -968,6 +976,13 @@ class EmployeeImportOrganizationCreateAPIView(APIView):
 
     @transaction.atomic
     def post(self, request):
+
+        # Departments and positions are reference data used across HR workflows (2026-09-25 review, S-06).
+        if not (request.user.has_perm("employees.add_department") and request.user.has_perm("employees.add_position")):
+            return Response(
+                {"detail": "You don't have permission to create departments or positions."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         departments = request.data.get(
             "departments",

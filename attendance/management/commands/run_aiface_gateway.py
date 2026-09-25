@@ -13,7 +13,9 @@ Requires the `websockets` package (see requirements.txt).
 """
 
 import asyncio
+import ipaddress
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -155,6 +157,41 @@ class Command(BaseCommand):
             return fn(*args)
         return await asyncio.to_thread(call)
 
+    @staticmethod
+    def _peer_ip(ws):
+        address = getattr(ws, "remote_address", None)
+        return address[0] if address else None
+
+    @staticmethod
+    def _network_allowed(ip):
+        """AIFACE_ALLOWED_NETWORKS ("129.222.206.0/24,10.0.0.0/8") limits which addresses may talk to the gateway;
+        empty means everyone (the terminals' public address can change with the ISP, so it is opt-in)."""
+        raw = os.environ.get("AIFACE_ALLOWED_NETWORKS", "").strip()
+        if not raw:
+            return True
+        try:
+            address = ipaddress.ip_address(ip)
+        except (TypeError, ValueError):
+            return False
+        return any(address in ipaddress.ip_network(part.strip(), strict=False) for part in raw.split(",") if part.strip())
+
+    def _reg_refusal(self, ws, peer, claimed, current_sn):
+        """Why a `reg` must be turned away, or None. A terminal that is already connected cannot be taken over from
+        another address, and one connection cannot switch to a different serial number."""
+        if not isinstance(claimed, str) or not claimed.strip():
+            return "no serial number"
+        if current_sn is not None and claimed != current_sn:
+            return f"this connection is already registered as {current_sn}"
+        peer_ip = peer[0] if peer else None
+        if not self._network_allowed(peer_ip):
+            return "address not in AIFACE_ALLOWED_NETWORKS"
+        existing = self._connections.get(claimed)
+        if existing is not None and existing is not ws and getattr(existing, "close_code", None) is None:
+            existing_ip = self._peer_ip(existing)
+            if existing_ip and peer_ip and existing_ip != peer_ip:
+                return f"{claimed} is already connected from {existing_ip}"
+        return None
+
     async def _handle_connection(self, ws, bridge_url, meal_bridge_url, secret):
         sn = None
         peer = ws.remote_address
@@ -177,6 +214,11 @@ class Command(BaseCommand):
                 cmd = message.get("cmd")
                 ret = message.get("ret")
                 if cmd == "reg":
+                    refusal = self._reg_refusal(ws, peer, message.get("sn"), sn)
+                    if refusal:
+                        self.stdout.write(f"[{peer}] refused reg for sn={message.get('sn')!r}: {refusal}")
+                        await ws.close()
+                        return
                     sn = message.get("sn")
                     self.stdout.write(f"[{peer}] reg from device sn={sn}")
                     self._connections[sn] = ws
@@ -190,6 +232,12 @@ class Command(BaseCommand):
                         activity["beat"], activity["busy_since"] = loop.time(), None
                         poller_task = asyncio.create_task(self._poll_commands(ws, sn, activity))
                         watchdog_task = asyncio.create_task(self._drop_if_silent(ws, activity, poller_task, sn))
+                elif cmd in ("sendlog", "senduser") and (sn is None or (message.get("sn") not in (None, sn))):
+                    # Punches and user data are only accepted from a connection that registered, and only for the
+                    # serial it registered as (2026-09-25 review, S-01: a client could claim another terminal's serial).
+                    self.stdout.write(f"[{peer}] dropped {cmd} from a connection registered as {sn!r} claiming sn={message.get('sn')!r}")
+                    await ws.close()
+                    return
                 elif cmd == "sendlog":
                     await self._handle_sendlog(ws, message, bridge_url, meal_bridge_url, secret)
                 elif cmd == "senduser":

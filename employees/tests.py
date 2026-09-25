@@ -469,6 +469,8 @@ class EmployeeProfileAPIViewTests(APITestCase):
             username="profile-viewer",
             password="test-password",
         )
+        # The profile shows personal details, which need view_employee (2026-09-25 review, S-03).
+        self.user.user_permissions.add(Permission.objects.get(codename="view_employee", content_type__app_label="employees"))
         self.client.force_authenticate(user=self.user)
         self.employee = Employee.objects.create(
             employee_id="EMP-100",
@@ -826,6 +828,8 @@ class BulkImportAccommodationTests(APITestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="acc-importer", password="test-password")
         self.user.user_permissions.add(*Permission.objects.filter(content_type__app_label="employees", codename__in=("add_employee", "change_employee")))
+        # Room placement by import needs the housing permission (2026-09-25 review, S-05).
+        self.user.user_permissions.add(Permission.objects.get(content_type__app_label="accommodation", codename="manage_accommodation"))
         self.client.force_authenticate(user=self.user)
         from accommodation.models import Building, Room
         hostel = Building.objects.create(name="Main Hostel")
@@ -1083,3 +1087,91 @@ class RemoveDuplicateEmployeeCommandTests(TestCase):
         Employee.objects.filter(pk=self.dup.pk).update(status="active")
         with self.assertRaises(CommandError):
             self.run_command("--confirm")
+
+
+class ImportPermissionScopeTests(APITestCase):
+    """2026-09-25 review: S-05 (import moved people between rooms without the housing permission) and S-06 (any login
+    could create departments and positions)."""
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+
+        User = get_user_model()
+
+        def user_with(username, *codenames):
+            user = User.objects.create_user(username=username, password="x")
+            for codename in codenames:
+                user.user_permissions.add(Permission.objects.get(codename=codename, content_type__app_label=self.app_of[codename]))
+            return user
+
+        self.app_of = {"add_employee": "employees", "change_employee": "employees", "add_department": "employees", "add_position": "employees", "manage_accommodation": "accommodation"}
+        self.editor = user_with("editor", "add_employee", "change_employee")
+        self.housing = user_with("housing", "add_employee", "change_employee", "manage_accommodation")
+        self.org = user_with("org", "add_department", "add_position")
+        self.plain = User.objects.create_user(username="plain", password="x")
+
+    def test_creating_departments_and_positions_needs_the_permission(self):
+        payload = {"departments": [{"name": "New Dept", "positions": ["Operator"]}]}
+        self.client.force_authenticate(self.plain)
+        self.assertEqual(self.client.post("/api/employees/import/organization/create/", payload, format="json").status_code, 403)
+        self.assertFalse(Department.objects.filter(name="New Dept").exists())
+        self.client.force_authenticate(self.org)
+        self.assertEqual(self.client.post("/api/employees/import/organization/create/", payload, format="json").status_code, 200)
+        self.assertTrue(Department.objects.filter(name="New Dept").exists())
+
+    def test_an_employee_editor_without_the_housing_permission_cannot_place_people_in_rooms_by_import(self):
+        from accommodation.models import Building, Room, RoomAssignment
+
+        department = Department.objects.create(name="Ops")
+        Position.objects.create(department=department, name="Operator")
+        building = Building.objects.create(name="Lodge 1")
+        Room.objects.create(building=building, name="Rm001", capacity=4, gender="male")
+        sheet = ("employee_id,first_name,last_name,gender,department,position,accommodation,room_allocated\n"
+                 "HOUSE-1,Ada,Okafor,male,Ops,Operator,YES,Lodge 1 Rm001 - Bed 1\n")
+
+        def upload(user):
+            self.client.force_authenticate(user)
+            from django.core.files.uploadedfile import SimpleUploadedFile
+
+            return self.client.post("/api/employees/import/", {"file": SimpleUploadedFile("e.csv", sheet.encode(), content_type="text/csv")}, format="multipart")
+
+        self.assertEqual(upload(self.editor).status_code, 201)
+        self.assertFalse(RoomAssignment.objects.filter(employee__employee_id="HOUSE-1").exists())
+
+
+class PersonalDetailsPrivacyTests(APITestCase):
+    """2026-09-25 review, S-03: any signed-in account could read every employee's contact and housing details."""
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+
+        User = get_user_model()
+        dept = Department.objects.create(name="Ops")
+        self.employee = Employee.objects.create(
+            employee_id="PII-1", first_name="Ada", last_name="Okafor", phone="0803 000 0000", email="ada@example.com",
+            date_of_birth="1990-01-02", department=dept, status="active", biometric_user_id="1234",
+        )
+        self.reader = User.objects.create_user(username="reader", password="x")
+        self.hr = User.objects.create_user(username="hr", password="x")
+        self.hr.user_permissions.add(Permission.objects.get(codename="view_employee", content_type__app_label="employees"))
+
+    def fetch(self, user, url):
+        self.client.force_authenticate(user)
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    def test_an_ordinary_login_gets_the_working_fields_but_no_personal_details(self):
+        for url in ("/api/employees/", f"/api/employees/{self.employee.pk}/"):
+            data = self.fetch(self.reader, url)
+            row = data["results"][0] if "results" in data else data
+            self.assertEqual(row["employee_id"], "PII-1")
+            self.assertEqual(row["full_name"], "Ada Okafor")
+            for field in ("phone", "email", "date_of_birth", "biometric_user_id", "biometric_identities", "hostel_room_number"):
+                self.assertNotIn(field, row, f"{field} leaked at {url}")
+
+    def test_a_user_with_the_view_permission_gets_everything(self):
+        row = self.fetch(self.hr, "/api/employees/")["results"][0]
+        self.assertEqual((row["phone"], row["email"], row["date_of_birth"]), ("0803 000 0000", "ada@example.com", "1990-01-02"))

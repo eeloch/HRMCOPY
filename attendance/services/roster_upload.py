@@ -19,6 +19,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from attendance.models import ShiftPlan, ShiftPlanAssignment
 from attendance.services.shift_plans import assign_plan
+from core.spreadsheets import append_text_row
 from employees.models import Employee
 
 SHEET_TITLE = "Roster Upload"
@@ -65,7 +66,7 @@ def build_template_workbook():
     for employee in employees:
         row_count += 1
         assignment = current.get(employee.pk)
-        sheet.append([
+        append_text_row(sheet, [
             employee.employee_id,
             employee.full_name,
             employee.department.name if employee.department else "",
@@ -83,7 +84,7 @@ def build_template_workbook():
     reference = workbook.create_sheet("Plans (reference)")
     reference.append(["Plan Name", "Kind"])
     for plan in plans:
-        reference.append([plan.name, plan.get_kind_display()])
+        append_text_row(reference, [plan.name, plan.get_kind_display()])
     reference.column_dimensions["A"].width = 26
     reference.column_dimensions["B"].width = 22
 

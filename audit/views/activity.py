@@ -11,6 +11,27 @@ from audit.models import AuditEvent, AuditSeverity
 from audit.serializers import AuditEventSerializer
 
 
+# Modules whose events carry money (amounts, deductions, salary figures). A user only sees a module's events when they
+# hold at least one of its permissions; a superuser sees everything. (2026-09-25 review: any login could read every
+# bonus, advance and payroll adjustment amount through this feed.)
+FINANCIAL_MODULE_PERMISSIONS = {
+    "payroll": ("payroll.view_payroll", "payroll.manage_payroll"),
+    "bonuses": ("bonuses.view_bonuses", "bonuses.record_bonus", "bonuses.approve_bonus"),
+    "advances": ("advances.record_salary_advance", "advances.approve_salary_advance", "advances.pay_salary_advance"),
+    "deferred_funds": ("deferredfunds.view_deferred_funds", "deferredfunds.manage_deferred_funds", "deferredfunds.approve_deferred_withdrawal", "deferredfunds.pay_deferred_withdrawal"),
+    "ppe": ("ppe.record_ppe_issue", "ppe.review_ppe_deduction"),
+    "offences": ("offences.record_employee_offences", "offences.review_employee_offences", "offences.manage_offence_configuration"),
+    "meals": ("meals.record_meal_operations", "meals.review_meal_excess", "meals.manage_meal_configuration"),
+}
+
+
+def hidden_financial_modules(user):
+    """The financial modules this user may not read audit events for."""
+    if user.is_superuser:
+        return []
+    return [module for module, permissions in FINANCIAL_MODULE_PERMISSIONS.items() if not any(user.has_perm(code) for code in permissions)]
+
+
 class AuditActivityAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -42,6 +63,10 @@ class AuditActivityAPIView(APIView):
             "actor",
             "content_type",
         ).order_by("-created_at")
+
+        hidden = hidden_financial_modules(request.user)
+        if hidden:
+            events = events.exclude(module__in=hidden)
 
         search = request.query_params.get("search", "").strip()
         employee = request.query_params.get("employee")

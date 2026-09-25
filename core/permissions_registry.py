@@ -8,6 +8,7 @@ without a code change anywhere else.
 """
 
 MANAGED_PERMISSIONS = [
+    {"codename": "view_employee", "app_label": "employees", "label": "View employee personal details (contact, birth date, housing, terminal ids)", "group": "Employees"},
     {"codename": "add_employee", "app_label": "employees", "label": "Add employees", "group": "Employees"},
     {"codename": "change_employee", "app_label": "employees", "label": "Change employee records and status", "group": "Employees"},
     {"codename": "view_salary", "app_label": "employees", "label": "View & set employee salary", "group": "Employees"},
