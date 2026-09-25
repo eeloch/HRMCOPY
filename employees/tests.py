@@ -911,3 +911,57 @@ class EmployeeDirectorySummaryAndFiltersTests(APITestCase):
         with self.assertNumQueries(8):
             response = self.client.get("/api/employees/?status=active")
         self.assertEqual(len(response.data["results"]), 17)  # on_plan, no_plan, and the 15 bulk employees
+
+
+class RemoveDuplicateEmployeeCommandTests(TestCase):
+    """Deleting a duplicate is permanent, so the command is a dry run unless told otherwise and refuses on live data."""
+
+    def setUp(self):
+        from datetime import date
+
+        from attendance.models import EmployeeRosterDay
+        from employees.models import Employee
+
+        self.keep = Employee.objects.create(employee_id="000217", first_name="Keep", last_name="Me", status="active")
+        self.dup = Employee.objects.create(employee_id="001308", first_name="Dup", last_name="Licate", status="inactive")
+        EmployeeRosterDay.objects.create(employee=self.dup, date=date(2026, 9, 25), status="rest")
+
+    def run_command(self, *extra):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command("remove_duplicate_employee", "001308", "--keep", "000217", *extra, stdout=out)
+        return out.getvalue()
+
+    def test_a_dry_run_lists_what_would_go_and_deletes_nothing(self):
+        from employees.models import Employee
+
+        self.assertIn("would delete 1 EmployeeRosterDay", self.run_command())
+        self.assertTrue(Employee.objects.filter(employee_id="001308").exists())
+
+    def test_confirm_deletes_the_leftovers_and_the_employee_and_leaves_an_audit_event(self):
+        from attendance.models import EmployeeRosterDay
+        from audit.models import AuditEvent
+        from employees.models import Employee
+
+        self.run_command("--confirm")
+        self.assertFalse(Employee.objects.filter(employee_id="001308").exists())
+        self.assertFalse(EmployeeRosterDay.objects.filter(employee_id=self.dup.pk).exists())
+        self.assertTrue(AuditEvent.objects.filter(event_type="employees.duplicate_deleted", employee=self.keep).exists())
+        self.assertTrue(Employee.objects.filter(employee_id="000217").exists())
+
+    def test_it_refuses_while_an_active_employee_or_real_history_is_still_attached(self):
+        from django.core.management.base import CommandError
+
+        from employees.models import BiometricIdentity, Employee
+
+        BiometricIdentity.objects.create(employee=self.dup, system="vendor_flask_gateway", source_identifier="T1", external_user_id="1308")
+        with self.assertRaises(CommandError):
+            self.run_command("--confirm")
+        self.assertTrue(Employee.objects.filter(employee_id="001308").exists())
+        BiometricIdentity.objects.all().delete()
+        Employee.objects.filter(pk=self.dup.pk).update(status="active")
+        with self.assertRaises(CommandError):
+            self.run_command("--confirm")
