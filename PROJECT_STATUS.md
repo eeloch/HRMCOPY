@@ -2,136 +2,46 @@
 
 # ROTIC HRM
 
-Version: 0.2.1
-Status: Active Development
-Current Milestone: Employee Management Complete / Attendance Development
-Last Updated: 31 Aug 2026
+Status: pilot in production at hrm.roticaluminium.com (single DigitalOcean droplet). Last updated: 25 Sep 2026.
+Readiness: see the 25 Sep 2026 company-readiness review; the security findings from it are fixed in the code (see
+"Security" below) and the remaining infrastructure items are listed under "Open".
 
+## What exists
+Django (DRF, JWT) backend and a Next.js 16 frontend, PostgreSQL in production.
 
-## 1) Project Overview
-Rotic HRM is a Django + Next.js human resource management system focused on employee administration, attendance, and a growing set of operational HR workflows. The project already has a structured backend and frontend, and the current state shows a solid foundation for a commercial HR platform.
+| Area | State |
+|---|---|
+| Employees | Directory, bulk import (partial updates; never touches salary), salary import, departments/positions, personal details behind `employees.view_employee`, salary and bank details behind their own permissions |
+| Attendance | Rosters and rotation plans, daily attendance processing (night shifts), exceptions with approval, overtime, biometric devices |
+| Biometric terminals | Three attendance terminals plus two meal terminals (AiFace, websocket gateway on port 7788). Staff number = terminal user id on every terminal. Credentials are synced between terminals, leftovers and duplicates can be cleaned with `mirror_plan`, `renumber_ids`, `repair_duplicate_ids` |
+| Meals | Ticket entitlements per person, tickets collected at the meal terminals, excess review and deductions, terminal switch-off once a person's tickets are used (both the profile and the legacy command are sent) |
+| Payroll | Periods, generation by employment dates, attendance deductions, approval (blocked until rosters are complete and deductions synced; bank details are snapshotted at approval), bank-upload export |
+| Money workflows | Salary advances, deferred funds, bonuses and Employee of the Month, PPE deductions, offences |
+| Leave, documents, accommodation | Leave policies and approvals, protected document storage, hostel rooms and assignments |
+| Audit and notifications | Audit trail for sensitive actions (financial modules visible only to users with those permissions), in-app notifications |
+| Reports | Weekly HR report deck |
+| Django admin | Every model has readable rows (staff number + name), search, filters and safe corrective actions that go through the same services as the API, each writing an audit event |
 
-## 2) Current Architecture
-### Django Backend
-- `config/` handles project configuration and routing.
-- `employees/` is the most mature backend module and currently anchors the HR data model.
-- `attendance/` already has models, serializers, services, views, and URLs in place.
-- `payroll/` exists as a scaffold and is not yet fully implemented.
-- `core/` appears to be reserved for shared app-level functionality.
+## Quality gates
+`.github/workflows/ci.yml` runs on every push and pull request: Django check, migration drift, `pip check`, the full test
+suite (900+ tests), TypeScript, ESLint with zero warnings allowed, and the production build. Nothing should be deployed
+from a red main.
 
-### Next.js Frontend
-- `frontend/` is built with Next.js App Router.
-- Current routes include `dashboard`, `attendance`, `employees`, and `login`.
-- Shared UI begins with `components/Sidebar.tsx` and `lib/api.ts`.
+## Security (from the 25 Sep 2026 review)
+- Login throttling trusts only the address nginx appends (`DJANGO_NUM_PROXIES=1`), is counted in a cache shared by all
+  gunicorn workers, and also limits attempts per account.
+- Activity feed hides financial modules from users without the matching permissions.
+- Personal details, room placement by import, and creating departments/positions each need their own permission.
+- XLSX exports keep untrusted text literal; staff numbers that start with `=`, `+`, `-` or `@` are rejected.
+- Terminal gateway: a connected terminal cannot be taken over from another address, a connection cannot switch serial
+  numbers, and punches must come from a registered connection. `AIFACE_ALLOWED_NETWORKS` (comma-separated CIDRs) is an
+  optional allow-list; empty means anyone can connect, because the factory's public address can change.
 
-## 3) Completed Features
-- Employee CRUD is in place.
-- Department management is implemented.
-- Position management is implemented.
-- Employee import workflow is present.
-- Import preview is available.
-- Excel validation is implemented.
-- Duplicate detection is implemented.
-- Organization auto-creation is in place during import.
-- Import button is enabled.
-- Hostel room support has been added.
-- Biometric identity support has been added.
-- Attendance module foundation is established.
-- Backend code is organized with models, serializers, views, URLs, and services where needed.
-
-## 4) Modules in Progress
-- Attendance: foundation exists, but the feature set still needs expansion.
-- Employees: mature core module, with room for refinement in import, admin, and workflow polish.
-- Frontend: key pages exist, but the UI layer still needs broader feature coverage and consistency.
-- Core: shared system functionality is still being defined.
-
-## 5) Planned Modules
-- Payroll
-- Leave
-- Recruitment
-- Performance
-- Training
-- Assets
-- Reports
-- Mobile
-
-## 6) Current Project Tree Summary
-- `config/` project settings and URLs
-- `core/` shared app foundation
-- `employees/` primary HR master data module
-- `attendance/` attendance tracking foundation
-- `payroll/` payroll scaffold
-- `frontend/` Next.js application with app routes and shared UI
-- `db.sqlite3` local development database
-- `manage.py` Django entry point
-- `requirements.txt` backend dependencies
-
-## 7) Development Conventions
-- Keep Django app logic separated into models, serializers, views, URLs, and services.
-- Prefer modular app design over large monolithic files.
-- Keep frontend work organized inside the Next.js App Router structure.
-- Use shared components for repeated UI patterns.
-- Preserve import validation and duplicate-checking behavior when extending employee workflows.
-- Treat the backend as the source of truth for HR records.
-
-## 8) Next Priorities
-1. Strengthen attendance workflows beyond the initial foundation.
-2. Expand employee module polish around import, validation, and admin usability.
-3. Build out the payroll module structure.
-4. Establish the shared `core/` layer for cross-cutting HR features.
-5. Improve frontend coverage for the existing backend capabilities.
-6. Add the next business modules in a controlled sequence: leave, recruitment, performance, training, assets, and reports.
-
-
-## Current Sprint
-
-Goal:
-Complete Attendance Module
-
-Tasks
-
-- Attendance Dashboard
-- Device Synchronization
-- Exception Approval
-- Attendance Reports
-- Shift Assignment
-- Overtime Engine
-
-## Session Log
-- Confirmed the current project structure from the referenced conversation.
-- Identified the Django backend apps and the Next.js frontend routes.
-- Captured the completed employee and attendance foundation work.
-- Documented the next module roadmap and development conventions.
-
-
-
-## Milestone 1
-✔ Authentication
-
-## Milestone 2
-✔ Employee Management
-
-- Employee CRUD
-- Departments
-- Positions
-- Hostel
-- Import
-
-## Milestone 3
-✔ Import Engine
-
-- Excel Import
-- Validation
-- Duplicate Detection
-- Auto Department Creation
-- Auto Position Creation
-
-
-
-| Module | Backend | Frontend | Testing | Production |
-|---------|----------|----------|----------|------------|
-| Login | ✅ | ✅ | ✅ | ✅ |
-| Employees | ✅ | ✅ | 🟡 | 🟡 |
-| Attendance | 🟡 | 🟡 | ❌ | ❌ |
-| Payroll | ❌ | ❌ | ❌ | ❌ |
-| Leave | ❌ | ❌ | ❌ | ❌ |
+## Open
+- Port 7788 is reachable from the whole internet. Restrict it at the firewall to the factory's address range once that
+  range is confirmed (and/or set `AIFACE_ALLOWED_NETWORKS`).
+- Backups are local only (14 days) and unencrypted; an off-server encrypted copy and a full restore drill are still to do.
+- The GitHub repository is public.
+- Payroll roles are not separated (the same user can create, approve and export a payroll run).
+- Browser tokens are kept in localStorage.
+- No frontend tests.
