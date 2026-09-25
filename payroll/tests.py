@@ -2,14 +2,16 @@ from datetime import date
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
+from django.contrib import admin
 from django.contrib.auth.models import Permission, User
 from django.db import IntegrityError, transaction
-from django.test import TestCase
+from django.test import RequestFactory, TestCase
 from rest_framework.test import APIClient
 
 from audit.models import AuditEvent
 from employees.models import Employee
 from payroll.models import EmployeePayroll, PayrollLineItem, PayrollPeriod
+from payroll.admin import EmployeePayrollAdmin, PayrollLineItemAdmin, PayrollPeriodAdmin
 from payroll.services import daily_rate, generate_payroll_for_period, recalculate_employee_payroll, sync_attendance_deductions_for_period
 from attendance.models import AttendanceException, DailyAttendance, EmployeeRosterDay, Shift
 from leave.models import LeavePolicy, LeaveRequest, LeaveStatus, LeaveType
@@ -54,6 +56,27 @@ class PayrollFoundationTests(TestCase):
         self.assertEqual(payroll.net_pay, Decimal("150000.00"))
         self.assertEqual(PayrollLineItem.objects.filter(payroll=payroll).count(), 0)
         self.assertTrue(AuditEvent.objects.filter(event_type="payroll.generated").exists())
+
+    def test_historical_generation_uses_employment_dates(self):
+        left_after_period = Employee.objects.create(
+            employee_id="PAY-HIST-1", first_name="Former", status="terminated",
+            employment_date=date(2027, 1, 1), exit_date=date(2028, 3, 1),
+        )
+        future_hire = Employee.objects.create(
+            employee_id="PAY-HIST-2", first_name="Future", status="active",
+            employment_date=date(2028, 3, 1),
+        )
+        generate_payroll_for_period(self.period)
+        self.assertTrue(EmployeePayroll.objects.filter(payroll_period=self.period, employee=left_after_period).exists())
+        self.assertFalse(EmployeePayroll.objects.filter(payroll_period=self.period, employee=future_hire).exists())
+
+    def test_regeneration_refuses_preexisting_ineligible_employee(self):
+        future_hire = Employee.objects.create(
+            employee_id="PAY-STALE", first_name="Future", employment_date=date(2028, 3, 1),
+        )
+        EmployeePayroll.objects.create(payroll_period=self.period, employee=future_hire)
+        with self.assertRaisesRegex(ValueError, "not employed"):
+            generate_payroll_for_period(self.period)
 
     def test_generation_is_idempotent_and_never_overwrites_salary_snapshot(self):
         generate_payroll_for_period(self.period)
@@ -128,9 +151,33 @@ class PayrollFoundationTests(TestCase):
                 )
 
 
+class PayrollAdminGuardTests(TestCase):
+    def test_admin_cannot_bypass_approval_or_edit_locked_payroll(self):
+        request = RequestFactory().get("/admin/payroll/")
+        request.user = User.objects.create_superuser("payroll-admin", password="password")
+        period = PayrollPeriod.objects.create(year=2031, month=1, status="review")
+        employee = Employee.objects.create(employee_id="ADMIN-PAY", first_name="Ada")
+        payroll = EmployeePayroll.objects.create(payroll_period=period, employee=employee)
+        line_item = PayrollLineItem.objects.create(payroll=payroll, item_type="earning", code="TEST", description="Test", amount=Decimal("1.00"))
+        period_admin = PayrollPeriodAdmin(PayrollPeriod, admin.site)
+        payroll_admin = EmployeePayrollAdmin(EmployeePayroll, admin.site)
+        line_admin = PayrollLineItemAdmin(PayrollLineItem, admin.site)
+        self.assertIn("status", period_admin.get_readonly_fields(request, period))
+        self.assertIn("status", payroll_admin.get_readonly_fields(request, payroll))
+        self.assertTrue(period_admin.has_change_permission(request, period))
+        period.status = "approved"
+        period.save(update_fields=["status"])
+        self.assertFalse(period_admin.has_change_permission(request, period))
+        self.assertFalse(payroll_admin.has_change_permission(request, payroll))
+        self.assertFalse(line_admin.has_change_permission(request, line_item))
+        self.assertFalse(period_admin.has_delete_permission(request, period))
+        self.assertFalse(payroll_admin.has_delete_permission(request, payroll))
+        self.assertFalse(line_admin.has_delete_permission(request, line_item))
+
+
 class PayrollAPITests(TestCase):
     def setUp(self):
-        self.employee = Employee.objects.create(employee_id="PAY-API-001", first_name="Api", last_name="Employee", basic_salary=Decimal("100000.00"))
+        self.employee = Employee.objects.create(employee_id="PAY-API-001", first_name="Api", last_name="Employee", basic_salary=Decimal("100000.00"), bank_name="Bank", account_number="0123456789", bank_code="000044")
         self.viewer = User.objects.create_user("payroll-viewer", password="password")
         self.manager = User.objects.create_user("payroll-manager", password="password")
         self.viewer.user_permissions.add(Permission.objects.get(codename="view_payroll"))
@@ -177,6 +224,12 @@ class PayrollAPITests(TestCase):
         self.assertEqual(invalid.status_code, 400)
         self.assertEqual(self.client.post(f"/api/payroll/periods/{period.id}/transition/", {"status": "processing"}, format="json").status_code, 200)
         self.assertEqual(self.client.post(f"/api/payroll/periods/{period.id}/transition/", {"status": "review"}, format="json").status_code, 200)
+        self.assertEqual(self.client.post(f"/api/payroll/periods/{period.id}/transition/", {"status": "approved"}, format="json").status_code, 400)
+        self.client.post(f"/api/payroll/periods/{period.id}/generate/")
+        shift = Shift.objects.create(name="March Approval Shift", start_time="07:00", end_time="19:00")
+        EmployeeRosterDay.objects.bulk_create([
+            EmployeeRosterDay(employee=self.employee, date=date(2030, 3, day), status="work", shift=shift) for day in range(1, 32)
+        ])
         self.assertEqual(self.client.post(f"/api/payroll/periods/{period.id}/transition/", {"status": "approved"}, format="json").status_code, 200)
         self.assertEqual(self.client.post(f"/api/payroll/periods/{period.id}/generate/").status_code, 400)
 
@@ -197,6 +250,10 @@ class PayrollAPITests(TestCase):
         self.authenticate(self.manager)
         self.client.post(f"/api/payroll/periods/{period.id}/generate/")
         payroll = EmployeePayroll.objects.get(payroll_period=period)
+        shift = Shift.objects.create(name="Approval Test Shift", start_time="07:00", end_time="19:00")
+        EmployeeRosterDay.objects.bulk_create([
+            EmployeeRosterDay(employee=self.employee, date=date(2030, 5, day), status="work", shift=shift) for day in range(1, 32)
+        ])
         self.client.post(f"/api/payroll/periods/{period.id}/transition/", {"status": "processing"}, format="json")
         self.client.post(f"/api/payroll/periods/{period.id}/transition/", {"status": "review"}, format="json")
         self.client.post(f"/api/payroll/periods/{period.id}/transition/", {"status": "approved"}, format="json")
@@ -206,7 +263,7 @@ class PayrollAPITests(TestCase):
 
 class PayrollAttendanceIntegrationTests(TestCase):
     def setUp(self):
-        self.employee = Employee.objects.create(employee_id="PAY-ATT-001", first_name="Payroll", last_name="Attendance", basic_salary=Decimal("150000.00"))
+        self.employee = Employee.objects.create(employee_id="PAY-ATT-001", first_name="Payroll", last_name="Attendance", basic_salary=Decimal("150000.00"), bank_name="Bank", account_number="0123456789", bank_code="000044")
         self.period = PayrollPeriod.objects.create(year=2030, month=6)
         self.shift = Shift.objects.create(name="Payroll Test Shift", start_time="07:00", end_time="19:00")
         self.attendance = DailyAttendance.objects.create(employee=self.employee, date=date(2030, 6, 5), shift=self.shift, status="absent")
@@ -224,6 +281,10 @@ class PayrollAttendanceIntegrationTests(TestCase):
             self.assertEqual(response.status_code, 200)
 
     def test_pending_exceptions_block_approval_but_held_exceptions_do_not(self):
+        EmployeePayroll.objects.create(payroll_period=self.period, employee=self.employee, basic_salary=150000, gross_earnings=150000, net_pay=150000)
+        EmployeeRosterDay.objects.bulk_create([
+            EmployeeRosterDay(employee=self.employee, date=date(2030, 6, day), status="work", shift=self.shift) for day in range(1, 31)
+        ])
         self.exception(status="pending")
         self.assertEqual(self.client.post(f"/api/payroll/periods/{self.period.id}/transition/", {"status": "processing"}, format="json").status_code, 200)
         self.assertEqual(self.client.post(f"/api/payroll/periods/{self.period.id}/transition/", {"status": "review"}, format="json").status_code, 200)
@@ -272,9 +333,33 @@ class PayrollAttendanceIntegrationTests(TestCase):
         self.assertEqual(PayrollLineItem.objects.count(), 0)
 
     def test_approved_payroll_cannot_be_synchronized(self):
+        EmployeePayroll.objects.create(payroll_period=self.period, employee=self.employee, basic_salary=150000, gross_earnings=150000, net_pay=150000)
+        EmployeeRosterDay.objects.bulk_create([
+            EmployeeRosterDay(employee=self.employee, date=date(2030, 6, day), status="work", shift=self.shift) for day in range(1, 31)
+        ])
         self.move_to_approved()
         response = self.client.post(f"/api/payroll/periods/{self.period.id}/sync-attendance/")
         self.assertEqual(response.status_code, 400)
+
+    def test_approval_requires_complete_roster_and_synced_deductions(self):
+        payroll = EmployeePayroll.objects.create(
+            payroll_period=self.period, employee=self.employee,
+            basic_salary=Decimal("150000"), gross_earnings=Decimal("150000"), net_pay=Decimal("150000"),
+        )
+        self.exception(status="approved")
+        for value in ("processing", "review"):
+            self.assertEqual(self.client.post(f"/api/payroll/periods/{self.period.pk}/transition/", {"status": value}, format="json").status_code, 200)
+        approval_url = f"/api/payroll/periods/{self.period.pk}/transition/"
+        self.assertEqual(self.client.post(approval_url, {"status": "approved"}, format="json").status_code, 400)
+        EmployeeRosterDay.objects.bulk_create([
+            EmployeeRosterDay(employee=self.employee, date=date(2030, 6, day), status="work", shift=self.shift)
+            for day in range(1, 31)
+        ])
+        self.assertEqual(self.client.post(approval_url, {"status": "approved"}, format="json").status_code, 400)
+        self.client.post(f"/api/payroll/periods/{self.period.pk}/sync-attendance/")
+        payroll.refresh_from_db()
+        self.assertGreater(payroll.total_deductions, 0)
+        self.assertEqual(self.client.post(approval_url, {"status": "approved"}, format="json").status_code, 200)
 
 
 class PayrollMonetaryAttendanceTests(TestCase):

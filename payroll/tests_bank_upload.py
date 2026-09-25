@@ -56,6 +56,9 @@ class BankUploadTests(TestCase):
     def person(self, staff_id, net, account="2252037955", code="000015", bank="Zenith Bank Plc", first="Ada"):
         employee = Employee.objects.create(employee_id=staff_id, first_name=first, last_name=staff_id, bank_name=bank, account_number=account, bank_code=code)
         EmployeePayroll.objects.create(payroll_period=self.period, employee=employee, basic_salary=net, gross_earnings=net, net_pay=net, status=EmployeePayrollStatus.APPROVED)
+        EmployeePayroll.objects.filter(payroll_period=self.period, employee=employee).update(bank_details_snapshot={
+            "bank_name": employee.bank_name, "account_number": employee.account_number, "bank_code": employee.bank_code,
+        })
         return employee
 
     def sheet(self, response):
@@ -97,8 +100,8 @@ class BankUploadTests(TestCase):
 
         self.assertEqual((preview["ready_count"], preview["ready_total"], preview["narration"]), (1, "100000.00", "Hello"))
         reasons = {i["employee_id"]: (i["reason"], i["fixable"]) for i in preview["issues"]}
-        self.assertEqual(reasons["000002"], ("No account number", True))
-        self.assertEqual(reasons["000003"], ("No bank code", True))
+        self.assertEqual(reasons["000002"], ("No account number", False))
+        self.assertEqual(reasons["000003"], ("No bank code", False))
         self.assertEqual(reasons["000004"][1], False)
         self.assertIn("nothing to pay", reasons["000004"][0])
         sheet = self.sheet(self.client.get(f"/api/payroll/periods/{self.period.pk}/bank-upload/"))
@@ -163,6 +166,23 @@ class BankUploadTests(TestCase):
         event = AuditEvent.objects.get(event_type="payroll.bank_upload_exported")
         self.assertEqual((event.metadata["payments"], event.metadata["total"], event.metadata["left_out"]), (1, "100000.00", 1))
 
+    def test_export_keeps_approved_recipient_after_profile_change(self):
+        employee = self.person("000010", Decimal("100000.00"), account="0123456789")
+        employee.account_number = "0987654321"
+        employee.save(update_fields=["account_number"])
+        preview = self.client.get(f"/api/payroll/periods/{self.period.pk}/bank-upload/preview/")
+        self.assertEqual(preview.status_code, 200)
+        sheet = self.sheet(self.client.get(f"/api/payroll/periods/{self.period.pk}/bank-upload/"))
+        self.assertEqual(sheet[2][0].value, 123456789)
+
+    def test_old_approved_payroll_without_snapshot_cannot_export(self):
+        employee = Employee.objects.create(employee_id="000011", first_name="Old", bank_name="Bank", account_number="0123456789", bank_code="000044")
+        EmployeePayroll.objects.create(payroll_period=self.period, employee=employee, net_pay=Decimal("100000"))
+        for suffix in ("bank-upload/", "bank-upload/preview/"):
+            response = self.client.get(f"/api/payroll/periods/{self.period.pk}/{suffix}")
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("no verified bank details", response.json()["detail"])
+
     def test_saving_an_employee_repairs_a_bank_code_that_lost_its_zeros(self):
         employee = Employee.objects.create(employee_id="000009", first_name="A", last_name="B", bank_code="14")
         employee.refresh_from_db()
@@ -174,8 +194,14 @@ class ApprovingAPeriodApprovesItsEmployeeRecordsTests(TestCase):
         manager = get_user_model().objects.create_user("approver", password="pw")
         manager.user_permissions.add(Permission.objects.get(codename="manage_payroll"))
         period = PayrollPeriod.objects.create(year=2026, month=9, status="review")
-        employee = Employee.objects.create(employee_id="000001", first_name="Ada", last_name="Okafor")
+        employee = Employee.objects.create(employee_id="000001", first_name="Ada", last_name="Okafor", bank_name="Bank", account_number="0123456789", bank_code="000044")
         payroll = EmployeePayroll.objects.create(payroll_period=period, employee=employee, basic_salary=1, gross_earnings=1, net_pay=1)
+        from attendance.models import EmployeeRosterDay, Shift
+        from datetime import date
+        shift = Shift.objects.create(name="Approval Test Shift", start_time="07:00", end_time="19:00")
+        EmployeeRosterDay.objects.bulk_create([
+            EmployeeRosterDay(employee=employee, date=date(2026, 9, day), status="work", shift=shift) for day in range(1, 31)
+        ])
         client = APIClient(); client.force_authenticate(manager)
 
         response = client.post(f"/api/payroll/periods/{period.pk}/transition/", {"status": "approved"}, format="json")
@@ -183,6 +209,10 @@ class ApprovingAPeriodApprovesItsEmployeeRecordsTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         payroll.refresh_from_db()
         self.assertEqual(payroll.status, EmployeePayrollStatus.APPROVED)
+        self.assertEqual(payroll.bank_details_snapshot["account_number"], "0123456789")
+        employee.account_number = "0987654321"
+        employee.save(update_fields=["account_number"])
+        self.assertEqual(load_workbook(io.BytesIO(client.get(f"/api/payroll/periods/{period.pk}/bank-upload/").content)).active[2][0].value, 123456789)
 
 
 class BulkPayslipsTests(TestCase):
@@ -195,7 +225,11 @@ class BulkPayslipsTests(TestCase):
 
     def record(self, staff_id, net):
         employee = Employee.objects.create(employee_id=staff_id, first_name="Ada", last_name=staff_id, bank_name="Zenith Bank Plc", account_number="2252037955")
-        return EmployeePayroll.objects.create(payroll_period=self.period, employee=employee, basic_salary=net, gross_earnings=net, net_pay=net, status=EmployeePayrollStatus.APPROVED)
+        return EmployeePayroll.objects.create(
+            payroll_period=self.period, employee=employee, basic_salary=net, gross_earnings=net,
+            net_pay=net, status=EmployeePayrollStatus.APPROVED,
+            bank_details_snapshot={"bank_name": employee.bank_name, "account_number": employee.account_number, "bank_code": employee.bank_code},
+        )
 
     def test_returns_every_payslip_with_a_masked_account_and_skips_zero_pay(self):
         self.record("000001", Decimal("100000.00"))

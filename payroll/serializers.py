@@ -57,14 +57,22 @@ class EmployeePayrollDetailSerializer(EmployeePayrollListSerializer):
     line_items = PayrollLineItemSerializer(many=True, read_only=True)
     position_name = serializers.CharField(source="employee.position.name", read_only=True, default=None)
     employment_date = serializers.DateField(source="employee.employment_date", read_only=True)
-    bank_name = serializers.CharField(source="employee.bank_name", read_only=True)
+    bank_name = serializers.SerializerMethodField()
     account_number_masked = serializers.SerializerMethodField()
 
     class Meta(EmployeePayrollListSerializer.Meta):
         fields = EmployeePayrollListSerializer.Meta.fields + ("payroll_period", "line_items", "position_name", "employment_date", "bank_name", "account_number_masked")
 
+    def get_bank_name(self, obj):
+        if obj.payroll_period.status in ("approved", "paid", "closed"):
+            return (obj.bank_details_snapshot or {}).get("bank_name", "")
+        return obj.employee.bank_name
+
     def get_account_number_masked(self, obj):
-        digits = "".join(ch for ch in obj.employee.account_number if ch.isdigit())
+        account_number = obj.employee.account_number
+        if obj.payroll_period.status in ("approved", "paid", "closed"):
+            account_number = (obj.bank_details_snapshot or {}).get("account_number", "")
+        digits = "".join(ch for ch in account_number if ch.isdigit())
         return f"******{digits[-4:]}" if len(digits) >= 4 else ""
 
 

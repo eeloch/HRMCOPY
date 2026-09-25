@@ -66,8 +66,8 @@ export function BankUploadModal({ periodId, onClose }: { periodId: string; onClo
     }
   }
 
-  const fix = preview?.issues.filter((issue) => issue.fixable) || [];
-  const nothingToPay = preview?.issues.filter((issue) => !issue.fixable) || [];
+  const bankIssues = preview?.issues.filter((issue) => Number(issue.net_pay) > 0) || [];
+  const nothingToPay = preview?.issues.filter((issue) => Number(issue.net_pay) <= 0) || [];
 
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/40 p-4">
@@ -88,20 +88,20 @@ export function BankUploadModal({ periodId, onClose }: { periodId: string; onClo
                 <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs font-semibold uppercase text-slate-500">Narration</p><p className="mt-1 text-2xl font-bold text-slate-900">{preview.narration}</p></div>
               </div>
 
-              {fix.length > 0 && (
+              {bankIssues.length > 0 && (
                 <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4">
-                  <p className="text-sm font-semibold text-amber-900">{fix.length} {fix.length === 1 ? "person is" : "people are"} NOT in the file - their bank details need fixing first</p>
+                  <p className="text-sm font-semibold text-amber-900">{bankIssues.length} {bankIssues.length === 1 ? "person is" : "people are"} NOT in the file because approved bank details are incomplete</p>
                   <div className="mt-3 max-h-56 overflow-y-auto rounded-lg bg-white">
                     <table className="w-full text-left text-xs">
                       <thead className="bg-slate-50 text-slate-500"><tr><th className="px-3 py-2">Staff no.</th><th className="px-3 py-2">Name</th><th className="px-3 py-2">Net pay</th><th className="px-3 py-2">Problem</th></tr></thead>
                       <tbody className="divide-y divide-slate-100">
-                        {fix.map((issue) => (
+                        {bankIssues.map((issue) => (
                           <tr key={issue.employee_id}><td className="px-3 py-2 font-mono">{issue.employee_id}</td><td className="px-3 py-2">{issue.employee_name}</td><td className="px-3 py-2">{money(issue.net_pay)}</td><td className="px-3 py-2 text-amber-800">{issue.reason}</td></tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
-                  <p className="mt-2 text-xs text-amber-800">Correct their bank name, account number and bank code on their employee profile, then open this window again.</p>
+                  <p className="mt-2 text-xs text-amber-800">Bank details were captured when this payroll was approved. Changes to an employee profile will apply to future payrolls, not this bank file.</p>
                 </div>
               )}
 

@@ -232,6 +232,9 @@ class EmployeeListCreateAPIView(APIView):
 
     def post(self, request):
 
+        if not request.user.has_perm("employees.add_employee"):
+            return Response({"detail": "You don't have permission to add employees."}, status=status.HTTP_403_FORBIDDEN)
+
         serializer = (
             EmployeeCreateUpdateSerializer(
                 data=request.data,
@@ -400,6 +403,9 @@ class EmployeeDetailAPIView(APIView):
         request,
         employee_id,
     ):
+
+        if not request.user.has_perm("employees.change_employee"):
+            return Response({"detail": "You don't have permission to change employees."}, status=status.HTTP_403_FORBIDDEN)
 
         employee = self.get_employee(
             employee_id
@@ -605,6 +611,13 @@ class EmployeeImportAPIView(APIView):
             if item["valid"]
         ] if skip_invalid else results
 
+        if (any(item["data"].get("existing_employee_id") for item in rows_to_import)
+                and not request.user.has_perm("employees.change_employee")):
+            return Response({"detail": "You don't have permission to change employees."}, status=status.HTTP_403_FORBIDDEN)
+        if (any(not item["data"].get("existing_employee_id") for item in rows_to_import)
+                and not request.user.has_perm("employees.add_employee")):
+            return Response({"detail": "You don't have permission to add employees."}, status=status.HTTP_403_FORBIDDEN)
+
         if not results or (invalid_rows and not skip_invalid) or not rows_to_import:
             return Response(
                 {
@@ -667,6 +680,7 @@ class EmployeeImportAPIView(APIView):
             serializer = EmployeeCreateUpdateSerializer(
                 instance=existing_employees.get(existing_id),
                 data=row_data,
+                partial=existing_id is not None,
                 context={"request": request},
             )
 

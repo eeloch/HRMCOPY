@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q
 
 from audit.models import AuditSeverity
 from audit.services import AuditService
@@ -17,10 +18,22 @@ class PayrollGenerationSummary:
     deductions_applied: int = 0
 
 
+def employees_for_period(period):
+    """Use dated employment boundaries; retain the active fallback for undated staff."""
+    return Employee.objects.filter(
+        Q(employment_date__isnull=True) | Q(employment_date__lte=period.end_date),
+        Q(exit_date__gte=period.start_date) | Q(exit_date__isnull=True, status="active"),
+    )
+
+
 def generate_payroll_for_period(period, *, actor=None):
-    """Create missing monthly payroll snapshots for active employees only."""
+    """Create missing monthly salary snapshots for staff employed in this period."""
     summary = PayrollGenerationSummary()
-    employees = Employee.objects.filter(status="active").order_by("id")
+    employees = employees_for_period(period).order_by("id")
+    eligible_ids = set(employees.values_list("id", flat=True))
+    existing_ids = set(period.employee_payrolls.values_list("employee_id", flat=True))
+    if existing_ids - eligible_ids:
+        raise ValueError("This payroll contains employees who were not employed during the period. Review the existing records before regenerating.")
 
     with transaction.atomic():
         for employee in employees:

@@ -13,6 +13,7 @@ import io
 import zipfile
 from dataclasses import dataclass
 from decimal import Decimal
+from types import SimpleNamespace
 
 from openpyxl import Workbook
 
@@ -71,7 +72,22 @@ def split_payable(entries):
 def prepare_bank_upload(period):
     """Split a period's payroll into (rows ready to upload, issues) in staff-number order."""
     payrolls = period.employee_payrolls.select_related("employee").order_by("employee__employee_id")
-    return split_payable((payroll.employee, payroll.net_pay) for payroll in payrolls)
+    entries = []
+    for payroll in payrolls:
+        details = payroll.bank_details_snapshot
+        if not isinstance(details, dict) or any(field not in details for field in ("bank_name", "account_number", "bank_code")):
+            raise ValueError("This approved payroll has no verified bank details snapshot. Bank export is unavailable.")
+        entries.append((SimpleNamespace(
+            employee_id=payroll.employee.employee_id,
+            full_name=payroll.employee.full_name,
+            bank_name=details["bank_name"],
+            account_number=details["account_number"],
+            bank_code=details["bank_code"],
+        ), payroll.net_pay))
+    rows, issues = split_payable(entries)
+    for issue in issues:
+        issue.fixable = False  # Profile changes cannot amend approved payment instructions.
+    return rows, issues
 
 
 def build_workbook(rows, sheet_title):

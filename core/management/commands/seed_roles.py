@@ -32,6 +32,8 @@ ROLES = {
         ("offences", "record_employee_offences"),
     ],
     "HR Manager": [
+        ("employees", "add_employee"),
+        ("employees", "change_employee"),
         ("documents", "view_documents"),
         ("documents", "manage_documents"),
         ("leave", "approve_leave"),

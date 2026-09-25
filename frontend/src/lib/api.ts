@@ -72,6 +72,7 @@ export function saveTokens(
   access: string,
   refresh: string
 ) {
+  localStorage.setItem("rotic_session_id", crypto.randomUUID());
   localStorage.setItem(
     "rotic_access_token",
     access
@@ -85,6 +86,7 @@ export function saveTokens(
 
 
 export function clearTokens() {
+  localStorage.removeItem("rotic_session_id");
   localStorage.removeItem(
     "rotic_access_token"
   );
@@ -92,6 +94,47 @@ export function clearTokens() {
   localStorage.removeItem(
     "rotic_refresh_token"
   );
+}
+
+let refreshInFlight: { token: string; promise: Promise<string> } | null = null;
+
+async function refreshAccessToken(refreshToken: string): Promise<string> {
+  if (!refreshInFlight || refreshInFlight.token !== refreshToken) {
+    const sessionId = localStorage.getItem("rotic_session_id");
+    const attempt = (async () => {
+      const rotate = async () => {
+        if (localStorage.getItem("rotic_session_id") !== sessionId) throw new Error("Your session has changed.");
+        if (getRefreshToken() !== refreshToken) {
+          const currentAccess = getAccessToken();
+          if (currentAccess) return currentAccess;
+          throw new Error("Your session has expired.");
+        }
+        const response = await fetch(`${API_BASE_URL}/auth/refresh/`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh: refreshToken }),
+        });
+        if (!response.ok) throw new Error("Your session has expired.");
+        const data = await response.json();
+        if (!data.access || !data.refresh) throw new Error("Your session has expired.");
+        if (localStorage.getItem("rotic_session_id") !== sessionId || getRefreshToken() !== refreshToken) {
+          throw new Error("Your session has changed.");
+        }
+        localStorage.setItem("rotic_access_token", data.access);
+        localStorage.setItem("rotic_refresh_token", data.refresh);
+        return data.access as string;
+      };
+      if (typeof navigator !== "undefined" && navigator.locks) {
+        return navigator.locks.request("rotic-refresh-token", rotate);
+      }
+      return rotate();
+    })();
+    refreshInFlight = { token: refreshToken, promise: attempt };
+    void attempt.finally(() => {
+      if (refreshInFlight?.promise === attempt) refreshInFlight = null;
+    }).catch(() => {});
+  }
+  return refreshInFlight.promise;
 }
 
 
@@ -144,6 +187,7 @@ export async function apiFetch(
 ) {
   const token =
     getAccessToken();
+  const sessionId = localStorage.getItem("rotic_session_id");
 
 
   const headers =
@@ -214,60 +258,27 @@ export async function apiFetch(
    * attempt JWT refresh.
    */
   if (response.status === 401) {
-    const refreshToken =
-      getRefreshToken();
-
-
-    if (!refreshToken) {
-      clearTokens();
-
-      throw new Error(
-        "Authentication required."
-      );
+    if (localStorage.getItem("rotic_session_id") !== sessionId) throw new Error("Your session has changed.");
+    const currentAccess = getAccessToken();
+    let access: string;
+    if (currentAccess && currentAccess !== token) {
+      access = currentAccess;
+    } else {
+      const refreshToken = getRefreshToken();
+      if (!refreshToken) throw new Error("Authentication required.");
+      try {
+        access = await refreshAccessToken(refreshToken);
+      } catch (error) {
+        if (localStorage.getItem("rotic_session_id") === sessionId && getRefreshToken() === refreshToken) clearTokens();
+        throw error;
+      }
     }
-
-
-    const refreshResponse =
-      await fetch(
-        `${API_BASE_URL}/auth/refresh/`,
-        {
-          method: "POST",
-
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-
-          body: JSON.stringify({
-            refresh:
-              refreshToken,
-          }),
-        }
-      );
-
-
-    if (!refreshResponse.ok) {
-      clearTokens();
-
-      throw new Error(
-        "Your session has expired."
-      );
-    }
-
-
-    const refreshData =
-      await refreshResponse.json();
-
-
-    localStorage.setItem(
-      "rotic_access_token",
-      refreshData.access
-    );
+    if (localStorage.getItem("rotic_session_id") !== sessionId) throw new Error("Your session has changed.");
 
 
     headers.set(
       "Authorization",
-      `Bearer ${refreshData.access}`
+      `Bearer ${access}`
     );
 
 

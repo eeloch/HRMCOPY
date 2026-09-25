@@ -766,11 +766,12 @@ def validate_employee_rows(
             row.get("last_name")
         )
 
-        if (
+        split_name = (
             full_name
             and not first_name
             and not last_name
-        ):
+        )
+        if split_name:
             (
                 first_name,
                 middle_name_from_full,
@@ -816,6 +817,7 @@ def validate_employee_rows(
         # Employee ID
         #
         existing_employee_id = None
+        existing_employee = None
 
         if not employee_id:
             errors.append(
@@ -855,6 +857,11 @@ def validate_employee_rows(
                         "UPDATE that record instead of creating a new one."
                     )
 
+        if existing_employee_id and not first_name:
+            # A partial update need not repeat the person's name. The field is
+            # filtered out of the update unless it was supplied in the sheet.
+            first_name = existing_employee.first_name
+
         if not first_name:
             errors.append(
                 "Employee name is required."
@@ -877,7 +884,9 @@ def validate_employee_rows(
         department = None
         position = None
 
-        if not department_name:
+        if existing_employee_id and "department" not in row:
+            department = existing_employee.department
+        elif not department_name:
             warnings.append(
                 "Department is blank - this employee will be imported "
                 "without a department. Their profile will be flagged as "
@@ -965,7 +974,7 @@ def validate_employee_rows(
             )
         except ValueError as exc:
             exit_date = None
-            warnings.append(
+            errors.append(
                 str(exc)
             )
 
@@ -1128,6 +1137,29 @@ def validate_employee_rows(
             cleaned["gender"] = "male"
         elif gender_value in ("female", "f"):
             cleaned["gender"] = "female"
+
+        if existing_employee_id:
+            # An omitted column is not an instruction to clear an existing field.
+            # Both CSV and XLSX readers retain canonical headers, including blanks.
+            supplied_fields = {key for key in row if normalize_value(row.get(key))}
+            if split_name:
+                supplied_fields.update(("first_name", "middle_name", "last_name"))
+            if ("department" in supplied_fields and department
+                    and existing_employee.position_id
+                    and existing_employee.position.department_id != department.id
+                    and "position" not in supplied_fields):
+                supplied_fields.add("position")
+            if "bank" in supplied_fields:
+                supplied_fields.add("bank_name")
+            if "bank_codes" in supplied_fields:
+                supplied_fields.add("bank_code")
+            if has_accommodation_columns and (room_allocated or accommodation_value):
+                supplied_fields.update(("lives_in_company_hostel", "hostel_room_number"))
+            writable_fields = {field.name for field in Employee._meta.fields}
+            cleaned = {
+                key: value for key, value in cleaned.items()
+                if key not in writable_fields or key in supplied_fields
+            }
 
         results.append(
             {

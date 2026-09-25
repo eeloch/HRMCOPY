@@ -91,8 +91,10 @@ def daily_rate(basic_salary, expected_days):
 
 
 def employee_expected_attendance(employee, period):
+    start = max(period.start_date, employee.employment_date or period.start_date)
+    end = min(period.end_date, employee.exit_date or period.end_date)
     try:
-        return {"complete": True, "expected_days": expected_attendance_days(employee, period.start_date, period.end_date), "missing_dates": []}
+        return {"complete": True, "expected_days": expected_attendance_days(employee, start, end), "missing_dates": []}
     except IncompleteRosterError as error:
         return {"complete": False, "expected_days": None, "missing_dates": [value.isoformat() for value in error.missing_dates]}
 
@@ -117,7 +119,9 @@ def build_attendance_summary(period):
 
 
 def _work_dates(employee, period):
-    return {row.date for row in employee.roster_days.filter(date__range=(period.start_date, period.end_date), status=RosterDayStatus.WORK)}
+    start = max(period.start_date, employee.employment_date or period.start_date)
+    end = min(period.end_date, employee.exit_date or period.end_date)
+    return {row.date for row in employee.roster_days.filter(date__range=(start, end), status=RosterDayStatus.WORK)}
 
 
 def _leave_impacts(employee, period, work_dates, summary):
@@ -261,3 +265,19 @@ def sync_attendance_deductions_for_period(period, *, actor=None):
         if summary.created or summary.updated or summary.deleted:
             AuditService.log(event_type="payroll.attendance_deductions_synced", module="payroll", actor=actor, object=period, severity=AuditSeverity.SUCCESS, title="Payroll attendance deductions synchronized", description=f"Attendance and leave deductions were synchronized for {period.display_name}.", metadata={"period": period.display_name, "employees_processed": summary.employees_processed, "absence_deductions_created": summary.absence_deductions_created, "lateness_deductions_created": summary.lateness_deductions_created, "early_departure_deductions_created": summary.early_departure_deductions_created, "unpaid_leave_deductions_created": summary.unpaid_leave_deductions_created, "total_deduction_amount": str(summary.total_deduction_amount)})
     return summary
+
+
+def validate_attendance_for_approval(period):
+    """Check against the same calculation as Sync, without changing reviewed totals."""
+    pending = pending_exception_count(period)
+    if pending:
+        raise ValueError(f"Payroll approval is blocked by {pending} pending attendance exception(s).")
+    # Always roll the calculation back: approval must not silently change amounts
+    # that the reviewer has already inspected, or leave partial synchronization.
+    with transaction.atomic():
+        summary = sync_attendance_deductions_for_period(period)
+        transaction.set_rollback(True)
+    if summary.employees_skipped_incomplete_roster or summary.errors:
+        raise ValueError("Payroll approval is blocked by incomplete or invalid employee rosters. Complete the rosters and synchronize attendance first.")
+    if summary.created or summary.updated or summary.deleted:
+        raise ValueError("Attendance deductions are not up to date. Synchronize attendance and review the payroll before approving it.")

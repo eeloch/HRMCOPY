@@ -72,6 +72,7 @@ class EmployeePayroll(models.Model):
     gross_earnings = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
     total_deductions = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
     net_pay = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    bank_details_snapshot = models.JSONField(null=True, blank=True, editable=False)
     status = models.CharField(max_length=20, choices=EmployeePayrollStatus.choices, default=EmployeePayrollStatus.DRAFT)
     generated_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

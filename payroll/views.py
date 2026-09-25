@@ -13,9 +13,12 @@ from rest_framework.views import APIView
 
 from audit.models import AuditSeverity
 from audit.services import AuditService
+from employees.banking import to_account_number, to_bank_code
 from payroll.models import EmployeePayroll, EmployeePayrollStatus, PayrollLineItem, PayrollPeriod, PayrollPeriodStatus
 from payroll.serializers import EmployeePayrollDetailSerializer, EmployeePayrollListSerializer, PayrollLineItemCreateSerializer, PayrollLineItemSerializer, PayrollPeriodCreateSerializer, PayrollPeriodSerializer, PayrollPeriodTransitionSerializer
 from payroll.services.bank_upload import BANK_UPLOAD_NARRATION, bank_upload_download, prepare_bank_upload
+from payroll.services.attendance import validate_attendance_for_approval
+from payroll.services.generation import employees_for_period
 from payroll.services import (
     generate_payroll_for_period,
     pending_exception_count,
@@ -81,7 +84,10 @@ class PayrollPeriodGenerateAPIView(APIView):
         period = get_object_or_404(PayrollPeriod, pk=period_id)
         if period_is_locked(period):
             return Response({"detail": "Approved payroll periods cannot be regenerated."}, status=status.HTTP_400_BAD_REQUEST)
-        summary = generate_payroll_for_period(period, actor=request.user)
+        try:
+            summary = generate_payroll_for_period(period, actor=request.user)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"period": PayrollPeriodSerializer(period_queryset().get(pk=period.pk)).data, "summary": summary.__dict__})
 
 
@@ -94,7 +100,10 @@ class PayrollBankUploadPreviewAPIView(APIView):
         period = get_object_or_404(PayrollPeriod, pk=period_id)
         if not period_is_locked(period):
             return Response({"detail": "Approve this payroll before creating the bank upload file."}, status=status.HTTP_400_BAD_REQUEST)
-        rows, issues = prepare_bank_upload(period)
+        try:
+            rows, issues = prepare_bank_upload(period)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({
             "period": period.display_name,
             "narration": BANK_UPLOAD_NARRATION,
@@ -120,7 +129,10 @@ class PayrollBankUploadDownloadAPIView(APIView):
             return Response({"detail": "batch_size must be a whole number."}, status=status.HTTP_400_BAD_REQUEST)
         if batch_size is not None and not 1 <= batch_size <= 5000:
             return Response({"detail": "batch_size must be between 1 and 5000."}, status=status.HTTP_400_BAD_REQUEST)
-        rows, issues = prepare_bank_upload(period)
+        try:
+            rows, issues = prepare_bank_upload(period)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         if not rows:
             return Response({"detail": "Nobody in this payroll can be included in a bank upload file yet."}, status=status.HTTP_400_BAD_REQUEST)
         filename, content_type, content = bank_upload_download(period, rows, batch_size)
@@ -148,9 +160,32 @@ class PayrollPeriodTransitionAPIView(APIView):
             if self.transitions.get(period.status) != target:
                 return Response({"detail": f"{period.get_status_display()} cannot transition to {target}."}, status=status.HTTP_400_BAD_REQUEST)
             if target == PayrollPeriodStatus.APPROVED:
-                pending_exceptions = pending_exception_count(period)
-                if pending_exceptions:
-                    return Response({"detail": f"Payroll approval is blocked by {pending_exceptions} pending attendance exception(s)."}, status=status.HTTP_400_BAD_REQUEST)
+                expected_ids = set(employees_for_period(period).values_list("id", flat=True))
+                payroll_ids = set(period.employee_payrolls.values_list("employee_id", flat=True))
+                if payroll_ids != expected_ids:
+                    return Response({"detail": "Payroll records do not match the employees employed during this period. Review and regenerate the payroll before approval."}, status=status.HTTP_400_BAD_REQUEST)
+                try:
+                    validate_attendance_for_approval(period)
+                except ValueError as error:
+                    return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+                payrolls = list(period.employee_payrolls.select_related("employee").select_for_update())
+                invalid_bank_count = sum(
+                    1 for payroll in payrolls if payroll.net_pay > 0 and (
+                        to_account_number(payroll.employee.account_number)[2]
+                        or to_bank_code(payroll.employee.bank_code)[1]
+                    )
+                )
+                if invalid_bank_count:
+                    return Response({"detail": f"Payroll approval is blocked by {invalid_bank_count} employee(s) with incomplete bank details."}, status=status.HTTP_400_BAD_REQUEST)
+                for payroll in payrolls:
+                    employee = payroll.employee
+                    payroll.bank_details_snapshot = {
+                        "bank_name": employee.bank_name,
+                        "account_number": employee.account_number,
+                        "bank_code": employee.bank_code,
+                    }
+                if payrolls:
+                    EmployeePayroll.objects.bulk_update(payrolls, ["bank_details_snapshot"])
             old_status = period.status
             period.status = target
             update_fields = ["status"]

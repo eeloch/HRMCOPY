@@ -16,6 +16,7 @@ class EmployeeImportAPIViewTests(APITestCase):
             username="importer",
             password="test-password",
         )
+        self.user.user_permissions.add(*Permission.objects.filter(content_type__app_label="employees", codename__in=("add_employee", "change_employee")))
         self.client.force_authenticate(
             user=self.user
         )
@@ -149,6 +150,87 @@ class EmployeeImportAPIViewTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["summary"], {"imported": 1, "updated": 1, "skipped": 0, "failed": 0})
         self.assertTrue(Employee.objects.filter(employee_id="EMP-006").exists())
+
+    def test_partial_update_preserves_unsupplied_existing_fields(self):
+        from datetime import date
+
+        employee = Employee.objects.create(
+            employee_id="EMP-PARTIAL", first_name="Old", last_name="Name",
+            department=self.department, employment_date=date(2024, 1, 1),
+            exit_date=date(2026, 9, 1), status="terminated",
+            bank_name="Review Bank", account_number="0123456789", bank_code="044",
+        )
+        response = self.client.post("/api/employees/import/", {
+            "file": SimpleUploadedFile("staff.csv", b"Employee ID,First Name,Last Name\nEMP-PARTIAL,New,Name\n", content_type="text/csv"),
+            "update_existing": "true",
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        employee.refresh_from_db()
+        self.assertEqual(employee.first_name, "New")
+        self.assertEqual(employee.status, "terminated")
+        self.assertEqual(employee.department, self.department)
+        self.assertEqual(employee.employment_date, date(2024, 1, 1))
+        self.assertEqual(employee.exit_date, date(2026, 9, 1))
+        self.assertEqual((employee.bank_name, employee.account_number, employee.bank_code), ("Review Bank", "0123456789", "000044"))
+
+    def test_blank_columns_do_not_erase_existing_details(self):
+        employee = Employee.objects.create(
+            employee_id="EMP-BLANK", first_name="Ada", last_name="Name",
+            department=self.department, status="terminated",
+            bank_name="Review Bank", account_number="0123456789", bank_code="044",
+            lives_in_company_hostel=True, hostel_room_number="Room 301",
+        )
+        response = self.client.post("/api/employees/import/", {
+            "file": SimpleUploadedFile(
+                "staff.csv",
+                b"Employee ID,First Name,Last Name,Department,Status,Bank,Account Number,Bank Code,Accommodation,Room Allocated\nEMP-BLANK,Ada,Renamed,,,,,,,\n",
+                content_type="text/csv",
+            ),
+            "update_existing": "true",
+        }, format="multipart")
+        self.assertEqual(response.status_code, 201, response.data)
+        employee.refresh_from_db()
+        self.assertEqual(employee.last_name, "Renamed")
+        self.assertEqual(employee.status, "terminated")
+        self.assertEqual(employee.department, self.department)
+        self.assertEqual((employee.bank_name, employee.account_number, employee.bank_code), ("Review Bank", "0123456789", "000044"))
+        self.assertTrue(employee.lives_in_company_hostel)
+        self.assertEqual(employee.hostel_room_number, "Room 301")
+
+    def test_full_name_does_not_clear_unsupplied_surname(self):
+        employee = Employee.objects.create(employee_id="EMP-NAME", first_name="Ada", last_name="Lovelace")
+        response = self.client.post("/api/employees/import/", {
+            "file": SimpleUploadedFile("staff.csv", b"Employee ID,Full Name,First Name\nEMP-NAME,Ada Lovelace,Ada\n", content_type="text/csv"),
+            "update_existing": "true",
+        }, format="multipart")
+        self.assertEqual(response.status_code, 201, response.data)
+        employee.refresh_from_db()
+        self.assertEqual(employee.last_name, "Lovelace")
+
+    def test_surname_only_update_keeps_existing_first_name(self):
+        employee = Employee.objects.create(employee_id="EMP-NAME-PARTIAL", first_name="Ada", last_name="Lovelace", status="terminated")
+        response = self.client.post("/api/employees/import/", {
+            "file": SimpleUploadedFile("staff.csv", b"Employee ID,Last Name\nEMP-NAME-PARTIAL,Byron\n", content_type="text/csv"),
+            "update_existing": "true",
+        }, format="multipart")
+        self.assertEqual(response.status_code, 201, response.data)
+        employee.refresh_from_db()
+        self.assertEqual((employee.first_name, employee.last_name, employee.status),
+                         ("Ada", "Byron", "terminated"))
+
+    def test_changing_department_clears_incompatible_unsupplied_position(self):
+        other_department = Department.objects.create(name="Other Operations")
+        employee = Employee.objects.create(employee_id="EMP-DEPT", first_name="Ada", department=self.department,
+                                           position=Position.objects.get(department=self.department, name="Operator"))
+        response = self.client.post("/api/employees/import/", {
+            "file": SimpleUploadedFile("staff.csv", b"Employee ID,First Name,Department\nEMP-DEPT,Ada,Other Operations\n", content_type="text/csv"),
+            "update_existing": "true",
+        }, format="multipart")
+        self.assertEqual(response.status_code, 201, response.data)
+        employee.refresh_from_db()
+        self.assertEqual(employee.department, other_department)
+        self.assertIsNone(employee.position)
 
     def test_duplicate_ids_within_the_same_file_still_fail_even_with_update_existing(self):
         response = self.client.post(
@@ -540,6 +622,8 @@ class SalaryVisibilityPermissionTests(APITestCase):
         self.privileged = get_user_model().objects.create_user(username="pay-admin", password="test-password")
         self.privileged.user_permissions.add(Permission.objects.get(codename="view_salary", content_type__app_label="employees"))
         self.restricted = get_user_model().objects.create_user(username="regular-staff", password="test-password")
+        for user in (self.privileged, self.restricted):
+            user.user_permissions.add(*Permission.objects.filter(content_type__app_label="employees", codename__in=("add_employee", "change_employee")))
         self.department = Department.objects.create(name="Operations")
         Position.objects.create(department=self.department, name="Operator")
         self.employee = Employee.objects.create(
@@ -650,6 +734,8 @@ class SalaryVisibilityBulkImportTests(APITestCase):
         self.privileged = get_user_model().objects.create_user(username="import-pay-admin", password="test-password")
         self.privileged.user_permissions.add(Permission.objects.get(codename="view_salary", content_type__app_label="employees"))
         self.restricted = get_user_model().objects.create_user(username="import-regular-staff", password="test-password")
+        for user in (self.privileged, self.restricted):
+            user.user_permissions.add(*Permission.objects.filter(content_type__app_label="employees", codename__in=("add_employee", "change_employee")))
         self.department = Department.objects.create(name="Operations")
         Position.objects.create(department=self.department, name="Operator")
         self.existing = Employee.objects.create(
@@ -739,6 +825,7 @@ class BulkImportAccommodationTests(APITestCase):
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="acc-importer", password="test-password")
+        self.user.user_permissions.add(*Permission.objects.filter(content_type__app_label="employees", codename__in=("add_employee", "change_employee")))
         self.client.force_authenticate(user=self.user)
         from accommodation.models import Building, Room
         hostel = Building.objects.create(name="Main Hostel")
@@ -798,6 +885,37 @@ class BulkImportAccommodationTests(APITestCase):
         self.assertEqual(self.client.post("/api/employees/import/", payload, format="multipart").status_code, status.HTTP_201_CREATED)
         self.assertEqual(Employee.objects.get(employee_id="000001").gender, "female")
         self.assertEqual(Employee.objects.get(employee_id="000002").gender, "male")
+
+
+class EmployeeMutationPermissionTests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="employee-reader", password="password")
+        self.client.force_authenticate(self.user)
+        self.employee = Employee.objects.create(employee_id="EMP-AUTH", first_name="Ada", status="terminated")
+
+    def test_reader_cannot_change_status_or_create_employee(self):
+        response = self.client.patch(f"/api/employees/{self.employee.pk}/", {"status": "active"}, format="json")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.client.post("/api/employees/", {"employee_id": "EMP-NEW", "first_name": "New"}, format="json").status_code, 403)
+        self.employee.refresh_from_db()
+        self.assertEqual(self.employee.status, "terminated")
+        self.assertFalse(Employee.objects.filter(employee_id="EMP-NEW").exists())
+
+    def test_reader_cannot_reactivate_via_spreadsheet_alias(self):
+        response = self.client.post("/api/employees/import/", {
+            "file": SimpleUploadedFile("staff.csv", b"Employee ID,First Name,Employment Status\nEMP-AUTH,Ada,active\n", content_type="text/csv"),
+            "update_existing": "true",
+        }, format="multipart")
+        self.assertEqual(response.status_code, 403)
+        self.employee.refresh_from_db()
+        self.assertEqual(self.employee.status, "terminated")
+
+    def test_employee_editor_can_change_existing_record(self):
+        self.user.user_permissions.add(Permission.objects.get(content_type__app_label="employees", codename="change_employee"))
+        response = self.client.patch(f"/api/employees/{self.employee.pk}/", {"status": "active"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.employee.refresh_from_db()
+        self.assertEqual(self.employee.status, "active")
 
 
 class EmployeeDirectorySummaryAndFiltersTests(APITestCase):
