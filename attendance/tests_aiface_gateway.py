@@ -567,3 +567,27 @@ class PollerSurvivesErrorsTests(SimpleTestCase):
         passes, errors = self.run_poller(["ok", "closed"])
         self.assertEqual(passes, 2)
         self.assertEqual(errors, "")
+
+
+class ResolveCommandNeverKeepsCredentialsTests(TestCase):
+    def test_a_reply_that_carries_a_record_is_stored_without_it(self):
+        from attendance.management.commands.run_aiface_gateway import Command
+        from attendance.models import BiometricDevice, DeviceCommand
+
+        device = BiometricDevice.objects.create(name="D", serial_number="RS1", location="x", device_type="factory", purpose="attendance")
+        command = DeviceCommand.objects.create(device=device, command_type="refresh_enrolled_ids", status="sent", sent_at=timezone.now(), payload={})
+        Command._resolve_command("RS1", {"ret": "getuserinfo", "result": True, "record": "SECRET-TEMPLATE", "sn": "RS1"})
+        command.refresh_from_db()
+        self.assertEqual(command.status, "acked")
+        self.assertNotIn("record", command.result)
+        self.assertNotIn("SECRET-TEMPLATE", str(command.result))
+
+    def test_the_id_list_of_a_getuserids_reply_is_kept_because_the_id_allocator_reads_it(self):
+        from attendance.management.commands.run_aiface_gateway import Command
+        from attendance.models import BiometricDevice, DeviceCommand
+
+        device = BiometricDevice.objects.create(name="D2", serial_number="RS2", location="x", device_type="factory", purpose="attendance")
+        command = DeviceCommand.objects.create(device=device, command_type="refresh_enrolled_ids", status="sent", sent_at=timezone.now(), payload={})
+        Command._resolve_command("RS2", {"ret": "getuserids", "result": True, "record": [1, 2, 3], "sn": "RS2"})
+        command.refresh_from_db()
+        self.assertEqual(command.result["record"], [1, 2, 3])

@@ -963,7 +963,10 @@ class Command(BaseCommand):
         if command is None:
             return
         status = "acked" if message.get("result") else "failed"
-        DeviceCommand.objects.filter(pk=command.id).update(status=status, result=message, completed_at=timezone.now())
+        # Never keep a credential: a getuserinfo reply carries the person's `record` (photo/template). (The `record`
+        # of a getuserids reply is just the list of ids and is used by BiometricDevice.free_enrollid.)
+        stored = {key: value for key, value in message.items() if not (key == "record" and message.get("ret") == "getuserinfo")}
+        DeviceCommand.objects.filter(pk=command.id).update(status=status, result=stored, completed_at=timezone.now())
         if status != "acked":
             return
         if command.command_type == "enroll_user":
