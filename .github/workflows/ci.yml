@@ -49,6 +49,8 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      - name: Generate Next.js route types (a clean checkout has none, and layout.tsx uses them)
+        run: npx next typegen
       - name: Type check
         run: npx tsc --noEmit
       - name: Lint (zero errors and zero warnings)
