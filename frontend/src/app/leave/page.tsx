@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { LeaveShell } from "@/components/leave/LeaveShell";
@@ -19,12 +19,19 @@ export default function LeaveDashboardPage() {
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    if (!getAccessToken()) { router.push("/login"); return; }
-    void loadDashboard();
-  }, [router]);
+  const loadBalances = useCallback(async (value: string) => {
+    if (!value) { setBalances([]); return; }
+    setBalanceLoading(true);
+    try {
+      const response = await apiFetch(`/leave/balance/${value}/`);
+      if (!response.ok) throw new Error("Unable to load leave balance.");
+      const data: BalanceResponse = await response.json();
+      setBalances(data.results);
+    } catch (loadError) { setError(loadError instanceof Error ? loadError.message : "Unable to load leave balance."); }
+    finally { setBalanceLoading(false); }
+  }, []);
 
-  async function loadDashboard() {
+  const loadDashboard = useCallback(async () => {
     setLoading(true); setError("");
     try {
       const [requestsResponse, pendingResponse] = await Promise.all([apiFetch("/leave/requests/"), apiFetch("/leave/pending/")]);
@@ -37,19 +44,13 @@ export default function LeaveDashboardPage() {
       if (firstEmployee) { setEmployeeId(String(firstEmployee)); void loadBalances(String(firstEmployee)); }
     } catch (loadError) { setError(loadError instanceof Error ? loadError.message : "Unable to load leave dashboard."); }
     finally { setLoading(false); }
-  }
+  }, [loadBalances]);
 
-  async function loadBalances(value = employeeId) {
-    if (!value) { setBalances([]); return; }
-    setBalanceLoading(true);
-    try {
-      const response = await apiFetch(`/leave/balance/${value}/`);
-      if (!response.ok) throw new Error("Unable to load leave balance.");
-      const data: BalanceResponse = await response.json();
-      setBalances(data.results);
-    } catch (loadError) { setError(loadError instanceof Error ? loadError.message : "Unable to load leave balance."); }
-    finally { setBalanceLoading(false); }
-  }
+  useEffect(() => {
+    if (!getAccessToken()) { router.push("/login"); return; }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change; the loader only sets its loading/error flags, no derived state
+    void loadDashboard();
+  }, [router, loadDashboard]);
 
   const employees = Array.from(new Map(requests.map((request) => [request.employee, request])).values());
   const selectedEmployee = employees.find((request) => String(request.employee) === employeeId);

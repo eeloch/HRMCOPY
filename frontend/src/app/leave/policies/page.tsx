@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { LeaveShell } from "@/components/leave/LeaveShell";
@@ -24,14 +24,7 @@ export default function LeavePoliciesPage() {
   const [feedback, setFeedback] = useState("");
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
 
-  useEffect(() => {
-    if (!getAccessToken()) { router.push("/login"); return; }
-    void load();
-    getCurrentUser().then(setCurrentUser).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [router]);
-
-  async function load() {
+  const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
@@ -44,7 +37,14 @@ export default function LeavePoliciesPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    if (!getAccessToken()) { router.push("/login"); return; }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change; the loader only sets its loading/error flags, no derived state
+    void load();
+    getCurrentUser().then(setCurrentUser).catch(() => {});
+  }, [router, load]);
 
   function existingCell(leaveTypeId: number, employmentType: string) {
     return matrix?.policies.find((p) => p.leave_type === leaveTypeId && p.employment_type === employmentType) || null;

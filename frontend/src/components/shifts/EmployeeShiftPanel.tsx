@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { apiFetch } from "@/lib/api";
 import type { ShiftEmployee } from "./types";
@@ -29,7 +29,7 @@ function apiError(data: unknown, fallback: string) {
   return fallback;
 }
 
-/** The employee's real, live shift: their current plan (and group, for a rotation) plus what today's roster
+/** The employee's real, live shift: their current plan (and group, for a rotation) plus what today&apos;s roster
  * actually says - not a static shift that never updates when a rotation flips Day/Night week to week. */
 export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
   const [plan, setPlan] = useState<PlanSummary>(null);
@@ -41,7 +41,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
   const [form, setForm] = useState({ plan: "", group: "", start: new Date().toISOString().slice(0, 10) });
   const [saving, setSaving] = useState(false);
 
-  async function load() {
+  const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
@@ -60,12 +60,12 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [employee.id]);
 
   useEffect(() => {
     const loadTimer = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(loadTimer);
-  }, [employee.id]);
+  }, [load]);
 
   const selectedPlan = plans.find((p) => String(p.id) === form.plan);
   const needsGroup = selectedPlan?.kind === "rotation";
@@ -105,7 +105,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
       <div className="flex flex-col gap-3 border-b border-slate-200 px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="font-bold text-slate-900">Shift Plan</h2>
-          <p className="mt-1 text-sm text-slate-500">Their current plan and what today's roster actually has them on.</p>
+          <p className="mt-1 text-sm text-slate-500">Their current plan and what today&apos;s roster actually has them on.</p>
         </div>
         <button type="button" onClick={openModal} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">
           {plan ? "Change Plan" : "Assign a Plan"}
@@ -153,7 +153,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
             <h3 className="text-lg font-bold text-slate-900">{plan ? "Change Plan" : "Assign a Plan"}</h3>
-            <p className="mt-1 text-sm text-slate-500">This only changes {employee.full_name}'s own schedule.</p>
+            <p className="mt-1 text-sm text-slate-500">This only changes {employee.full_name}&apos;s own schedule.</p>
             <label className="mt-4 block text-sm font-semibold text-slate-700">
               Plan
               <select value={form.plan} onChange={(event) => setForm({ ...form, plan: event.target.value, group: "" })} className={inputClass}>

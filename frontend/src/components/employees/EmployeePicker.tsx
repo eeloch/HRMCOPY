@@ -32,11 +32,7 @@ export function EmployeePicker({
   const latestRequestId = useRef(0);
 
   useEffect(() => {
-    if (!term.trim()) {
-      setResults([]);
-      setError("");
-      return;
-    }
+    if (!term.trim()) return; // results/error are reset where the term is cleared (see updateTerm)
     const timer = window.setTimeout(async () => {
       const requestId = ++latestRequestId.current;
       setLoading(true);
@@ -68,18 +64,26 @@ export function EmployeePicker({
     return () => document.removeEventListener("mousedown", onClickOutside);
   }, []);
 
+  // Changing the term to blank also drops the previous results and error, so nothing stale reappears
+  // when the user starts typing again.
+  function updateTerm(next: string) {
+    setTerm(next);
+    if (!next.trim()) {
+      setResults([]);
+      setError("");
+    }
+  }
+
   function clearSelection() {
     onChange(null);
-    setTerm("");
-    setResults([]);
+    updateTerm("");
     setOpen(false);
   }
 
   function selectResult(employee: EmployeeOption) {
     onChange(employee);
     setOpen(false);
-    setTerm("");
-    setResults([]);
+    updateTerm("");
   }
 
   return (
@@ -109,7 +113,7 @@ export function EmployeePicker({
         <input
           type="text"
           value={term}
-          onChange={(event) => { setTerm(event.target.value); setOpen(true); }}
+          onChange={(event) => { updateTerm(event.target.value); setOpen(true); }}
           onFocus={() => setOpen(true)}
           onKeyDown={(event) => {
             // Enter must never fall through to submit the surrounding form while still searching; pick the

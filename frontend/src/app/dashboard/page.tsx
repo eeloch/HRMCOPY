@@ -180,13 +180,6 @@ export default function DashboardPage() {
     ).length;
 
 
-  const incomplete =
-    attendance.filter(
-      (item) =>
-        item.status === "incomplete"
-    ).length;
-
-
   if (loading) {
     return (
       <div className="p-8">
@@ -208,7 +201,7 @@ export default function DashboardPage() {
           </h1>
 
           <p className="text-slate-500 mt-1">
-            Today's workforce overview
+            Today&apos;s workforce overview
           </p>
 
         </div>
@@ -260,7 +253,7 @@ export default function DashboardPage() {
           <div className="p-6 border-b border-slate-200">
 
             <h2 className="font-bold text-lg text-slate-900">
-              Today's Attendance
+              Today&apos;s Attendance
             </h2>
 
           </div>

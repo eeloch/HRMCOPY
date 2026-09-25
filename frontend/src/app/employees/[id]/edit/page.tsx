@@ -1,7 +1,7 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
@@ -82,16 +82,35 @@ export default function EditEmployeePage() {
   const [canEditSalary, setCanEditSalary] = useState(false);
   const [canEditBankDetails, setCanEditBankDetails] = useState(false);
 
-  useEffect(() => {
-    if (!getAccessToken()) {
-      router.push("/login");
+  const loadPositions = useCallback(async (departmentId: string) => {
+    if (!departmentId) {
+      setPositions([]);
       return;
     }
 
-    void loadPageData();
-  }, [id, router]);
+    setLoadingPositions(true);
 
-  async function loadPageData() {
+    try {
+      const response = await apiFetch(
+        `/employees/positions/?department=${departmentId}`
+      );
+
+      if (!response.ok) {
+        throw new Error("Unable to load positions.");
+      }
+
+      const data: Position[] = await response.json();
+      setPositions(data);
+    } catch (loadError) {
+      console.error(loadError);
+      setPositions([]);
+      setError("Unable to load positions.");
+    } finally {
+      setLoadingPositions(false);
+    }
+  }, []);
+
+  const loadPageData = useCallback(async () => {
     setLoading(true);
     setError("");
 
@@ -132,35 +151,17 @@ export default function EditEmployeePage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [id, loadPositions]);
 
-  async function loadPositions(departmentId: string) {
-    if (!departmentId) {
-      setPositions([]);
+  useEffect(() => {
+    if (!getAccessToken()) {
+      router.push("/login");
       return;
     }
 
-    setLoadingPositions(true);
-
-    try {
-      const response = await apiFetch(
-        `/employees/positions/?department=${departmentId}`
-      );
-
-      if (!response.ok) {
-        throw new Error("Unable to load positions.");
-      }
-
-      const data: Position[] = await response.json();
-      setPositions(data);
-    } catch (loadError) {
-      console.error(loadError);
-      setPositions([]);
-      setError("Unable to load positions.");
-    } finally {
-      setLoadingPositions(false);
-    }
-  }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change; the loader only sets its loading/error flags, no derived state
+    void loadPageData();
+  }, [router, loadPageData]);
 
   function updateField(
     field: keyof EmployeeFormValues,

@@ -100,7 +100,7 @@ export default function DocumentUploadModal({
                             Upload Document
                         </h2>
                         <p className="mt-1 text-sm text-slate-500">
-                            Add a document to this employee's record.
+                            Add a document to this employee&apos;s record.
                         </p>
                     </div>
                     <button

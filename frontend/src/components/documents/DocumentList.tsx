@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
 import DocumentUploadModal from "@/components/documents/DocumentUploadModal";
 
@@ -200,11 +200,7 @@ export default function DocumentList({
         }
     );
 
-    useEffect(() => {
-        loadDocuments();
-    }, [employeeId]);
-
-    async function loadDocuments() {
+    const loadDocuments = useCallback(async () => {
 
         setLoading(true);
         setError("");
@@ -238,7 +234,12 @@ export default function DocumentList({
             setLoading(false);
 
         }
-    }
+    }, [employeeId]);
+
+    useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change; the loader only sets its loading/error flags, no derived state
+        loadDocuments();
+    }, [loadDocuments]);
 
     async function handleOpen(
         document: Document,
@@ -301,7 +302,7 @@ export default function DocumentList({
         <div className="space-y-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-sm text-slate-500">
-                    Upload, review, and manage this employee's records.
+                    Upload, review, and manage this employee&apos;s records.
                 </p>
                 <button
                     type="button"

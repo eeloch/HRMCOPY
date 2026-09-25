@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
@@ -45,13 +45,7 @@ export default function ReportsPage() {
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(false);
 
-  useEffect(() => {
-    if (!getAccessToken()) { router.push("/login"); return; }
-    void loadSummary();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [router, weekStart]);
-
-  async function loadSummary() {
+  const loadSummary = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
@@ -63,7 +57,13 @@ export default function ReportsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [weekStart]);
+
+  useEffect(() => {
+    if (!getAccessToken()) { router.push("/login"); return; }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change; the loader only sets its loading/error flags, no derived state
+    void loadSummary();
+  }, [router, loadSummary]);
 
   function shiftWeek(days: number) {
     const next = new Date(`${weekStart}T00:00:00`);

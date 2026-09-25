@@ -116,7 +116,6 @@ function ExceptionPageInner() {
         setDeepLinkNotice("That attendance exception could not be found.");
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deepLinkId]);
 
   function switchView(mode: ViewMode) {

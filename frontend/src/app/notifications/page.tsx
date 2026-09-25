@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import Sidebar from "@/components/Sidebar";
@@ -22,21 +22,19 @@ export default function NotificationsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => { if (!getAccessToken()) { router.push("/login"); return; } void loadNotifications(); }, [router, page]);
-  async function loadNotifications(
-    resetPage = false,
-    nextTab = tab,
-    nextSeverity = severity,
-  ) {
-    const nextPage = resetPage ? 1 : page;
-    if (resetPage) setPage(1);
+  const loadNotifications = useCallback(async () => {
     setLoading(true); setError("");
-    try { const data = await getNotifications({ page: String(nextPage), page_size: "20", ...(nextTab === "unread" ? { unread: "true" } : {}), ...(nextSeverity ? { severity: nextSeverity } : {}) }); setNotifications(data.results); setCount(data.count); setTotalPages(data.total_pages); }
+    try { const data = await getNotifications({ page: String(page), page_size: "20", ...(tab === "unread" ? { unread: "true" } : {}), ...(severity ? { severity } : {}) }); setNotifications(data.results); setCount(data.count); setTotalPages(data.total_pages); }
     catch (loadError) { setError(loadError instanceof Error ? loadError.message : "Unable to load notifications."); }
     finally { setLoading(false); }
-  }
-  function changeTab(nextTab: "all" | "unread") { setTab(nextTab); void loadNotifications(true, nextTab, severity); }
-  function changeSeverity(nextSeverity: string) { setSeverity(nextSeverity); void loadNotifications(true, tab, nextSeverity); }
+  }, [page, tab, severity]);
+  useEffect(() => {
+    if (!getAccessToken()) { router.push("/login"); return; }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount/param-change; the loader only sets its loading/error flags, no derived state
+    void loadNotifications();
+  }, [router, loadNotifications]);
+  function changeTab(nextTab: "all" | "unread") { setTab(nextTab); setPage(1); }
+  function changeSeverity(nextSeverity: string) { setSeverity(nextSeverity); setPage(1); }
   async function markAllRead() { try { await markAllNotificationsRead(); setNotifications((current) => current.map((notification) => ({ ...notification, is_read: true }))); void loadNotifications(); } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Unable to mark notifications as read."); } }
   return <div className="min-h-screen bg-slate-100"><Sidebar /><main className="ml-64 min-w-0 p-4 md:p-8"><PageHeader title="Notifications" description="Updates that are relevant to your account." actions={<button onClick={() => void markAllRead()} disabled={!notifications.some((notification) => !notification.is_read)} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300">Mark all as read</button>} />{error ? <ErrorPanel message={error} retry={loadNotifications} /> : <><AppCard className="mb-6"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex gap-2"><button onClick={() => changeTab("all")} className={`rounded-xl px-4 py-2 text-sm font-semibold ${tab === "all" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>All</button><button onClick={() => changeTab("unread")} className={`rounded-xl px-4 py-2 text-sm font-semibold ${tab === "unread" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>Unread</button></div><select value={severity} onChange={(event) => changeSeverity(event.target.value)} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm text-slate-700"><option value="">All severities</option>{severityOptions.slice(1).map((item) => <option key={item} value={item}>{capitalize(item)}</option>)}</select></div></AppCard><Section title="Notification Center" subtitle={`${count} notification${count === 1 ? "" : "s"}.`} actions={<button onClick={() => void loadNotifications()} className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">Refresh</button>}>{loading ? <CenterSkeleton /> : notifications.length ? <div>{notifications.map((notification) => <NotificationItem key={notification.id} notification={notification} onRead={(updated) => setNotifications((current) => current.map((item) => item.id === updated.id ? updated : item))} />)}</div> : <p className="p-10 text-center text-slate-500">No notifications found.</p>}<Pagination page={page} totalPages={totalPages} onChange={setPage} /></Section></>}</main></div>;
 }
