@@ -72,6 +72,7 @@ GATING_FULL_CHECK_SECONDS = 300  # everyone is re-checked this often; a person's
 
 try:
     import websockets
+    import websockets.exceptions  # `except websockets.exceptions.ConnectionClosed` needs the submodule loaded
 except ImportError:
     websockets = None
 
@@ -265,51 +266,65 @@ class Command(BaseCommand):
         """
         try:
             while True:
-                await asyncio.sleep(COMMAND_POLL_INTERVAL_SECONDS)
-                now = asyncio.get_running_loop().time()
-                if activity is not None:
-                    activity["beat"], activity["busy_since"] = now, None  # looping normally; a long job below marks itself busy
-                if now - self._last_gating_check >= GATING_FULL_CHECK_SECONDS:
-                    self._mark_busy(activity)
-                    # Safety net for everyone covered by MEAL_GATING_EMPLOYEE_IDS (day rollover, roster changes, a
-                    # gateway that was down). Claim the slot first so the other terminals' loops skip it.
-                    self._last_gating_check = now
-                    await self._run_db(self._reconcile_meal_gating)
-                if now - self._last_attendance_refresh >= ATTENDANCE_REFRESH_SECONDS:
-                    self._mark_busy(activity)
-                    self._last_attendance_refresh = now
-                    await self._run_db(self._refresh_attendance)
-                if now - self._last_roster_check >= ROSTER_EXTEND_CHECK_SECONDS:
-                    self._mark_busy(activity)
-                    self._last_roster_check = now
-                    await self._run_db(self._extend_rosters_daily)
-                if now - self._last_auto_sync >= AUTO_SYNC_SECONDS:
-                    self._mark_busy(activity)
-                    self._last_auto_sync = now
-                    await self._run_db(self._auto_sync_enrollments)
-                next_command = await self._run_db(self._next_command_to_send, sn)
-                if next_command is None:
-                    continue
-                command_id, wire_message = next_command
-                if wire_message is None:
-                    self._mark_busy(activity)
-                    kind = await self._run_db(self._command_kind, command_id)
-                    if kind == "list_user_slots":
-                        await self._run_list_user_slots(ws, sn, command_id)
-                    elif kind == "slot_clone":
-                        await self._run_slot_clone(ws, sn, command_id)
-                    elif kind == "renumber":
-                        await self._run_renumber(ws, sn, command_id)
-                    elif kind == "name_probe":
-                        await self._run_name_probe(ws, sn, command_id)
-                    else:
-                        await self._run_clone_enrollment(ws, sn, command_id)
-                    continue
-                self.stdout.write(f"[{sn}] sending queued command: {wire_message}")
-                await ws.send(json.dumps(wire_message))
-                await self._run_db(self._mark_command_sent, command_id)
+                try:
+                    await self._poll_step(ws, sn, activity)
+                except asyncio.CancelledError:
+                    raise
+                except websockets.exceptions.ConnectionClosed:
+                    return  # the terminal is gone; its handler starts a fresh poller when it reconnects
+                except Exception as error:
+                    # One bad job must not kill the poller: a dead poller on a live connection left a meal terminal
+                    # unable to receive switch-offs for ~40 minutes (2026-09-24).
+                    self.stderr.write(f"[{sn}] command poller error (carrying on): {error!r}")
+                    await asyncio.sleep(5)
         except asyncio.CancelledError:
             pass
+
+    async def _poll_step(self, ws, sn, activity):
+        """One pass of the command poller: maintenance if due, then send/run at most one queued command."""
+        await asyncio.sleep(COMMAND_POLL_INTERVAL_SECONDS)
+        now = asyncio.get_running_loop().time()
+        if activity is not None:
+            activity["beat"], activity["busy_since"] = now, None  # looping normally; a long job below marks itself busy
+        if now - self._last_gating_check >= GATING_FULL_CHECK_SECONDS:
+            self._mark_busy(activity)
+            # Safety net for everyone covered by MEAL_GATING_EMPLOYEE_IDS (day rollover, roster changes, a
+            # gateway that was down). Claim the slot first so the other terminals' loops skip it.
+            self._last_gating_check = now
+            await self._run_db(self._reconcile_meal_gating)
+        if now - self._last_attendance_refresh >= ATTENDANCE_REFRESH_SECONDS:
+            self._mark_busy(activity)
+            self._last_attendance_refresh = now
+            await self._run_db(self._refresh_attendance)
+        if now - self._last_roster_check >= ROSTER_EXTEND_CHECK_SECONDS:
+            self._mark_busy(activity)
+            self._last_roster_check = now
+            await self._run_db(self._extend_rosters_daily)
+        if now - self._last_auto_sync >= AUTO_SYNC_SECONDS:
+            self._mark_busy(activity)
+            self._last_auto_sync = now
+            await self._run_db(self._auto_sync_enrollments)
+        next_command = await self._run_db(self._next_command_to_send, sn)
+        if next_command is None:
+            return
+        command_id, wire_message = next_command
+        if wire_message is None:
+            self._mark_busy(activity)
+            kind = await self._run_db(self._command_kind, command_id)
+            if kind == "list_user_slots":
+                await self._run_list_user_slots(ws, sn, command_id)
+            elif kind == "slot_clone":
+                await self._run_slot_clone(ws, sn, command_id)
+            elif kind == "renumber":
+                await self._run_renumber(ws, sn, command_id)
+            elif kind == "name_probe":
+                await self._run_name_probe(ws, sn, command_id)
+            else:
+                await self._run_clone_enrollment(ws, sn, command_id)
+            return
+        self.stdout.write(f"[{sn}] sending queued command: {wire_message}")
+        await ws.send(json.dumps(wire_message))
+        await self._run_db(self._mark_command_sent, command_id)
 
     @staticmethod
     def _previous_listing_size(serial_number):

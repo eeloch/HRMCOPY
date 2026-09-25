@@ -518,3 +518,52 @@ class PollerWatchdogTests(SimpleTestCase):
 
     def test_a_poller_that_has_ended_closes_the_connection(self):
         self.assertTrue(self.run_watchdog({"idle": 1}, task_done=True)[0])
+
+
+class PollerSurvivesErrorsTests(SimpleTestCase):
+    """The poller task was found dead (`done=True`) on live connections after an exception inside a relay."""
+
+    def run_poller(self, steps):
+        import asyncio
+        import io
+
+        import websockets
+        import websockets.exceptions
+
+        from attendance.management.commands.run_aiface_gateway import Command
+
+        calls = {"n": 0}
+        command = Command(stdout=io.StringIO(), stderr=io.StringIO())
+
+        async def fake_step(ws, sn, activity):
+            index = calls["n"]
+            calls["n"] += 1
+            outcome = steps[index] if index < len(steps) else "stop"
+            if outcome == "error":
+                raise ValueError("boom")
+            if outcome == "closed":
+                raise websockets.exceptions.ConnectionClosedOK(None, None)
+            if outcome == "stop":
+                raise asyncio.CancelledError
+
+        async def scenario():
+            real_sleep = asyncio.sleep
+
+            async def quick(_s):
+                await real_sleep(0)
+
+            with mock.patch.object(command, "_poll_step", fake_step), mock.patch("attendance.management.commands.run_aiface_gateway.asyncio.sleep", quick):
+                await command._poll_commands(None, "S1", {})
+
+        asyncio.run(scenario())
+        return calls["n"], command.stderr.getvalue()
+
+    def test_an_error_in_one_pass_is_logged_and_the_poller_carries_on(self):
+        passes, errors = self.run_poller(["error", "ok", "ok"])
+        self.assertGreaterEqual(passes, 3)
+        self.assertIn("boom", errors)
+
+    def test_a_closed_connection_ends_the_poller_quietly(self):
+        passes, errors = self.run_poller(["ok", "closed"])
+        self.assertEqual(passes, 2)
+        self.assertEqual(errors, "")
