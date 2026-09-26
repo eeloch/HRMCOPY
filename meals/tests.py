@@ -1958,6 +1958,29 @@ class TerminalReplyTests(TestCase):
         result = self.post("999", 3)
         self.assertEqual((result["access"], result["message"]), (0, "Not enrolled for meals"))
 
+    def send(self, records):
+        from django.test import override_settings
+        with override_settings(BIOMETRIC_BRIDGE_SECRET="s3cret", SECURE_SSL_REDIRECT=False):
+            return APIClient().post("/api/meals/integrations/vendor-gateway/punches/", {"records": records}, format="json", HTTP_X_BIOMETRIC_BRIDGE_KEY="s3cret").json()
+
+    def test_a_verification_the_terminal_refused_is_not_a_ticket(self):
+        """2026-09-25: Meal Ticket 2 logs a switched-off person's refused scan as event 104; it was counted as a
+        ticket (2 of 1) and queued a 700 deduction although nothing was issued."""
+        from meals.models import MealCollection
+
+        first = {"gateway_record_id": 1, "device_serial_number": "MEAL001", "enroll_id": "10", "timestamp": "2026-09-07 12:00:00", "event": 0}
+        refused = {"gateway_record_id": 2, "device_serial_number": "MEAL001", "enroll_id": "10", "timestamp": "2026-09-07 13:00:00", "event": 104}
+        data = self.send([first, refused])
+        self.assertEqual(data["created"], 1)
+        self.assertEqual(data["refused_by_terminal"], 1)
+        self.assertEqual({r["status"] for r in data["results"]}, {"created", "refused_by_terminal"})
+        self.assertEqual(MealCollection.objects.filter(employee=self.employee).count(), 1)
+        self.assertFalse(MealExcessException.objects.filter(employee=self.employee).exists())
+
+    def test_a_genuine_scan_without_an_event_field_or_with_event_zero_still_counts(self):
+        data = self.send([{"gateway_record_id": 5, "device_serial_number": "MEAL001", "enroll_id": "10", "timestamp": "2026-09-07 12:00:00"}])
+        self.assertEqual((data["created"], data["refused_by_terminal"]), (1, 0))
+
 
 class MealGatingTests(TestCase):
     """People listed in MEAL_GATING_EMPLOYEE_IDS are switched off at the terminal once they have had today's

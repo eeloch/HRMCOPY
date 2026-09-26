@@ -97,6 +97,7 @@ class MealVendorGatewayPunchBridgeAPIView(APIView):
             return Response({"detail": "A JSON object containing a records list is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         normalized = []
+        refused = []
         for item in request.data["records"]:
             if not isinstance(item, dict):
                 normalized.append((None, {"invalid": "Record must be an object."}))
@@ -104,6 +105,13 @@ class MealVendorGatewayPunchBridgeAPIView(APIView):
             forbidden = FORBIDDEN_BIOMETRIC_FIELDS.intersection(key.lower() for key in item)
             if forbidden:
                 normalized.append((item.get("gateway_record_id"), {"invalid": f"Biometric payload fields are not accepted: {', '.join(sorted(forbidden))}."}))
+                continue
+            if item.get("event") not in (None, 0, "0"):
+                # A terminal that logs refused verifications (Meal Ticket 2 does: "Access denied no LOG" is off) sends
+                # them as records with a non-zero event, 104 for a switched-off person. Every genuine scan is event 0.
+                # A refusal is not a ticket: counting it charged people 700 for a ticket that was never issued
+                # (Egbo Sussan Chidimma, 25 Sep 2026).
+                refused.append((item.get("gateway_record_id"), item.get("event")))
                 continue
             try:
                 timestamp = timezone.make_aware(datetime.strptime(str(item["timestamp"]), "%Y-%m-%d %H:%M:%S"), timezone.get_current_timezone())
@@ -141,4 +149,5 @@ class MealVendorGatewayPunchBridgeAPIView(APIView):
         summary.invalid += len(invalid)
         results = [{"gateway_record_id": gateway_id, "status": result.status, "reason": result.reason, **terminal_reply(result)} for (gateway_id, _), result in zip(valid, summary.results)]
         results.extend({"gateway_record_id": gateway_id, "status": "invalid", "reason": record["invalid"], "access": 0, "entitled": False, "message": "Scan not recognised"} for gateway_id, record in invalid)
-        return Response({"received": len(normalized), "created": summary.created, "duplicate": summary.duplicate, "unmapped_employee": summary.unmapped_employee, "unknown_device": summary.unknown_device, "revoked_access": summary.revoked_access, "invalid": summary.invalid, "results": results})
+        results.extend({"gateway_record_id": gateway_id, "status": "refused_by_terminal", "reason": f"The terminal refused this verification (event {event}); it is not a ticket.", "access": 0, "entitled": False, "message": "Access denied"} for gateway_id, event in refused)
+        return Response({"received": len(normalized) + len(refused), "refused_by_terminal": len(refused), "created": summary.created, "duplicate": summary.duplicate, "unmapped_employee": summary.unmapped_employee, "unknown_device": summary.unknown_device, "revoked_access": summary.revoked_access, "invalid": summary.invalid, "results": results})
