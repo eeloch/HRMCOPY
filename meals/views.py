@@ -315,33 +315,94 @@ class MealExcessApproveAPIView(APIView):
             }
         )   
 
+def _date_param(value):
+    from datetime import date
+
+    try:
+        return date.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+
+
+def _employee_search(queryset, term, prefix="employee__"):
+    """Staff number or any part of a name; several words must all match somewhere in the name."""
+    for word in term.split():
+        queryset = queryset.filter(
+            Q(**{f"{prefix}employee_id__icontains": word})
+            | Q(**{f"{prefix}first_name__icontains": word})
+            | Q(**{f"{prefix}middle_name__icontains": word})
+            | Q(**{f"{prefix}last_name__icontains": word})
+        )
+    return queryset
+
+
 class MealOperationsAPIView(APIView):
+    """The Meals page's data. Everything is optional and defaults to what the page always showed (the newest 100
+    collections and every pending decision), so older callers keep working:
+
+      date_from, date_to   work dates (YYYY-MM-DD) for collections and decisions
+      search               staff number or part of a name
+      device               a terminal name (collections)
+      status               collections: within | excess | voided | all
+      decisions            pending (default) | decided | all
+      page, page_size      collections, 50 per page by default, at most 200
+    """
+
     permission_classes = [IsAuthenticated, CanViewMealOperations]
 
     def get(self, request):
-        employee = request.query_params.get("employee")
+        params = request.query_params
+        employee = params.get("employee")
+        date_from, date_to = _date_param(params.get("date_from")), _date_param(params.get("date_to"))
+        search = params.get("search", "").strip()
+        device = params.get("device", "").strip()
+        status_filter = params.get("status", "").strip()
+        decisions = params.get("decisions", "pending")
+        try:
+            page = max(1, int(params.get("page", 1)))
+            page_size = min(max(int(params.get("page_size", 100 if "page" not in params and "page_size" not in params else 50)), 1), 200)
+        except ValueError:
+            page, page_size = 1, 100
 
         collections = (
             MealCollection.objects
             .select_related("employee", "event__device", "excess_exception")
             .order_by("-event__timestamp")
         )
+        exceptions = MealExcessException.objects.select_related("employee", "reviewer").order_by("-work_date", "-created_at")
+        if decisions == "pending":
+            exceptions = exceptions.filter(status="pending")
+        elif decisions == "decided":
+            exceptions = exceptions.exclude(status="pending")
 
         if employee:
             collections = collections.filter(employee_id=employee)
+        if date_from:
+            collections, exceptions = collections.filter(work_date__gte=date_from), exceptions.filter(work_date__gte=date_from)
+        if date_to:
+            collections, exceptions = collections.filter(work_date__lte=date_to), exceptions.filter(work_date__lte=date_to)
+        if search:
+            collections, exceptions = _employee_search(collections, search), _employee_search(exceptions, search)
+        if device:
+            collections = collections.filter(event__device__name=device)
+        if status_filter == "voided":
+            collections = collections.filter(voided_at__isnull=False)
+        elif status_filter == "within":
+            collections = collections.filter(voided_at__isnull=True, status="within_entitlement")
+        elif status_filter == "excess":
+            collections = collections.filter(voided_at__isnull=True).exclude(status="within_entitlement")
 
-        exceptions = (
-            MealExcessException.objects
-            .select_related("employee", "reviewer")
-            .filter(status="pending")
-            .order_by("-created_at")
-        )
-
-        shown = list(collections[:100])
+        total = collections.count()
+        start = (page - 1) * page_size
+        shown = list(collections[start:start + page_size])
+        live = collections.filter(voided_at__isnull=True)
+        in_range_within = live.filter(status="within_entitlement").count()
+        in_range_total = live.count()
+        exceptions_total = exceptions.count()
+        exception_rows = list(exceptions[:500])
 
         # The metric cards need real, unambiguous totals for today - not something derived client-side
-        # from whichever 100 rows happen to still be in the "most recent" window, which silently drops
-        # older same-day collections once more than 100 scans have happened anywhere in the company.
+        # from whichever rows happen to still be in the window.
         today = timezone.localdate()
         today_collections = MealCollection.objects.filter(work_date=today, voided_at__isnull=True)
         today_within = today_collections.filter(status="within_entitlement").count()
@@ -356,12 +417,22 @@ class MealOperationsAPIView(APIView):
                     # All-time, not just today: an unresolved excess from an earlier day still needs a
                     # decision, so this is a backlog count, not a "today" count - shown separately on
                     # purpose rather than made to look like it should match the totals above.
-                    "pending_review": exceptions.count(),
+                    "pending_review": MealExcessException.objects.filter(status="pending").count(),
                 },
+                "range_summary": {
+                    "collections": in_range_total,
+                    "within_entitlement": in_range_within,
+                    "excess": in_range_total - in_range_within,
+                    "voided": total - in_range_total,
+                },
+                "collections_total": total,
+                "page": page,
+                "page_size": page_size,
                 "collections": [
                     {
                         "id": x.pk,
                         "employee": x.employee_id,
+                        "employee_number": x.employee.employee_id,
                         "employee_name": x.employee.full_name,
                         "work_date": x.work_date,
                         "timestamp": x.event.timestamp,
@@ -377,10 +448,12 @@ class MealOperationsAPIView(APIView):
                     }
                     for x in shown
                 ],
+                "exceptions_total": exceptions_total,
                 "exceptions": [
                     {
                         "id": x.pk,
                         "employee": x.employee_id,
+                        "employee_number": x.employee.employee_id,
                         "employee_name": x.employee.full_name,
                         "work_date": x.work_date,
                         "entitlement": x.entitlement_snapshot,
@@ -397,7 +470,7 @@ class MealOperationsAPIView(APIView):
                         # guessing why gating didn't stop this one.
                         "card_verified": _is_card_verified(x.employee_id, x.work_date, x.collected_quantity),
                     }
-                    for x in exceptions
+                    for x in exception_rows
                 ],
             }
         )

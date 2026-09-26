@@ -2256,3 +2256,60 @@ class ResendSwitchesTests(TestCase):
         call_command("resend_switches", "--device", "Canteen 2", "--apply", stdout=StringIO())
         (command,) = DeviceCommand.objects.all()
         self.assertEqual((command.payload["enrollid"], command.payload["enabled"], command.payload["legacy"]), (5, False, True))
+
+
+class OperationsFilterTests(TestCase):
+    """The Meals page filters collections and decisions by date, person, terminal and status, and pages the list."""
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+        from django.utils import timezone
+
+        from meals.models import MealCollection, MealEvent, MealExcessException
+
+        self.viewer = get_user_model().objects.create_user(username="ops-viewer", password="x")
+        self.viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.viewer)
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=date(2026, 1, 1))
+        self.d1, self.d2 = MealDevice.objects.create(name="Canteen 1", serial_number="OP1", active=True), MealDevice.objects.create(name="Canteen 2", serial_number="OP2", active=True)
+        self.ada = Employee.objects.create(employee_id="000101", first_name="Ada", last_name="Okafor")
+        self.bob = Employee.objects.create(employee_id="000102", first_name="Bob", middle_name="Chidi", last_name="Eze")
+        self.rows = {}
+        for key, employee, device, when, status in (
+            ("a1", self.ada, self.d1, date(2026, 9, 24), "within_entitlement"),
+            ("a2", self.ada, self.d1, date(2026, 9, 25), "excess"),
+            ("b1", self.bob, self.d2, date(2026, 9, 25), "within_entitlement"),
+        ):
+            stamp = timezone.make_aware(datetime(when.year, when.month, when.day, 12, 0))
+            event = MealEvent.objects.create(employee=employee, device=device, timestamp=stamp, external_event_id=key, source_system="t")
+            self.rows[key] = MealCollection.objects.create(event=event, employee=employee, work_date=when, sequence_number=1, entitlement_snapshot=1, rate_snapshot="700.00", status=status)
+        MealExcessException.objects.create(employee=self.ada, work_date=date(2026, 9, 25), entitlement_snapshot=1, collected_quantity=2, excess_quantity=1, rate_snapshot="700.00", proposed_deduction="700.00")
+        MealExcessException.objects.create(employee=self.bob, work_date=date(2026, 9, 20), entitlement_snapshot=1, collected_quantity=2, excess_quantity=1, rate_snapshot="700.00", proposed_deduction="700.00", status="declined")
+
+    def get(self, query=""):
+        return self.client.get(f"/api/meals/operations/{query}").json()
+
+    def test_the_default_response_is_unchanged_and_now_carries_staff_numbers(self):
+        data = self.get()
+        self.assertEqual(len(data["collections"]), 3)
+        self.assertEqual({row["employee_number"] for row in data["collections"]}, {"000101", "000102"})
+        self.assertEqual([e["status"] for e in data["exceptions"]], ["pending"])
+
+    def test_date_range_search_terminal_and_status_filters(self):
+        self.assertEqual({r["id"] for r in self.get("?date_from=2026-09-25&date_to=2026-09-25")["collections"]}, {self.rows["a2"].pk, self.rows["b1"].pk})
+        self.assertEqual({r["id"] for r in self.get("?search=chidi")["collections"]}, {self.rows["b1"].pk})
+        self.assertEqual({r["id"] for r in self.get("?search=000101")["collections"]}, {self.rows["a1"].pk, self.rows["a2"].pk})
+        self.assertEqual({r["id"] for r in self.get("?device=Canteen 2")["collections"]}, {self.rows["b1"].pk})
+        self.assertEqual({r["id"] for r in self.get("?status=excess")["collections"]}, {self.rows["a2"].pk})
+
+    def test_decisions_can_be_pending_decided_or_all_and_filtered_by_date(self):
+        self.assertEqual(len(self.get("?decisions=all")["exceptions"]), 2)
+        self.assertEqual([e["status"] for e in self.get("?decisions=decided")["exceptions"]], ["declined"])
+        self.assertEqual(len(self.get("?decisions=all&date_from=2026-09-24")["exceptions"]), 1)
+
+    def test_pages_and_range_totals(self):
+        data = self.get("?page=2&page_size=2")
+        self.assertEqual((data["collections_total"], len(data["collections"]), data["page"]), (3, 1, 2))
+        self.assertEqual(self.get("?date_from=2026-09-25&date_to=2026-09-25")["range_summary"], {"collections": 2, "within_entitlement": 1, "excess": 1, "voided": 0})
