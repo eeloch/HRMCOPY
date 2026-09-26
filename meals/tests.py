@@ -2014,18 +2014,12 @@ class MealGatingTests(TestCase):
         """The profile switches; each is accompanied by a legacy `enableuser` twin (see test_every_switch_has_a_legacy_twin)."""
         return [(c.payload["enrollid"], c.payload["enabled"]) for c in DeviceCommand.objects.filter(command_type="set_user_enabled").exclude(payload__has_key="legacy").order_by("id")]
 
-    def test_every_switch_has_a_legacy_twin_so_faces_are_blocked_on_every_firmware(self):
-        self.scan(self.pilot, "twin-1"); self.scan(self.pilot, "twin-2")
+    def test_one_profile_switch_per_person_and_direction_and_no_legacy_twin(self):
+        self.scan(self.pilot, "one-1"); self.scan(self.pilot, "one-2")
         self.gating.refresh(self.pilot)
-        legacy = DeviceCommand.objects.filter(command_type="set_user_enabled", payload__has_key="legacy")
-        self.assertEqual([(c.payload["enrollid"], c.payload["enabled"]) for c in legacy], [(7, False)])
-        from attendance.integrations.aiface_protocol import build_device_command
-
-        self.assertEqual(build_device_command("S", "set_user_enabled", legacy.first().payload), {"cmd": "enableuser", "sn": "S", "enrollid": 7, "enflag": 0})
-        profile = DeviceCommand.objects.filter(command_type="set_user_enabled").exclude(payload__has_key="legacy").first()
-        self.assertEqual(build_device_command("S", "set_user_enabled", profile.payload), {"cmd": "setuserinfo", "sn": "S", "enrollid": 7, "enable": 0})
-        self.gating.reconcile()  # asking again never queues a second pair
-        self.assertEqual(DeviceCommand.objects.filter(command_type="set_user_enabled").count(), 2)
+        self.gating.reconcile()  # asking again never queues a second command
+        commands = DeviceCommand.objects.filter(command_type="set_user_enabled")
+        self.assertEqual([(c.payload["enrollid"], c.payload["enabled"], "legacy" in c.payload) for c in commands], [(7, False, False)])
 
     def confirm_all(self):
         from meals.gating import record_state
