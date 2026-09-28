@@ -978,12 +978,21 @@ class Command(BaseCommand):
 
     @staticmethod
     def _link_identity_if_missing(employee_id, device, enrollid):
+        """Used by the ordinary cross-terminal sync (slot_clone/clone_enrollment), unlike a genuine on-device
+        enrollment (_link_biometric_identity) - so this is usually how a person first gets onto a MEAL terminal:
+        synced there automatically, not scanned in by hand. Without a gating check right here, someone with a
+        zero entitlement (most often a brand-new hire with no meal allocation configured yet) sits enabled at
+        the new terminal until they scan (too late) or the next periodic sweep catches up (2026-09-28: two new
+        hires collected tickets on a terminal they had only ever reached through sync, days apart, before the
+        sweep caught them each time)."""
         from employees.models import BiometricIdentity
 
-        BiometricIdentity.objects.get_or_create(
+        _identity, created = BiometricIdentity.objects.get_or_create(
             employee_id=employee_id, system=IDENTITY_SYSTEM, source_identifier=device.serial_number,
             defaults={"external_user_id": str(enrollid), "is_active": True},
         )
+        if created:
+            Command._refresh_meal_gating(employee_id)
 
     @staticmethod
     def _link_cloned_identity(employee_id, device, enrollid):

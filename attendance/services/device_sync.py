@@ -142,7 +142,11 @@ def queue_listings(devices, *, older_than=LISTING_FRESH_FOR):
 def link_ids_by_staff_number(devices):
     """A terminal id equal to exactly one active employee's staff number, with no identity yet on that terminal, is
     that employee (the convention every terminal here was enrolled by). Without the link a scan of that person is
-    rejected as "unmapped employee". Returns how many were linked."""
+    rejected as "unmapped employee". Returns how many were linked.
+
+    When the terminal is a meal terminal, this can be the first time HRM has ever known this person was on it -
+    exactly like a fresh sync (see run_aiface_gateway._link_identity_if_missing) - so it re-checks meal gating for
+    them straight away rather than leaving them enabled until they scan or the next periodic sweep."""
     by_number = defaultdict(list)
     for employee in Employee.objects.filter(status="active").only("id", "employee_id"):
         if employee.employee_id.isdigit():
@@ -160,6 +164,10 @@ def link_ids_by_staff_number(devices):
                 continue
             BiometricIdentity.objects.create(employee=matches[0], system=IDENTITY_SYSTEM, source_identifier=device.serial_number, external_user_id=str(enrollid), is_active=True)
             linked += 1
+            if device.purpose == "meal_ticket":
+                from meals.gating import refresh
+
+                refresh(matches[0])
     return linked
 
 

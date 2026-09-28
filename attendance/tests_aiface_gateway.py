@@ -635,3 +635,47 @@ class GatewayIdentityChecksTests(SimpleTestCase):
             self.assertIn("AIFACE_ALLOWED_NETWORKS", self.gateway._reg_refusal(self.ws("198.51.100.9"), ("198.51.100.9", 1), "SN1", None))
         with mock.patch.dict("os.environ", {"AIFACE_ALLOWED_NETWORKS": ""}):
             self.assertTrue(self.Command._network_allowed("198.51.100.9"))
+
+
+class SyncedLinkTriggersMealGatingTests(TestCase):
+    """A person first reaching a meal terminal through ordinary cross-terminal sync (not a hands-on enrollment) must
+    be gating-checked immediately, the same as _link_biometric_identity already does for a real enrollment
+    (2026-09-28: two new hires with no meal allocation configured collected tickets on a terminal they only ever
+    reached via sync, because nothing re-checked them until they scanned or the next sweep ran)."""
+
+    def setUp(self):
+        from django.test import override_settings
+
+        from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
+        from attendance.management.commands.run_aiface_gateway import Command
+        from attendance.models import BiometricDevice
+        from employees.models import Employee
+
+        self.system, self.Command = IDENTITY_SYSTEM, Command
+        self.override = override_settings(MEAL_GATING_EMPLOYEE_IDS=["000900"])
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.meal_device = BiometricDevice.objects.create(name="Canteen", serial_number="MEALSYNC1", location="x", device_type="factory", purpose="meal_ticket")
+        self.attendance_device = BiometricDevice.objects.create(name="Gate", serial_number="ATTSYNC1", location="x", device_type="factory", purpose="attendance")
+        self.newcomer = Employee.objects.create(employee_id="000900", first_name="New", last_name="Hire", status="active")
+        # No EmployeeMealEntitlement row at all: exactly the "brand-new hire, nobody has set their allocation yet" case.
+
+    def switches(self):
+        from attendance.models import DeviceCommand
+
+        return [(c.device.serial_number, c.payload["enabled"]) for c in DeviceCommand.objects.filter(command_type="set_user_enabled")]
+
+    def test_a_sync_relay_linking_someone_onto_a_meal_terminal_switches_off_a_zero_entitlement_person_at_once(self):
+        self.Command._link_identity_if_missing(self.newcomer.pk, self.meal_device, 900)
+        self.assertIn(("MEALSYNC1", False), self.switches())
+
+    def test_linking_onto_an_attendance_terminal_never_touches_meal_switches(self):
+        self.Command._link_identity_if_missing(self.newcomer.pk, self.attendance_device, 900)
+        self.assertEqual(self.switches(), [])
+
+    def test_a_relay_that_finds_the_identity_already_there_does_not_re_check_gating(self):
+        from employees.models import BiometricIdentity
+
+        BiometricIdentity.objects.create(employee=self.newcomer, system=self.system, source_identifier="MEALSYNC1", external_user_id="900", is_active=True)
+        self.Command._link_identity_if_missing(self.newcomer.pk, self.meal_device, 900)
+        self.assertEqual(self.switches(), [])  # no fresh link, so nothing new to react to here

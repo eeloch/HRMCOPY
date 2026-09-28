@@ -263,3 +263,34 @@ class MirrorPlanTests(TestCase):
         plan = self.ds.plan_mirror([self.dev])[self.dev]
         self.assertEqual(plan["move"], [])
         self.assertEqual(plan["review"][0]["id"], 1500)
+
+
+class LinkByStaffNumberTriggersMealGatingTests(TestCase):
+    """Same gap as the sync-relay case, for the other path that can first link someone onto a meal terminal: the
+    auto-sync recognising a person already sitting under their own staff number there (2026-09-28)."""
+
+    def setUp(self):
+        from django.test import override_settings
+
+        self.override = override_settings(MEAL_GATING_EMPLOYEE_IDS=["000901"])
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.meal_device = BiometricDevice.objects.create(name="Canteen", serial_number="MEALLINK1", location="x", device_type="factory", purpose="meal_ticket")
+        self.attendance_device = BiometricDevice.objects.create(name="Gate", serial_number="ATTLINK1", location="x", device_type="factory", purpose="attendance")
+        self.newcomer = Employee.objects.create(employee_id="000901", first_name="New", last_name="Hire", status="active")
+
+    def listing(self, device, slots):
+        DeviceCommand.objects.create(device=device, command_type="list_user_slots", status="acked", completed_at=timezone.now(), result={"slots": slots})
+
+    def switches(self):
+        return [(c.device.serial_number, c.payload["enabled"]) for c in DeviceCommand.objects.filter(command_type="set_user_enabled")]
+
+    def test_matching_a_terminal_id_to_a_staff_number_on_a_meal_terminal_switches_off_a_zero_entitlement_person(self):
+        self.listing(self.meal_device, [[901, 50]])
+        self.assertEqual(link_ids_by_staff_number([self.meal_device]), 1)
+        self.assertIn(("MEALLINK1", False), self.switches())
+
+    def test_matching_on_an_attendance_terminal_never_touches_meal_switches(self):
+        self.listing(self.attendance_device, [[901, 50]])
+        self.assertEqual(link_ids_by_staff_number([self.attendance_device]), 1)
+        self.assertEqual(self.switches(), [])
