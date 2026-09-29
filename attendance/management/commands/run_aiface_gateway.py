@@ -539,6 +539,7 @@ class Command(BaseCommand):
                 if target.pk not in linked:
                     await self._run_db(self._link_identity_if_missing, employee_id, target, target_enrollid)
                     linked.add(target.pk)
+                await self._run_db(self._resync_meal_gating_for_target, employee_id, target, target_enrollid)
             record = None  # drop the only reference to the credential as soon as it has been relayed
         self.stdout.write(f"[{sn}] slot_clone: pushed={pushed} failed={len(failed)} offline={len(skipped_offline)}")
         await self._run_db(self._finish_clone_command, command_id, "acked" if pushed else "failed", {"pushed": pushed, "failed": failed, "skipped_offline": skipped_offline})
@@ -790,6 +791,7 @@ class Command(BaseCommand):
                 failed.append({"device_id": target.id, "device_name": target.name, "reason": "device rejected the template"})
                 continue
             await self._run_db(self._link_identity_if_missing, employee_id, target, target_enrollid)
+            await self._run_db(self._resync_meal_gating_for_target, employee_id, target, target_enrollid)
             cloned_to.append({"device_id": target.id, "device_name": target.name})
 
         record = None  # drop the only reference to the template as soon as we're done relaying it
@@ -1050,7 +1052,8 @@ class Command(BaseCommand):
             source_identifier=command.device.serial_number,
             defaults={"external_user_id": str(enrollid), "is_active": True},
         )
-        Command._refresh_meal_gating(employee_id)
+        Command._refresh_meal_gating(employee_id)  # covers their OTHER meal terminals
+        Command._resync_meal_gating_for_target(employee_id, command.device, enrollid)  # this one may have just been reset by the enrollment write itself
         Command._queue_clone_to_other_devices(command, employee_id)
 
     @staticmethod
@@ -1062,6 +1065,31 @@ class Command(BaseCommand):
             from meals.gating import refresh
 
             refresh(employee_id)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _resync_meal_gating_for_target(employee_id, device, enrollid):
+        """Any `setuserinfo` write to a meal terminal - a routine credential sync push, not just a fresh on-device
+        enrollment - can silently reset THAT terminal's own enable flag back to its default (enabled), whether or
+        not `enable` was even one of the fields being written. `refresh()` alone does not catch this: it compares
+        against our own cached record of the terminal's state, and that cache still (correctly) says "disabled" -
+        it has no way to know the terminal's actual flag just got clobbered by the write that only just finished.
+        So this sends the correct state for THIS one write's target straight away, bypassing that cache entirely,
+        exactly like a renumber's own meal re-check already does (see _finish_renumber). Runs on every successful
+        push, not only the first one for a person, because every later re-sync push carries the same risk (2026-
+        09-28/29: two new hires kept getting silently re-enabled by routine syncing, on different days, after
+        having been correctly switched off each time)."""
+        if device.purpose != "meal_ticket":
+            return
+        try:
+            from employees.models import Employee
+            from meals.gating import _queue, gated_employees, tickets_left_today
+
+            employee = Employee.objects.filter(pk=employee_id).first()
+            if employee is None or not gated_employees(only=[employee_id]).exists():
+                return
+            _queue(device, employee, enrollid, tickets_left_today(employee) > 0)
         except Exception:
             pass
 

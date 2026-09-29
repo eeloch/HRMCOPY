@@ -1350,3 +1350,43 @@ class NameProbeTests(TransactionTestCase):
         self.assertEqual(job.result, {"names": {"1500": "Ada Okafor"}, "missing": [1501], "enable": {}})
         self.assertNotIn(TEMPLATE, json.dumps(job.result) + json.dumps(job.payload) + log.getvalue())
         self.assertEqual({m["backupnum"] for m in ws.sent}, {0})  # it asked for a fingerprint slot, not a face
+
+
+class SlotCloneResyncsMealGatingTests(TransactionTestCase):
+    """End-to-end: a routine slot-clone relay landing on a meal terminal must re-check that person's gating there,
+    even though nothing about the push itself looks like a gating event (2026-09-28/29 incident)."""
+
+    SOURCE_SN, MEAL_SN = "AYTK14145399", "MEALE2E1"
+
+    def setUp(self):
+        from django.test import override_settings
+
+        from meals.models import MealTerminalUserState
+
+        self.override = override_settings(MEAL_GATING_EMPLOYEE_IDS=["000904"])
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.source = BiometricDevice.objects.create(name="Terminal A", serial_number=self.SOURCE_SN, location="x", device_type="factory", is_online=True, purpose="attendance")
+        self.meal = BiometricDevice.objects.create(name="Canteen", serial_number=self.MEAL_SN, location="x", device_type="factory", is_online=True, purpose="meal_ticket")
+        self.employee = Employee.objects.create(employee_id="000904", first_name="New", last_name="Hire", status="active")
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier=self.SOURCE_SN, external_user_id="904", is_active=True)
+        BiometricIdentity.objects.create(employee=self.employee, system="vendor_flask_gateway", source_identifier=self.MEAL_SN, external_user_id="904", is_active=True)
+        MealTerminalUserState.objects.create(employee=self.employee, device_serial=self.MEAL_SN, enabled=False)  # already, correctly, believed disabled
+        self.log = io.StringIO()
+        self.gateway = Command(stdout=self.log)
+        self.gateway._connections, self.gateway._pending_replies, self.gateway._locks = {}, {}, {}
+
+    def test_a_slot_pushed_to_a_meal_terminal_resends_the_switch_off_despite_our_cache_already_matching(self):
+        source_ws = FakeTerminal(self.gateway, self.SOURCE_SN, lambda m: {"ret": "getuserinfo", "result": True, "record": "TEMPLATE"} if m["cmd"] == "getuserinfo" else None)
+        meal_ws = FakeTerminal(self.gateway, self.MEAL_SN, lambda m: {"ret": "setuserinfo", "result": True} if m["cmd"] == "setuserinfo" else None)
+        self.gateway._connections[self.SOURCE_SN], self.gateway._connections[self.MEAL_SN] = source_ws, meal_ws
+        job = DeviceCommand.objects.create(
+            device=self.source, command_type="clone_enrollment", status="pending",
+            payload={"employee_id": self.employee.id, "enrollid": 904, "name": "New Hire", "pushes": [{"target_device_id": self.meal.pk, "backupnums": [0]}]},
+        )
+        asyncio.run(self.gateway._run_slot_clone(source_ws, self.SOURCE_SN, job.id))
+        job.refresh_from_db()
+
+        self.assertEqual(job.status, "acked")
+        switch = DeviceCommand.objects.get(command_type="set_user_enabled", device=self.meal)
+        self.assertEqual((switch.payload["enrollid"], switch.payload["enabled"]), (904, False))

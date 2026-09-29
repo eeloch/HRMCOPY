@@ -679,3 +679,54 @@ class SyncedLinkTriggersMealGatingTests(TestCase):
         BiometricIdentity.objects.create(employee=self.newcomer, system=self.system, source_identifier="MEALSYNC1", external_user_id="900", is_active=True)
         self.Command._link_identity_if_missing(self.newcomer.pk, self.meal_device, 900)
         self.assertEqual(self.switches(), [])  # no fresh link, so nothing new to react to here
+
+
+class ResyncMealGatingForTargetTests(TestCase):
+    """The direct, cache-bypassing re-check used after every successful push to a meal terminal target
+    (2026-09-28/29: a routine credential sync silently re-enabled two zero-entitlement people at a meal terminal
+    that our own records already, correctly, believed was set to disabled)."""
+
+    def setUp(self):
+        from django.test import override_settings
+
+        from attendance.management.commands.run_aiface_gateway import Command
+        from attendance.models import BiometricDevice, DeviceCommand
+        from employees.models import Employee
+
+        self.Command, self.BiometricDevice, self.DeviceCommand, self.Employee = Command, BiometricDevice, DeviceCommand, Employee
+        self.override = override_settings(MEAL_GATING_EMPLOYEE_IDS=["000902"])
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.meal_device = BiometricDevice.objects.create(name="Canteen", serial_number="MEALRESYNC1", location="x", device_type="factory", purpose="meal_ticket")
+        self.attendance_device = BiometricDevice.objects.create(name="Gate", serial_number="ATTRESYNC1", location="x", device_type="factory", purpose="attendance")
+        self.newcomer = Employee.objects.create(employee_id="000902", first_name="New", last_name="Hire", status="active")
+
+    def switches(self):
+        return [c.payload["enabled"] for c in self.DeviceCommand.objects.filter(command_type="set_user_enabled", device=self.meal_device)]
+
+    def mark_state_disabled(self):
+        from meals.models import MealTerminalUserState
+
+        MealTerminalUserState.objects.update_or_create(employee=self.newcomer, device_serial="MEALRESYNC1", defaults={"enabled": False})
+
+    def test_a_repeat_push_re_sends_the_switch_even_though_our_own_cache_already_says_disabled(self):
+        """The exact 2026-09-28/29 scenario: a push lands on a meal terminal for someone our records already believe
+        is correctly switched off there - plain refresh()/reconcile() would see no change and do nothing."""
+        self.mark_state_disabled()
+        self.Command._resync_meal_gating_for_target(self.newcomer.pk, self.meal_device, 902)
+        self.assertEqual(self.switches(), [False])
+
+    def test_attendance_terminal_pushes_never_touch_meal_switches(self):
+        self.Command._resync_meal_gating_for_target(self.newcomer.pk, self.attendance_device, 902)
+        self.assertEqual(self.DeviceCommand.objects.filter(command_type="set_user_enabled").count(), 0)
+
+    def test_someone_not_covered_by_meal_gating_is_left_alone(self):
+        outsider = self.Employee.objects.create(employee_id="000903", first_name="Not", last_name="Gated", status="active")
+        self.Command._resync_meal_gating_for_target(outsider.pk, self.meal_device, 903)
+        self.assertEqual(self.DeviceCommand.objects.filter(command_type="set_user_enabled").count(), 0)
+
+    def test_two_slots_pushed_to_the_same_target_in_one_relay_do_not_double_queue(self):
+        self.mark_state_disabled()
+        self.Command._resync_meal_gating_for_target(self.newcomer.pk, self.meal_device, 902)
+        self.Command._resync_meal_gating_for_target(self.newcomer.pk, self.meal_device, 902)
+        self.assertEqual(self.switches(), [False])
