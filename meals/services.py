@@ -819,3 +819,44 @@ class MealService:
         AuditService.log(event_type="meals.excess_cancelled", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.WARNING, title="Meal excess waived", description="Meal excess deduction waived.", metadata={"exception":exception.pk,"reason":comment})
         for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_cancelled", title="Meal excess waived", message=f"{exception.employee.full_name}: {comment or 'No reason given'}", severity="warning", employee=exception.employee, related_url="/meals")
         return exception
+
+
+def apply_import_meal_entitlement(employee, tickets_per_day, *, actor=None, reason="Employee bulk import: NO OF MEALS PER DAY"):
+    """Set one employee's meal entitlement as the Bulk Import's NO OF MEALS PER DAY column says.
+
+    Same safety rule as salary and accommodation on this same import: a blank or unreadable cell means "the sheet
+    says nothing about meals" and the person's existing entitlement is left exactly as it is - it is never possible
+    for this column to erase someone's allocation by being empty (2026-09-23's salary wipe was exactly this mistake
+    on a different column). A row is written only when the number in the sheet actually differs from what is
+    already in force today.
+
+    Returns "created" (nobody had an entitlement yet), "changed", "unchanged", or None (nothing in the sheet to
+    apply)."""
+    if tickets_per_day is None:
+        return None
+    today = timezone.localdate()
+    current = (
+        EmployeeMealEntitlement.objects.filter(employee=employee, effective_from__lte=today)
+        .filter(Q(effective_to__isnull=True) | Q(effective_to__gte=today))
+        .order_by("-effective_from", "-id")
+        .first()
+    )
+    if current is not None and current.tickets_per_work_day == tickets_per_day:
+        return "unchanged"
+    with transaction.atomic():
+        if current is not None:
+            if current.effective_from == today:
+                # Already touched today (e.g. a second import run the same day): update that row in place
+                # instead of leaving a zero-length gap behind it.
+                current.tickets_per_work_day, current.reason, current.set_by = tickets_per_day, reason, actor
+                current.save(update_fields=["tickets_per_work_day", "reason", "set_by"])
+                return "changed"
+            current.effective_to = today - timedelta(days=1)
+            current.save(update_fields=["effective_to"])
+        EmployeeMealEntitlement.objects.create(
+            employee=employee, tickets_per_work_day=tickets_per_day, effective_from=today, reason=reason, set_by=actor,
+        )
+    from .gating import refresh
+
+    refresh(employee)  # switch them on/off at a meal terminal straight away if this changed what they're owed today
+    return "created" if current is None else "changed"

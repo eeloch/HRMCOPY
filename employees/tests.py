@@ -1175,3 +1175,132 @@ class PersonalDetailsPrivacyTests(APITestCase):
     def test_a_user_with_the_view_permission_gets_everything(self):
         row = self.fetch(self.hr, "/api/employees/")["results"][0]
         self.assertEqual((row["phone"], row["email"], row["date_of_birth"]), ("0803 000 0000", "ada@example.com", "1990-01-02"))
+
+
+class MealEntitlementBulkImportTests(APITestCase):
+    """NO OF MEALS PER DAY, wired into the same bulk employee import (2026-09-29): same permission-gated,
+    blank-never-erases pattern already established for salary and bank details on this import."""
+
+    def setUp(self):
+        from django.utils import timezone
+
+        from meals.models import EmployeeMealEntitlement
+
+        self.today = timezone.localdate()
+        self.EmployeeMealEntitlement = EmployeeMealEntitlement
+        self.privileged = get_user_model().objects.create_user(username="import-meals-admin", password="test-password")
+        self.privileged.user_permissions.add(Permission.objects.get(codename="manage_meal_configuration", content_type__app_label="meals"))
+        self.restricted = get_user_model().objects.create_user(username="import-regular-staff-2", password="test-password")
+        for user in (self.privileged, self.restricted):
+            user.user_permissions.add(*Permission.objects.filter(content_type__app_label="employees", codename__in=("add_employee", "change_employee")))
+        self.department = Department.objects.create(name="Operations")
+        Position.objects.create(department=self.department, name="Operator")
+        self.existing = Employee.objects.create(employee_id="BULK-MEAL-001", first_name="Existing", last_name="Person")
+        EmployeeMealEntitlement.objects.create(employee=self.existing, tickets_per_work_day=2, effective_from=self.today.replace(day=1), reason="prior allocation")
+
+    def upload(self, content):
+        return SimpleUploadedFile("employees.csv", content.encode("utf-8"), content_type="text/csv")
+
+    def current(self, employee):
+        from django.db.models import Q
+
+        return self.EmployeeMealEntitlement.objects.filter(employee=employee, effective_from__lte=self.today).filter(Q(effective_to__isnull=True) | Q(effective_to__gte=self.today)).order_by("-effective_from", "-id").first()
+
+    def test_a_restricted_importer_does_not_change_anyones_meal_entitlement(self):
+        self.client.force_authenticate(self.restricted)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position,no_of_meals_per_day\n"
+                "BULK-MEAL-002,New,Hire,Operations,Operator,1\n"
+                "BULK-MEAL-001,Existing,Person,Operations,Operator,1\n"
+            ),
+            "update_existing": "true",
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIsNone(self.current(Employee.objects.get(employee_id="BULK-MEAL-002")))
+        self.assertEqual(self.current(self.existing).tickets_per_work_day, 2)
+        self.assertEqual(response.data["meal_entitlements"], {"created": 0, "changed": 0, "unchanged": 0})
+
+    def test_a_blank_meals_cell_never_erases_an_existing_allocation(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position,no_of_meals_per_day\n"
+                "BULK-MEAL-001,Existing,Person,Operations,Operator,\n"
+            ),
+            "update_existing": "true",
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(self.current(self.existing).tickets_per_work_day, 2)
+
+    def test_no_meals_column_at_all_never_erases_an_existing_allocation(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position\n"
+                "BULK-MEAL-001,Existing,Renamed,Operations,Operator\n"
+            ),
+            "update_existing": "true",
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.existing.refresh_from_db()
+        self.assertEqual(self.existing.last_name, "Renamed")
+        self.assertEqual(self.current(self.existing).tickets_per_work_day, 2)
+
+    def test_a_privileged_importer_changes_a_persons_entitlement_and_creates_a_dated_row(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position,no_of_meals_per_day\n"
+                "BULK-MEAL-001,Existing,Person,Operations,Operator,1\n"
+            ),
+            "update_existing": "true",
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        row = self.current(self.existing)
+        self.assertEqual((row.tickets_per_work_day, str(row.effective_from), row.set_by), (1, str(self.today), self.privileged))
+        self.assertEqual(response.data["meal_entitlements"], {"created": 0, "changed": 1, "unchanged": 0})
+
+    def test_a_new_hire_with_no_prior_allocation_gets_one_created(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position,no_of_meals_per_day\n"
+                "BULK-MEAL-003,New,Hire,Operations,Operator,2\n"
+            ),
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(self.current(Employee.objects.get(employee_id="BULK-MEAL-003")).tickets_per_work_day, 2)
+        self.assertEqual(response.data["meal_entitlements"]["created"], 1)
+
+    def test_the_same_number_already_in_force_is_left_unchanged_and_no_new_row_is_written(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position,no_of_meals_per_day\n"
+                "BULK-MEAL-001,Existing,Person,Operations,Operator,2\n"
+            ),
+            "update_existing": "true",
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(self.EmployeeMealEntitlement.objects.filter(employee=self.existing).count(), 1)
+        self.assertEqual(response.data["meal_entitlements"], {"created": 0, "changed": 0, "unchanged": 1})
+
+    def test_a_non_numeric_meals_cell_is_a_warning_not_an_error_and_leaves_the_row_alone(self):
+        self.client.force_authenticate(self.privileged)
+        response = self.client.post("/api/employees/import/", {
+            "file": self.upload(
+                "employee_id,first_name,last_name,department,position,no_of_meals_per_day\n"
+                "BULK-MEAL-004,New,Hire,Operations,Operator,two\n"
+            ),
+        }, format="multipart")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(Employee.objects.filter(employee_id="BULK-MEAL-004").exists())
+        self.assertIsNone(self.current(Employee.objects.get(employee_id="BULK-MEAL-004")))

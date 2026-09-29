@@ -659,10 +659,14 @@ class EmployeeImportAPIView(APIView):
         # Room placement is housing's decision (capacity, gender, beds): an employee editor's spreadsheet must not
         # be able to move people in or out of rooms without the housing permission (2026-09-25 review, S-05).
         can_place_in_rooms = request.user.has_perm("accommodation.manage_accommodation")
+        # Same reasoning: meal entitlement is decided by whoever configures Meals, not by anyone who can edit an
+        # employee record.
+        can_set_meal_entitlement = request.user.has_perm("meals.manage_meal_configuration")
 
         serializers = []
         serialization_errors = []
         placements = {}
+        meal_updates = {}
 
         for item in rows_to_import:
             existing_id = item["data"].get("existing_employee_id")
@@ -685,6 +689,8 @@ class EmployeeImportAPIView(APIView):
                     for key, value in row_data.items()
                     if key not in ("bank_name", "account_number", "bank_code")
                 }
+            if not can_set_meal_entitlement:
+                row_data = {key: value for key, value in row_data.items() if key != "meal_tickets_per_day"}
             serializer = EmployeeCreateUpdateSerializer(
                 instance=existing_employees.get(existing_id),
                 data=row_data,
@@ -703,6 +709,7 @@ class EmployeeImportAPIView(APIView):
 
             serializers.append(serializer)
             placements[id(serializer)] = (row_data.get("accommodation_placement"), row_data.get("room_allocated"))
+            meal_updates[id(serializer)] = row_data.get("meal_tickets_per_day")
 
         if serialization_errors and (not skip_invalid or not serializers):
             return Response(
@@ -726,8 +733,10 @@ class EmployeeImportAPIView(APIView):
         saved_employees = []
 
         from accommodation.services import apply_import_placement
+        from meals.services import apply_import_meal_entitlement
 
         accommodation = {"inside": 0, "inside_no_bed": 0, "unknown_room": 0, "gender_mismatch": 0, "outside": 0, "none": 0, "vacated": 0}
+        meal_entitlements = {"created": 0, "changed": 0, "unchanged": 0}
         for serializer in serializers:
             is_update = serializer.instance is not None
             employee = serializer.save()
@@ -740,6 +749,9 @@ class EmployeeImportAPIView(APIView):
             outcome = apply_import_placement(employee, placement, room_label, actor=request.user) if can_place_in_rooms else None
             if outcome:
                 accommodation[outcome] += 1
+            meal_outcome = apply_import_meal_entitlement(employee, meal_updates.get(id(serializer)), actor=request.user) if can_set_meal_entitlement else None
+            if meal_outcome:
+                meal_entitlements[meal_outcome] += 1
 
         incomplete_employees = [
             employee
@@ -763,6 +775,7 @@ class EmployeeImportAPIView(APIView):
                     "failed": 0,
                 },
                 "accommodation": accommodation,
+                "meal_entitlements": meal_entitlements,
                 "errors": skipped_rows,
             },
             status=status.HTTP_201_CREATED,

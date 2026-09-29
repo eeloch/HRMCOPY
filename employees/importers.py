@@ -126,6 +126,12 @@ HEADER_ALIASES = {
     "exit_date": "exit_date",
     "amount": "basic_salary",
     "team": "team",
+
+    # Meal entitlement - the HR master spreadsheet's own column ("NO OF MEALS PER DAY").
+    "no_of_meals_per_day": "meal_tickets_per_day",
+    "no_of_meals": "meal_tickets_per_day",
+    "meals_per_day": "meal_tickets_per_day",
+    "meal_tickets_per_day": "meal_tickets_per_day",
 }
 
 
@@ -376,6 +382,32 @@ def parse_salary(value):
         )
 
     return amount
+
+
+def parse_meal_tickets_per_day(value):
+    text = normalize_value(value)
+
+    if not text:
+        return None
+
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        raise ValueError(
+            "NO OF MEALS PER DAY is invalid."
+        )
+
+    if amount != amount.to_integral_value():
+        raise ValueError(
+            "NO OF MEALS PER DAY must be a whole number."
+        )
+
+    if amount < 0:
+        raise ValueError(
+            "NO OF MEALS PER DAY cannot be negative."
+        )
+
+    return int(amount)
 
 
 def parse_date(value):
@@ -958,6 +990,21 @@ def validate_employee_rows(
                 str(exc)
             )
 
+        # Same rule as basic_salary just above: a blank or broken NO OF MEALS PER DAY cell means "the sheet says
+        # nothing about meals", so meal_tickets_per_day stays None and the person's existing entitlement is left
+        # exactly as it is - the import can raise or leave alone, but it can never wipe it.
+        try:
+            meal_tickets_per_day = (
+                parse_meal_tickets_per_day(row.get("meal_tickets_per_day"))
+                if normalize_value(row.get("meal_tickets_per_day"))
+                else None
+            )
+        except ValueError as exc:
+            meal_tickets_per_day = None
+            warnings.append(
+                str(exc)
+            )
+
         try:
             employment_date = parse_date(
                 row.get("employment_date")
@@ -1127,6 +1174,7 @@ def validate_employee_rows(
             "bank_name": bank,
             "account_number": account_number,
             "bank_code": bank_code,
+            "meal_tickets_per_day": meal_tickets_per_day,
         }
 
         if employment_type:
