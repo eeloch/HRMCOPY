@@ -6,6 +6,7 @@ breakdown, top movers, category share, detail table, recommendations) rather tha
 """
 
 import io
+from pathlib import Path
 
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
@@ -13,6 +14,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.oxml.ns import qn
 from pptx.util import Inches, Pt
 
 from .services import ComparisonRow
@@ -29,6 +31,15 @@ RED = RGBColor(0xDC, 0x26, 0x26)
 AMBER_TINT = RGBColor(0xFD, 0xF3, 0xE0)
 AMBER_BORDER = RGBColor(0xF1, 0xC4, 0x82)
 
+# The masthead every content slide carries - dark band, the Rotic logo, white title, a light-blue
+# subtitle and page count - matching the company's own "IMPROVED HR REPORT" reference template.
+HEADER_BG = RGBColor(0x0A, 0x16, 0x28)
+LIGHT_BLUE = RGBColor(0x93, 0xC5, 0xFD)
+SLIDE_BG = RGBColor(0xF0, 0xF4, 0xF8)
+HEADER_H = Inches(0.95)
+LOGO_PATH = Path(__file__).parent / "assets" / "rotic_logo.png"
+TOTAL_SLIDES = 15
+
 SLIDE_W = Inches(13.333)
 SLIDE_H = Inches(7.5)
 
@@ -41,8 +52,11 @@ def _blank(prs):
     return prs.slides.add_slide(prs.slide_layouts[6])
 
 
-def _rect(slide, left, top, width, height, color, *, line_color=None):
-    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+def _rect(slide, left, top, width, height, color, *, line_color=None, rounded=False, shadow=False):
+    shape_type = MSO_SHAPE.ROUNDED_RECTANGLE if rounded else MSO_SHAPE.RECTANGLE
+    shape = slide.shapes.add_shape(shape_type, left, top, width, height)
+    if rounded:
+        shape.adjustments[0] = 0.06
     shape.fill.solid()
     shape.fill.fore_color.rgb = color
     if line_color is not None:
@@ -51,6 +65,8 @@ def _rect(slide, left, top, width, height, color, *, line_color=None):
     else:
         shape.line.fill.background()
     shape.shadow.inherit = False
+    if shadow:
+        _soft_shadow(shape)
     return shape
 
 
@@ -81,28 +97,56 @@ def _footer(slide, label):
     _text(slide, Inches(11.0), Inches(7.08), Inches(1.7), Inches(0.35), "Rotic HRM System", size=10, color=SLATE, align=PP_ALIGN.RIGHT)
 
 
-def _title_bar(slide, title, subtitle=None):
-    _text(slide, Inches(0.6), Inches(0.3), Inches(12.1), Inches(0.75), title, size=24, bold=True, color=NAVY, line_spacing=1.0)
+def _page_background(slide, color=SLIDE_BG):
+    slide.background.fill.solid()
+    slide.background.fill.fore_color.rgb = color
+
+
+def _soft_shadow(shape, *, color=RGBColor(0x1E, 0x27, 0x61), alpha=16000, blur=90000, dist=20000, direction=2700000):
+    """A subtle drop shadow python-pptx has no high-level API for - matches the reference
+    template's card shadows (a:outerShdw), added directly to the shape's spPr."""
+    spPr = shape._element.spPr
+    effect_lst = spPr.makeelement(qn("a:effectLst"), {})
+    shadow = effect_lst.makeelement(qn("a:outerShdw"), {
+        "blurRad": str(blur), "dist": str(dist), "dir": str(direction), "rotWithShape": "0",
+    })
+    color_el = shadow.makeelement(qn("a:srgbClr"), {"val": str(color)})
+    alpha_el = color_el.makeelement(qn("a:alpha"), {"val": str(alpha)})
+    color_el.append(alpha_el)
+    shadow.append(color_el)
+    effect_lst.append(shadow)
+    spPr.append(effect_lst)
+
+
+def _header(slide, title, subtitle, page):
+    """The masthead every content slide carries: dark band, Rotic logo, title, subtitle, page count -
+    matching the company's own reference report template. Also sets the slide's light body background."""
+    _page_background(slide)
+    _rect(slide, 0, 0, SLIDE_W, HEADER_H, HEADER_BG)
+    if LOGO_PATH.exists():
+        slide.shapes.add_picture(str(LOGO_PATH), Inches(0.3), Inches(0.135), height=Inches(0.68))
+    _text(slide, Inches(2.8), Inches(0.16), Inches(8.6), Inches(0.4), title, size=15, bold=True, color=WHITE)
     if subtitle:
-        _text(slide, Inches(0.6), Inches(1.02), Inches(12.1), Inches(0.35), subtitle, size=12, color=SLATE)
+        _text(slide, Inches(2.8), Inches(0.6), Inches(8.3), Inches(0.3), subtitle, size=10, color=LIGHT_BLUE)
+    _text(slide, SLIDE_W - Inches(1.5), Inches(0.63), Inches(1.2), Inches(0.28), f"{page} / {TOTAL_SLIDES}", size=9, color=LIGHT_BLUE, align=PP_ALIGN.RIGHT)
 
 
 def _manual_entry_badge(slide):
     """Marks a slide whose figures HRM has no source for yet (recruitment pipeline, training
     sessions) - filled in by hand from outside the system before this deck is sent on."""
-    badge = _rect(slide, Inches(10.3), Inches(0.35), Inches(2.4), Inches(0.42), AMBER_TINT, line_color=AMBER_BORDER)
-    _text(slide, Inches(10.3), Inches(0.35), Inches(2.4), Inches(0.42), "MANUAL ENTRY REQUIRED", size=10, bold=True, color=AMBER, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
+    badge = _rect(slide, Inches(10.4), Inches(1.05), Inches(2.3), Inches(0.32), AMBER_TINT, line_color=AMBER_BORDER, rounded=True)
+    _text(slide, Inches(10.4), Inches(1.05), Inches(2.3), Inches(0.32), "MANUAL ENTRY REQUIRED", size=9, bold=True, color=AMBER, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE)
     return badge
 
 
 def _manual_box(slide, left, top, width, height, text):
     """A dashed-feel callout for placeholder/instructional text on a manual-entry slide."""
-    _rect(slide, left, top, width, height, AMBER_TINT, line_color=AMBER_BORDER)
+    _rect(slide, left, top, width, height, AMBER_TINT, line_color=AMBER_BORDER, rounded=True)
     _text(slide, left + Inches(0.2), top + Inches(0.12), width - Inches(0.4), height - Inches(0.24), text, size=11, italic=True, color=RGBColor(0x8A, 0x5A, 0x12), line_spacing=1.15)
 
 
 def _stat_card(slide, left, top, width, height, value, label, color=NAVY):
-    _rect(slide, left, top, width, height, WHITE, line_color=RGBColor(0xE2, 0xE6, 0xF0))
+    _rect(slide, left, top, width, height, WHITE, line_color=RGBColor(0xE2, 0xE6, 0xF0), rounded=True, shadow=True)
     _text(slide, left + Inches(0.15), top + Inches(0.12), width - Inches(0.3), height - Inches(0.75), str(value), size=30, bold=True, color=color)
     _text(slide, left + Inches(0.15), top + height - Inches(0.5), width - Inches(0.3), Inches(0.4), label, size=10, color=SLATE)
 
@@ -313,7 +357,9 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
 
     # --- Slide 1: Title ---
     slide = _blank(prs)
-    _rect(slide, 0, 0, SLIDE_W, SLIDE_H, NAVY)
+    _rect(slide, 0, 0, SLIDE_W, SLIDE_H, HEADER_BG)
+    if LOGO_PATH.exists():
+        slide.shapes.add_picture(str(LOGO_PATH), Inches(0.6), Inches(0.4), height=Inches(0.5))
     _text(slide, Inches(0.8), Inches(0.6), Inches(11.7), Inches(0.4), date_range.upper(), size=15, bold=True, color=ICE, align=PP_ALIGN.CENTER)
     _text(slide, Inches(0.8), Inches(1.05), Inches(11.7), Inches(0.9), f"WEEKLY HR REPORT FOR WEEK {data.week_number}", size=30, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
     _title_stat(slide, Inches(0.8), Inches(3.1), Inches(2.7), data.active_employees, "Total Headcount")
@@ -324,7 +370,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
 
     # --- Slide 2: Executive Summary (COO / MD Summary) ---
     slide = _blank(prs)
-    _title_bar(slide, "HR DASHBOARD — COO / MD SUMMARY", f"Week {data.week_number} · {date_range} · Human Resources")
+    _header(slide, "HR DASHBOARD — COO / MD SUMMARY", f"Week {data.week_number} · {date_range} · Human Resources", page=2)
     _stat_row(slide, Inches(1.55), [
         (data.active_employees, "Total Headcount", NAVY),
         (f"{'+' if data.net_movement >= 0 else ''}{data.net_movement}", "Staff Movement", GREEN if data.net_movement >= 0 else RED),
@@ -374,7 +420,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
 
     # --- Slide 3: Employee Overview & Key HR Metrics ---
     slide = _blank(prs)
-    _title_bar(slide, "EMPLOYEE OVERVIEW & KEY HR METRICS", f"Hiring · Retention · Attrition rates · Week {data.week_number}")
+    _header(slide, "EMPLOYEE OVERVIEW & KEY HR METRICS", f"Hiring · Retention · Attrition rates · Week {data.week_number}", page=3)
     _stat_row(slide, Inches(1.55), [
         (data.previous_active_employees, "Opening Headcount", NAVY),
         (len(data.new_hires), "New Hires This Week", GREEN),
@@ -407,7 +453,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
         headline3 = f"ATTENDANCE PEAKED ON {peak_present.date.strftime('%A').upper()} WITH {peak_present.present} PRESENT RECORDS"
     else:
         headline3 = "DAILY ATTENDANCE BREAKDOWN"
-    _title_bar(slide, headline3)
+    _header(slide, headline3, None, page=4)
     day_rows = [(d.date.strftime("%d %b"), d.date.strftime("%A"), d.present, d.late, d.absent) for d in data.attendance_by_day]
     total_present = sum(d.present for d in data.attendance_by_day)
     total_late = sum(d.late for d in data.attendance_by_day)
@@ -451,7 +497,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
     grower = max(comparable, key=lambda r: r.growth_pct, default=None)
     decliner = min(comparable, key=lambda r: r.growth_pct, default=None)
     headline4 = f"{leader.label.upper()} LED ATTENDANCE THIS WEEK WITH {_fmt(leader.current)} PRESENT RECORDS" if leader else "TOP DEPARTMENTS BY ATTENDANCE"
-    _title_bar(slide, headline4, f"Present records by department · Week {data.week_number}")
+    _header(slide, headline4, f"Present records by department · Week {data.week_number}", page=5)
     if data.department_comparison:
         _bar_chart(
             slide, Inches(0.6), Inches(1.55), Inches(8.2), Inches(4.9),
@@ -476,7 +522,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
 
     # --- Slide 6: Current Headcount vs Approved Headcount by Department ---
     slide = _blank(prs)
-    _title_bar(slide, "COMPARATIVE ANALYSIS — CURRENT STAFF VS DEPARTMENT NEEDS", f"Approved headcount vs actual · Surplus & pending hires · Week {data.week_number}")
+    _header(slide, "COMPARATIVE ANALYSIS — CURRENT STAFF VS DEPARTMENT NEEDS", f"Approved headcount vs actual · Surplus & pending hires · Week {data.week_number}", page=6)
     _stat_row(slide, Inches(1.55), [
         (data.active_employees, "Current Total", NAVY),
         (data.approved_headcount_total, "Approved Headcount", SLATE),
@@ -509,7 +555,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
         headline5 = f"{top_leave.label.upper()} REMAINS THE LEADING LEAVE TYPE AT {_fmt(top_leave.current)} REQUESTS, {_growth_label(top_leave.growth_pct)} WEEK-OVER-WEEK"
     else:
         headline5 = "LEAVE REQUESTS BY TYPE"
-    _title_bar(slide, headline5)
+    _header(slide, headline5, None, page=7)
     if data.leave_type_comparison:
         _table(
             slide, Inches(0.6), Inches(1.55), Inches(6.6), Inches(0.35 * (len(data.leave_type_comparison) + 1)),
@@ -539,7 +585,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
     slide = _blank(prs)
     affected_departments = {p.department for p in (data.new_hires + data.exits) if p.department and p.department != "-"}
     headline6 = f"{len(data.new_hires)} NEW HIRE{'S' if len(data.new_hires) != 1 else ''} AND {len(data.exits)} EXIT{'S' if len(data.exits) != 1 else ''} THIS WEEK — WORKFORCE MOVEMENT DETAIL"
-    _title_bar(slide, headline6)
+    _header(slide, headline6, None, page=8)
     _stat_row(slide, Inches(1.55), [
         (len(data.new_hires), "New Hires", GREEN),
         (len(data.exits), "Exits", RED),
@@ -572,7 +618,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
     gender_total = data.gender_male + data.gender_female
     male_pct = (data.gender_male / data.active_employees * 100) if data.active_employees else 0.0
     female_pct = (data.gender_female / data.active_employees * 100) if data.active_employees else 0.0
-    _title_bar(slide, "EMPLOYEE GENDER RATIO & DISTRIBUTION", f"Overall ratio · By department · Active workforce snapshot · Week {data.week_number}")
+    _header(slide, "EMPLOYEE GENDER RATIO & DISTRIBUTION", f"Overall ratio · By department · Active workforce snapshot · Week {data.week_number}", page=9)
     _stat_row(slide, Inches(1.55), [
         (data.gender_male, "Total Male", NAVY),
         (data.gender_female, "Total Female", RGBColor(0x7C, 0x3A, 0xED)),
@@ -599,7 +645,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
 
     # --- Slide 10: Accommodation Occupancy ---
     slide = _blank(prs)
-    _title_bar(slide, "ACCOMMODATION — OCCUPANCY OVERVIEW", f"Company vs external lodging · Gender split · Week {data.week_number}")
+    _header(slide, "ACCOMMODATION — OCCUPANCY OVERVIEW", f"Company vs external lodging · Gender split · Week {data.week_number}", page=10)
     _stat_row(slide, Inches(1.55), [
         (f"{data.accommodation_company.occupied}/{data.accommodation_company.capacity}", "Company Occupancy", NAVY),
         (f"{data.accommodation_company.occupancy_rate:.1f}%", "Company Occ. Rate", NAVY),
@@ -630,7 +676,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
     # --- Slide 11: Meal Ticket Report ---
     slide = _blank(prs)
     meal_growth_label = _growth_label(meal_cost_growth.growth_pct) if data.previous_meal_total_cost else "N/M"
-    _title_bar(slide, "MEAL TICKET REPORT", f"Week {data.week_number} · {_currency(data.meal_total_cost)} total · {data.meal_collections} tickets · {meal_growth_label} on the week before")
+    _header(slide, "MEAL TICKET REPORT", f"Week {data.week_number} · {_currency(data.meal_total_cost)} total · {data.meal_collections} tickets · {meal_growth_label} on the week before", page=11)
     _stat_row(slide, Inches(1.55), [
         (_currency(data.meal_total_cost), "Total Cost This Week", NAVY),
         (_currency(data.previous_meal_total_cost), "Total Cost Week Before", SLATE),
@@ -661,7 +707,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
 
     # --- Slide 12: Disciplinary Actions (Offences) ---
     slide = _blank(prs)
-    _title_bar(slide, "DISCIPLINARY ACTIONS", f"Week {data.week_number} · From the Offences module — no separate grievance log exists in HRM yet")
+    _header(slide, "DISCIPLINARY ACTIONS", f"Week {data.week_number} · From the Offences module — no separate grievance log exists in HRM yet", page=12)
     _stat_row(slide, Inches(1.55), [
         (data.offence_count, "Cases This Week", AMBER if data.offence_count else GREEN),
         (_currency(data.offence_total_amount), "Total Amount", NAVY),
@@ -688,7 +734,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
 
     # --- Slide 13: Recruitment Status (manual - HRM has no recruitment/ATS module) ---
     slide = _blank(prs)
-    _title_bar(slide, "RECRUITMENT STATUS", f"Week {data.week_number} · Vacancies below are computed from approved headcount; the pipeline must be entered by hand")
+    _header(slide, "RECRUITMENT STATUS", f"Week {data.week_number} · Vacancies below are computed from approved headcount; the pipeline must be entered by hand", page=13)
     _manual_entry_badge(slide)
     _stat_row(slide, Inches(1.55), [
         ("[X]", "Applications Reviewed", SLATE),
@@ -717,7 +763,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
 
     # --- Slide 14: Training Activity (manual - HRM has no training/LMS module) ---
     slide = _blank(prs)
-    _title_bar(slide, "TRAINING ACTIVITY", f"Week {data.week_number} · New-staff onboarding count is real; sessions must be entered by hand")
+    _header(slide, "TRAINING ACTIVITY", f"Week {data.week_number} · New-staff onboarding count is real; sessions must be entered by hand", page=14)
     _manual_entry_badge(slide)
     _stat_row(slide, Inches(1.55), [
         ("[X]", "Total Trained", SLATE),
@@ -745,7 +791,7 @@ def build_weekly_report_pptx(data, *, company_name="Rotic Aluminium"):
 
     # --- Slide 15: Recommendations ---
     slide = _blank(prs)
-    _title_bar(slide, "RECOMMENDATIONS")
+    _header(slide, "RECOMMENDATIONS", None, page=15)
 
     recommendations = []
     if data.top_absentee_departments:
