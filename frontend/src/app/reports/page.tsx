@@ -22,8 +22,25 @@ type Summary = {
   };
   attendance: { present: number; late: number; absent: number; on_leave: number; night_shift: number; overtime: number };
   leave: { submitted: number; approved: number; pending: number; rejected: number; cancelled: number; days_approved: string };
-  meals: { total: number; within_entitlement: number; excess: number };
+  meals: { total: number; within_entitlement: number; excess: number; total_cost: string; previous_total_cost: string; cost_per_ticket: string };
+  rates: { retention_rate: number; hire_rate: number; attrition_rate: number; net_movement: number };
+  department_needs: {
+    approved_headcount_total: number;
+    pending_hires_total: number;
+    surplus_employees_total: number;
+    departments: { name: string; current: number; approved: number; diff: number; status: string }[];
+  };
+  gender: { male: number; female: number; unspecified: number };
+  accommodation: {
+    company: { capacity: number; occupied: number };
+    external: { capacity: number; occupied: number };
+  };
+  offences: { count: number; total_amount: string };
 };
+
+function formatNaira(value: string | number) {
+  return `₦${Number(value).toLocaleString("en-NG", { maximumFractionDigits: 0 })}`;
+}
 
 function mondayOf(date: Date) {
   const day = date.getDay();
@@ -160,11 +177,52 @@ export default function ReportsPage() {
               </div>
             </Section>
 
-            <Section title="Meals" subtitle="Tickets collected during the selected week.">
-              <div className="grid gap-4 p-5 sm:grid-cols-3">
+            <Section className="mb-6" title="Meals" subtitle="Tickets and cost collected during the selected week.">
+              <div className="grid gap-4 p-5 sm:grid-cols-3 lg:grid-cols-5">
                 <MetricCard title="Total Tickets" value={summary.meals.total} accentColor="#1E2761" />
                 <MetricCard title="Within Entitlement" value={summary.meals.within_entitlement} accentColor="#059669" />
                 <MetricCard title="Excess" value={summary.meals.excess} accentColor="#d97706" />
+                <MetricCard title="Total Cost" value={formatNaira(summary.meals.total_cost)} accentColor="#1E2761" />
+                <MetricCard title="Cost per Ticket" value={formatNaira(summary.meals.cost_per_ticket)} accentColor="#64748b" />
+              </div>
+            </Section>
+
+            <Section className="mb-6" title="Rates" subtitle="Retention, hiring and attrition, computed from this week's movement.">
+              <div className="grid gap-4 p-5 sm:grid-cols-2 lg:grid-cols-4">
+                <MetricCard title="Retention Rate" value={`${summary.rates.retention_rate}%`} accentColor="#059669" />
+                <MetricCard title="Hire Rate" value={`${summary.rates.hire_rate}%`} accentColor="#0891b2" />
+                <MetricCard title="Attrition Rate" value={`${summary.rates.attrition_rate}%`} accentColor="#dc2626" />
+                <MetricCard title="Net Movement" value={summary.rates.net_movement} accentColor="#1E2761" />
+              </div>
+            </Section>
+
+            <Section className="mb-6" title="Department Needs" subtitle="Current headcount against each department's approved target.">
+              <div className="grid gap-4 p-5 sm:grid-cols-3">
+                <MetricCard title="Approved Headcount" value={summary.department_needs.approved_headcount_total} accentColor="#64748b" />
+                <MetricCard title="Pending Hires" value={summary.department_needs.pending_hires_total} accentColor="#d97706" />
+                <MetricCard title="Surplus Employees" value={summary.department_needs.surplus_employees_total} accentColor="#1E2761" />
+              </div>
+            </Section>
+
+            <Section className="mb-6" title="Gender" subtitle="Active workforce snapshot.">
+              <div className="grid gap-4 p-5 sm:grid-cols-3">
+                <MetricCard title="Male" value={summary.gender.male} accentColor="#1E2761" />
+                <MetricCard title="Female" value={summary.gender.female} accentColor="#7c3aed" />
+                <MetricCard title="Unspecified" value={summary.gender.unspecified} accentColor="#64748b" />
+              </div>
+            </Section>
+
+            <Section className="mb-6" title="Accommodation" subtitle="Live occupancy snapshot, company vs external.">
+              <div className="grid gap-4 p-5 sm:grid-cols-2">
+                <MetricCard title="Company" value={`${summary.accommodation.company.occupied} / ${summary.accommodation.company.capacity}`} accentColor="#1E2761" />
+                <MetricCard title="External" value={`${summary.accommodation.external.occupied} / ${summary.accommodation.external.capacity}`} accentColor="#64748b" />
+              </div>
+            </Section>
+
+            <Section title="Disciplinary" subtitle="From the Offences module, this week.">
+              <div className="grid gap-4 p-5 sm:grid-cols-2">
+                <MetricCard title="Cases" value={summary.offences.count} accentColor="#d97706" />
+                <MetricCard title="Total Amount" value={formatNaira(summary.offences.total_amount)} accentColor="#1E2761" />
               </div>
             </Section>
           </>

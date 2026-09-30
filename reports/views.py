@@ -69,6 +69,37 @@ class WeeklyReportSummaryAPIView(APIView):
                 "total": data.meal_collections,
                 "within_entitlement": data.meal_within_entitlement,
                 "excess": data.meal_excess,
+                "total_cost": data.meal_total_cost,
+                "previous_total_cost": data.previous_meal_total_cost,
+                "cost_per_ticket": data.meal_cost_per_ticket,
+            },
+            "rates": {
+                "retention_rate": round(data.retention_rate, 1),
+                "hire_rate": round(data.hire_rate, 1),
+                "attrition_rate": round(data.attrition_rate, 1),
+                "net_movement": data.net_movement,
+            },
+            "department_needs": {
+                "approved_headcount_total": data.approved_headcount_total,
+                "pending_hires_total": data.pending_hires_total,
+                "surplus_employees_total": data.surplus_employees_total,
+                "departments": [
+                    {"name": r.name, "current": r.current, "approved": r.approved, "diff": r.diff, "status": r.status}
+                    for r in data.department_approved
+                ],
+            },
+            "gender": {
+                "male": data.gender_male,
+                "female": data.gender_female,
+                "unspecified": data.gender_unspecified,
+            },
+            "accommodation": {
+                "company": {"capacity": data.accommodation_company.capacity, "occupied": data.accommodation_company.occupied},
+                "external": {"capacity": data.accommodation_external.capacity, "occupied": data.accommodation_external.occupied},
+            },
+            "offences": {
+                "count": data.offence_count,
+                "total_amount": data.offence_total_amount,
             },
             "comparison": {
                 "previous_week_start": data.previous_week_start,
