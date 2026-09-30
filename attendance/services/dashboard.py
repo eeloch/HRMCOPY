@@ -15,232 +15,201 @@ from employees.models import Department, Employee
 from attendance.services.leave import approved_leave_employee_ids
 
 
+# Every shift is either a day (morning) shift or an overnight (night) shift - Shift.is_overnight
+# is the one field this whole page's two-column split is built on.
+SHIFT_PERIODS = (("morning", False), ("night", True))
+
+
 class DashboardService:
     """
     Workforce Operations Dashboard service.
     """
 
     @staticmethod
-    def live_records(today):
-        """Today's records plus last night's overnight shift while it is still running."""
+    def live_records(date, today):
+        """This date's records. For today only, last night's still-running overnight shift is
+        carried in too, so a night-shift worker who hasn't clocked out yet still shows as present."""
+        if date != today:
+            return DailyAttendance.objects.filter(date=date)
         now = timezone.now()
         return DailyAttendance.objects.filter(
-            Q(date=today) | Q(date=today - timedelta(days=1), shift__is_overnight=True, scheduled_end__gt=now)
+            Q(date=date) | Q(date=date - timedelta(days=1), shift__is_overnight=True, scheduled_end__gt=now)
         )
 
     @staticmethod
-    def get_dashboard():
+    def get_dashboard(date=None):
         today = timezone.localdate()
+        date = date or today
+
+        by_period, late_employees, not_yet_in_employees, absent_employees = (
+            DashboardService.get_period_breakdown(date, today)
+        )
 
         return {
-            "summary": DashboardService.get_summary(today),
-            "department_readiness": DashboardService.get_department_readiness(today),
-            "workforce_action_center": DashboardService.get_absent_employees(today),
-            "not_yet_in_by_department": DashboardService.get_not_yet_in_by_department(today),
-            "not_yet_in_employees": DashboardService.get_not_yet_in_employees(today),
-            "late_employees": DashboardService.get_late_employees(today),
+            "date": date.isoformat(),
+            "is_today": date == today,
+            "morning": by_period["morning"],
+            "night": by_period["night"],
+            "late_employees": late_employees,
+            "not_yet_in_employees": not_yet_in_employees,
+            "workforce_action_center": absent_employees,
+            "department_readiness": DashboardService.get_department_readiness(date, today),
+            "hostel_absentees": DashboardService.get_hostel_absentees(date),
             "recent_events": DashboardService.get_recent_events(),
             "device_status": DashboardService.get_device_status(),
-            "hostel_absentees": DashboardService.get_hostel_absentees(today),
         }
 
     @staticmethod
-    def get_summary(today):
-        attendance = DashboardService.live_records(today).select_related("shift")
+    def expected_ids(date, today, leave_employee_ids, is_overnight):
+        """Employees rostered to work this shift period.
 
-        leave_employee_ids = set(approved_leave_employee_ids(today))
-        conflict_employee_ids = set(AttendanceException.objects.filter(attendance__date=today, exception_type="leave_punch_conflict").values_list("attendance__employee_id", flat=True))
-        stored_leave_employee_ids = set(
-            attendance.filter(status="leave").values_list("employee_id", flat=True)
+        For today, only those whose shift has actually started (and, for an overnight shift, not
+        yet ended) count as expected "right now". For any other date - past or future - there is no
+        "right now" to compare against, so the whole day's roster for that period is what applies.
+        """
+        base = EmployeeRosterDay.objects.filter(
+            status="work", employee__status="active", shift__isnull=False, shift__is_overnight=is_overnight,
         )
-
-        return {
-            "present": attendance.filter(
-                status="present"
-            ).exclude(employee_id__in=conflict_employee_ids).count(),
-
-            "late": attendance.filter(
-                status="late"
-            ).exclude(employee_id__in=conflict_employee_ids).count(),
-
-            "absent": attendance.filter(
-                status="absent"
-            ).exclude(employee_id__in=leave_employee_ids).count(),
-
-            "on_leave": len((leave_employee_ids | stored_leave_employee_ids) - conflict_employee_ids),
-            "conflicts": len(conflict_employee_ids),
-
-            "night_shift": attendance.filter(
-                shift__is_overnight=True
-            ).count(),
-
-            **DashboardService.expected_now(today, attendance, leave_employee_ids),
-
-            "overtime": attendance.filter(
-                overtime_minutes__gt=0
-            ).count(),
-        }
-    @staticmethod
-    def expected_ids(today, leave_employee_ids):
-        """Employees rostered to be at work right now (their shift has started and not yet ended)."""
-        clock = timezone.localtime().time()
-        started = EmployeeRosterDay.objects.filter(status="work", employee__status="active", shift__isnull=False).filter(
-            Q(date=today, shift__start_time__lte=clock)
-            | Q(date=today - timedelta(days=1), shift__is_overnight=True, shift__end_time__gt=clock)
-        ).values_list("employee_id", flat=True)
-        return set(started) - set(leave_employee_ids)
-
-    @staticmethod
-    def get_not_yet_in_by_department(today):
-        """Per department: how many are expected now, how many are in, how many still to come."""
-        leave_ids = set(approved_leave_employee_ids(today))
-        expected = DashboardService.expected_ids(today, leave_ids)
-        in_ids = set(
-            DashboardService.live_records(today)
-            .filter(status__in=["present", "late", "incomplete"])
-            .values_list("employee_id", flat=True)
-        )
-        names = dict(Employee.objects.filter(id__in=expected).values_list("id", "department__name"))
-        rows = {}
-        for employee_id in expected:
-            name = names.get(employee_id) or "No department"
-            row = rows.setdefault(name, {"department": name, "expected": 0, "in": 0, "not_yet_in": 0})
-            row["expected"] += 1
-            if employee_id in in_ids:
-                row["in"] += 1
+        if date == today:
+            clock = timezone.localtime().time()
+            if is_overnight:
+                query = base.filter(
+                    Q(date=date, shift__start_time__lte=clock)
+                    | Q(date=date - timedelta(days=1), shift__end_time__gt=clock)
+                )
             else:
-                row["not_yet_in"] += 1
-        return sorted(rows.values(), key=lambda r: (-r["not_yet_in"], r["department"]))
+                query = base.filter(date=date, shift__start_time__lte=clock)
+        else:
+            query = base.filter(date=date)
+        ids = query.values_list("employee_id", flat=True)
+        return set(ids) - set(leave_employee_ids)
 
     @staticmethod
-    def get_not_yet_in_employees(today):
-        """Who is expected at work right now but hasn't punched in - with room numbers, so a physical
-        search of the hostel is possible."""
-        leave_ids = set(approved_leave_employee_ids(today))
-        expected = DashboardService.expected_ids(today, leave_ids)
-        in_ids = set(
-            DashboardService.live_records(today)
-            .filter(status__in=["present", "late", "incomplete"])
-            .values_list("employee_id", flat=True)
+    def get_period_breakdown(date, today):
+        """One pass building the morning/night summary cards and the three detail lists
+        (late, not-yet-in, absent) that the cards drill into - each row tagged with its
+        shift_period so the page can show only the period whose card was clicked."""
+        leave_employee_ids = set(approved_leave_employee_ids(date))
+        stored_leave_ids = set(
+            DailyAttendance.objects.filter(date=date, status="leave").values_list("employee_id", flat=True)
         )
-        missing_ids = expected - in_ids
-        employees = (
-            Employee.objects.filter(id__in=missing_ids)
-            .select_related("department")
-            .order_by("department__name", "hostel_room_number", "first_name")
+
+        # A leave day doesn't always leave a DailyAttendance row behind (see process_employee_attendance),
+        # so on-leave people are attributed to a shift period from the roster, not the attendance record.
+        roster_shift_map = dict(
+            EmployeeRosterDay.objects.filter(date=date, shift__isnull=False)
+            .values_list("employee_id", "shift__is_overnight")
         )
-        return [
-            {
-                "employee_id": employee.id,
-                "employee_number": employee.employee_id,
-                "employee_name": employee.full_name,
-                "department": employee.department.name if employee.department else None,
-                "hostel": employee.lives_in_company_hostel,
-                "room": employee.hostel_room_number,
+
+        records = DashboardService.live_records(date, today).select_related("employee", "employee__department", "shift")
+
+        by_period = {}
+        late_employees = []
+        not_yet_in_employees = []
+        absent_employees = []
+
+        for period, is_overnight in SHIFT_PERIODS:
+            period_records = records.filter(shift__is_overnight=is_overnight)
+
+            conflict_ids = set(
+                AttendanceException.objects.filter(
+                    attendance__date=date,
+                    exception_type="leave_punch_conflict",
+                    attendance__shift__is_overnight=is_overnight,
+                ).values_list("attendance__employee_id", flat=True)
+            )
+
+            on_leave_ids = {
+                employee_id
+                for employee_id in (leave_employee_ids | stored_leave_ids) - conflict_ids
+                if roster_shift_map.get(employee_id) == is_overnight
             }
-            for employee in employees
-        ]
 
-    @staticmethod
-    def get_late_employees(today):
-        """Everyone counted in the 'Late' summary card, one row each - for the on-page table, not a report."""
-        conflict_employee_ids = set(
-            AttendanceException.objects.filter(
-                attendance__date=today, exception_type="leave_punch_conflict"
-            ).values_list("attendance__employee_id", flat=True)
-        )
-        attendance = (
-            DashboardService.live_records(today)
-            .select_related("employee", "employee__department", "shift")
-            .filter(status="late")
-            .exclude(employee_id__in=conflict_employee_ids)
-            .order_by("employee__first_name")
-        )
-        return [
-            {
-                "employee_id": record.employee.id,
-                "employee_number": record.employee.employee_id,
-                "employee_name": record.employee.full_name,
-                "department": record.employee.department.name if record.employee.department else None,
-                "shift": record.shift.name if record.shift else None,
-                "actual_clock_in": record.actual_clock_in,
-                "late_minutes": record.late_minutes,
+            expected_ids = DashboardService.expected_ids(date, today, leave_employee_ids, is_overnight)
+            in_ids = set(
+                period_records.filter(status__in=["present", "late", "incomplete"]).values_list("employee_id", flat=True)
+            )
+            # Once the day is judged in full, a missing punch becomes "absent", not "still to come" -
+            # so a closed-out day never shows the same person in both counts.
+            settled_absent_ids = set(
+                period_records.filter(status="absent").values_list("employee_id", flat=True)
+            )
+            not_yet_in_ids = expected_ids - in_ids - settled_absent_ids
+
+            by_period[period] = {
+                "expected": len(expected_ids),
+                "not_yet_in": len(not_yet_in_ids),
+                "present": period_records.filter(status="present").exclude(employee_id__in=conflict_ids).count(),
+                "late": period_records.filter(status="late").exclude(employee_id__in=conflict_ids).count(),
+                "absent": period_records.filter(status="absent").exclude(employee_id__in=leave_employee_ids).count(),
+                "conflicts": len(conflict_ids),
+                "overtime": period_records.filter(overtime_minutes__gt=0).count(),
+                "on_leave": len(on_leave_ids),
             }
-            for record in attendance
-        ]
+
+            for record in period_records.filter(status="late").exclude(employee_id__in=conflict_ids).order_by("employee__first_name"):
+                late_employees.append({
+                    "shift_period": period,
+                    "employee_id": record.employee.id,
+                    "employee_number": record.employee.employee_id,
+                    "employee_name": record.employee.full_name,
+                    "department": record.employee.department.name if record.employee.department else None,
+                    "shift": record.shift.name if record.shift else None,
+                    "actual_clock_in": record.actual_clock_in,
+                    "late_minutes": record.late_minutes,
+                })
+
+            for record in period_records.filter(status="absent").exclude(employee_id__in=leave_employee_ids).order_by("employee__first_name"):
+                employee = record.employee
+                absent_employees.append({
+                    "shift_period": period,
+                    "employee_id": employee.id,
+                    "employee_number": employee.employee_id,
+                    "employee_name": employee.full_name,
+                    "department": employee.department.name if employee.department else None,
+                    "shift": record.shift.name if record.shift else None,
+                    "hostel": employee.lives_in_company_hostel,
+                    "room": employee.hostel_room_number,
+                    "status": record.status,
+                })
+
+            for employee in (
+                Employee.objects.filter(id__in=not_yet_in_ids)
+                .select_related("department")
+                .order_by("department__name", "hostel_room_number", "first_name")
+            ):
+                not_yet_in_employees.append({
+                    "shift_period": period,
+                    "employee_id": employee.id,
+                    "employee_number": employee.employee_id,
+                    "employee_name": employee.full_name,
+                    "department": employee.department.name if employee.department else None,
+                    "hostel": employee.lives_in_company_hostel,
+                    "room": employee.hostel_room_number,
+                })
+
+        return by_period, late_employees, not_yet_in_employees, absent_employees
 
     @staticmethod
-    def expected_now(today, attendance, leave_employee_ids):
-        """Who is rostered to be at work right now, and who of them has not punched in yet."""
-        expected = DashboardService.expected_ids(today, leave_employee_ids)
-        in_ids = set(attendance.filter(status__in=["present", "late", "incomplete"]).values_list("employee_id", flat=True))
-        return {"expected": len(expected), "not_yet_in": len(expected - in_ids)}
-
-    @staticmethod
-    def get_absent_employees(today):
-
-        leave_employee_ids = approved_leave_employee_ids(today)
-
-        attendance = (
-            DailyAttendance.objects
-            .select_related(
-                "employee",
-                "employee__department",
-                "shift",
-            )
-            .filter(
-                date=today,
-                status="absent",
-            )
-            .exclude(employee_id__in=leave_employee_ids)
-            .order_by(
-                "employee__first_name",
-            )
-        )
-
-        results = []
-
-        for record in attendance:
-
-            employee = record.employee
-
-            results.append({
-                "employee_id": employee.id,
-                "employee_number": employee.employee_id,
-                "employee_name": employee.full_name,
-                "department": (
-                    employee.department.name
-                    if employee.department
-                    else None
-                ),
-                "shift": (
-                    record.shift.name
-                    if record.shift
-                    else None
-                ),
-                "hostel": employee.lives_in_company_hostel,
-                "room": employee.hostel_room_number,
-                "status": record.status,
-            })
-
-        return results
-
-
-    @staticmethod
-    def get_department_readiness(today):
+    def get_department_readiness(date, today):
 
         departments = Department.objects.all().order_by("name")
-        expected = DashboardService.expected_ids(today, set(approved_leave_employee_ids(today)))
+        leave_ids = set(approved_leave_employee_ids(date))
+        expected = (
+            DashboardService.expected_ids(date, today, leave_ids, False)
+            | DashboardService.expected_ids(date, today, leave_ids, True)
+        )
         expected_by_department = {}
         for department_id in Employee.objects.filter(id__in=expected).values_list("department_id", flat=True):
             expected_by_department[department_id] = expected_by_department.get(department_id, 0) + 1
 
         results = []
+        records = DashboardService.live_records(date, today)
 
         for department in departments:
 
             present = (
-                DashboardService.live_records(today).filter(
+                records.filter(
                     employee__department=department,
                     status__in=["present", "late"],
                 ).count()
@@ -269,12 +238,10 @@ class DashboardService:
 
         return results
 
-
-
     @staticmethod
-    def get_hostel_absentees(today):
+    def get_hostel_absentees(date):
 
-        leave_employee_ids = approved_leave_employee_ids(today)
+        leave_employee_ids = approved_leave_employee_ids(date)
 
         attendance = (
             DailyAttendance.objects
@@ -283,7 +250,7 @@ class DashboardService:
                 "employee__department",
             )
             .filter(
-                date=today,
+                date=date,
                 status="absent",
                 employee__lives_in_company_hostel=True,
             )
@@ -314,10 +281,10 @@ class DashboardService:
 
         return results
 
-
     @staticmethod
     def get_recent_events():
-        """The latest punches, newest first, so a test at the terminal shows up straight away."""
+        """The latest punches, newest first, so a test at the terminal shows up straight away.
+        This is a live feed, not scoped to the dashboard's date filter."""
         events = AttendanceEvent.objects.select_related("employee", "employee__department", "device").order_by("-timestamp")[:20]
         return [
             {

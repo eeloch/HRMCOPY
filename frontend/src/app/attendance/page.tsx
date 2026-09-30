@@ -6,16 +6,17 @@ import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import { apiFetch, getAccessToken } from "@/lib/api";
 
-type DashboardSummary = {
-  present: number;
-  absent: number;
-  late: number;
-  on_leave: number;
-  night_shift: number;
-  overtime: number;
-  conflicts: number;
+type ShiftPeriod = "morning" | "night";
+
+type PeriodSummary = {
   expected: number;
   not_yet_in: number;
+  present: number;
+  late: number;
+  absent: number;
+  conflicts: number;
+  overtime: number;
+  on_leave: number;
 };
 
 type RecentPunch = {
@@ -34,6 +35,7 @@ type DeviceStatus = {
 };
 
 type WorkforceEmployee = {
+  shift_period: ShiftPeriod;
   employee_id: number;
   employee_number: string;
   employee_name: string;
@@ -59,14 +61,8 @@ type HostelAbsentee = {
   room: string;
 };
 
-type NotYetInRow = {
-  department: string;
-  expected: number;
-  in: number;
-  not_yet_in: number;
-};
-
 type NotYetInEmployee = {
+  shift_period: ShiftPeriod;
   employee_id: number;
   employee_number: string;
   employee_name: string;
@@ -76,6 +72,7 @@ type NotYetInEmployee = {
 };
 
 type LateEmployee = {
+  shift_period: ShiftPeriod;
   employee_id: number;
   employee_number: string;
   employee_name: string;
@@ -86,8 +83,10 @@ type LateEmployee = {
 };
 
 type AttendanceDashboard = {
-  summary: DashboardSummary;
-  not_yet_in_by_department: NotYetInRow[];
+  date: string;
+  is_today: boolean;
+  morning: PeriodSummary;
+  night: PeriodSummary;
   not_yet_in_employees: NotYetInEmployee[];
   late_employees: LateEmployee[];
   workforce_action_center: WorkforceEmployee[];
@@ -97,8 +96,8 @@ type AttendanceDashboard = {
   device_status: DeviceStatus[];
 };
 
-const summaryCards: {
-  key: keyof DashboardSummary;
+const periodCards: {
+  key: keyof PeriodSummary;
   label: string;
   detail: string;
   accent: string;
@@ -106,29 +105,16 @@ const summaryCards: {
 }[] = [
   {
     key: "expected",
-    label: "Expected Now",
+    label: "Expected",
     detail: "Rostered and their shift has started",
     accent: "bg-slate-100 text-slate-700 ring-slate-200",
+    action: "Click to print the not-yet-in roster",
   },
   {
     key: "present",
     label: "Present",
     detail: "Clocked in (on time or late)",
     accent: "bg-emerald-50 text-emerald-700 ring-emerald-100",
-  },
-  {
-    key: "not_yet_in",
-    label: "Not In Yet",
-    detail: "Expected but no punch so far",
-    accent: "bg-orange-50 text-orange-700 ring-orange-100",
-    action: "Click to print a roster",
-  },
-  {
-    key: "absent",
-    label: "Absent",
-    detail: "Needs attention",
-    accent: "bg-red-50 text-red-700 ring-red-100",
-    action: "Click to jump to the list",
   },
   {
     key: "late",
@@ -138,10 +124,11 @@ const summaryCards: {
     action: "Click to view the list",
   },
   {
-    key: "on_leave",
-    label: "On Leave",
-    detail: "Approved leave records",
-    accent: "bg-sky-50 text-sky-700 ring-sky-100",
+    key: "absent",
+    label: "Absent",
+    detail: "Needs attention (once the shift is over)",
+    accent: "bg-red-50 text-red-700 ring-red-100",
+    action: "Click to jump to the list",
   },
   {
     key: "conflicts",
@@ -150,35 +137,47 @@ const summaryCards: {
     accent: "bg-rose-50 text-rose-700 ring-rose-100",
   },
   {
-    key: "night_shift",
-    label: "Night Shift",
-    detail: "Overnight assignments",
-    accent: "bg-indigo-50 text-indigo-700 ring-indigo-100",
-  },
-  {
     key: "overtime",
     label: "Overtime",
     detail: "Employees with extra time",
     accent: "bg-violet-50 text-violet-700 ring-violet-100",
   },
+  {
+    key: "on_leave",
+    label: "On Leave",
+    detail: "Approved leave records",
+    accent: "bg-sky-50 text-sky-700 ring-sky-100",
+  },
 ];
+
+function todayIsoFor(date: Date) {
+  const offset = date.getTimezoneOffset();
+  return new Date(date.getTime() - offset * 60000).toISOString().slice(0, 10);
+}
+
+function todayIso() {
+  return todayIsoFor(new Date());
+}
 
 export default function AttendancePage() {
   const router = useRouter();
   const [dashboard, setDashboard] = useState<AttendanceDashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [showLate, setShowLate] = useState(false);
-  const [showNotYetInReport, setShowNotYetInReport] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(todayIso());
+  const [showLate, setShowLate] = useState<ShiftPeriod | null>(null);
+  const [showNotYetInReport, setShowNotYetInReport] = useState<ShiftPeriod | null>(null);
   const actionCenterRef = useRef<HTMLElement | null>(null);
 
-  function handleCardClick(key: keyof DashboardSummary) {
+  const isToday = selectedDate === todayIso();
+
+  function handleCardClick(period: ShiftPeriod, key: keyof PeriodSummary) {
     if (key === "late") {
-      setShowLate((current) => !current);
+      setShowLate((current) => (current === period ? null : period));
       return;
     }
-    if (key === "not_yet_in") {
-      setShowNotYetInReport(true);
+    if (key === "expected") {
+      setShowNotYetInReport(period);
       return;
     }
     if (key === "absent") {
@@ -192,15 +191,15 @@ export default function AttendancePage() {
       return;
     }
 
-    void loadDashboard();
-  }, [router]);
+    void loadDashboard(selectedDate);
+  }, [router, selectedDate]);
 
-  async function loadDashboard() {
+  async function loadDashboard(date: string) {
     setLoading(true);
     setError("");
 
     try {
-      const response = await apiFetch("/attendance/dashboard/");
+      const response = await apiFetch(`/attendance/dashboard/?date=${date}`);
 
       if (!response.ok) {
         throw new Error("Unable to load the workforce dashboard.");
@@ -220,12 +219,18 @@ export default function AttendancePage() {
     }
   }
 
+  function shiftOffset(days: number) {
+    const [year, month, day] = selectedDate.split("-").map(Number);
+    const next = new Date(year, month - 1, day + days);
+    setSelectedDate(todayIsoFor(next));
+  }
+
   return (
     <div className="min-h-screen bg-slate-100">
       <Sidebar />
 
       <main className="ml-64 min-w-0 p-4 md:p-8 print:hidden">
-        <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div className="mb-8 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="text-sm font-semibold uppercase tracking-wider text-blue-600">
               Attendance
@@ -234,19 +239,54 @@ export default function AttendancePage() {
               Workforce Operations
             </h1>
             <p className="mt-2 text-slate-500">
-              Today&apos;s attendance status and workforce actions.
+              {isToday ? "Today's" : "That day's"} attendance status and workforce actions.
             </p>
           </div>
 
-          {!loading && !error && (
-            <button
-              type="button"
-              onClick={() => void loadDashboard()}
-              className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
-            >
-              Refresh
-            </button>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1 rounded-xl border border-slate-300 bg-white p-1 shadow-sm">
+              <button
+                type="button"
+                onClick={() => shiftOffset(-1)}
+                className="rounded-lg px-2.5 py-1.5 text-slate-500 hover:bg-slate-100"
+                aria-label="Previous day"
+              >
+                ←
+              </button>
+              <input
+                type="date"
+                value={selectedDate}
+                onChange={(event) => setSelectedDate(event.target.value)}
+                className="rounded-lg px-2 py-1.5 text-sm font-medium text-slate-700 outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => shiftOffset(1)}
+                className="rounded-lg px-2.5 py-1.5 text-slate-500 hover:bg-slate-100"
+                aria-label="Next day"
+              >
+                →
+              </button>
+            </div>
+            {!isToday && (
+              <button
+                type="button"
+                onClick={() => setSelectedDate(todayIso())}
+                className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100"
+              >
+                Today
+              </button>
+            )}
+            {!loading && !error && (
+              <button
+                type="button"
+                onClick={() => void loadDashboard(selectedDate)}
+                className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+              >
+                Refresh
+              </button>
+            )}
+          </div>
         </div>
 
         {error ? (
@@ -255,7 +295,7 @@ export default function AttendancePage() {
             <p className="mt-1 text-sm">{error}</p>
             <button
               type="button"
-              onClick={() => void loadDashboard()}
+              onClick={() => void loadDashboard(selectedDate)}
               className="mt-4 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-red-700"
             >
               Try Again
@@ -263,24 +303,25 @@ export default function AttendancePage() {
           </div>
         ) : (
           <>
-            <section
-              aria-label="Attendance summary"
-              className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3"
-            >
-              {loading
-                ? summaryCards.map((card) => <SummaryCardSkeleton key={card.key} />)
-                : summaryCards.map((card) => (
-                    <SummaryCard
-                      key={card.key}
-                      label={card.label}
-                      detail={card.detail}
-                      value={dashboard?.summary[card.key] || 0}
-                      accent={card.accent}
-                      action={card.action}
-                      active={card.key === "late" && showLate}
-                      onClick={card.action ? () => handleCardClick(card.key) : undefined}
-                    />
-                  ))}
+            <section aria-label="Attendance summary" className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+              <ShiftColumn
+                period="morning"
+                title="Morning"
+                subtitle="Day shifts"
+                summary={dashboard?.morning}
+                loading={loading}
+                showLate={showLate === "morning"}
+                onCardClick={(key) => handleCardClick("morning", key)}
+              />
+              <ShiftColumn
+                period="night"
+                title="Night"
+                subtitle="Overnight shifts"
+                summary={dashboard?.night}
+                loading={loading}
+                showLate={showLate === "night"}
+                onCardClick={(key) => handleCardClick("night", key)}
+              />
             </section>
 
             {showLate && (
@@ -288,19 +329,20 @@ export default function AttendancePage() {
                 <div className="flex items-center justify-between border-b border-amber-200 px-5 py-4">
                   <div>
                     <h2 className="text-lg font-bold text-slate-900">
-                      Late Today ({dashboard?.late_employees.length ?? 0})
+                      Late — {showLate === "morning" ? "Morning" : "Night"} (
+                      {dashboard?.late_employees.filter((employee) => employee.shift_period === showLate).length ?? 0})
                     </h2>
                     <p className="mt-1 text-sm text-slate-500">Clocked in after their shift start.</p>
                   </div>
                   <button
                     type="button"
-                    onClick={() => setShowLate(false)}
+                    onClick={() => setShowLate(null)}
                     className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50"
                   >
                     Hide
                   </button>
                 </div>
-                {dashboard?.late_employees.length ? (
+                {dashboard?.late_employees.filter((employee) => employee.shift_period === showLate).length ? (
                   <div className="overflow-x-auto">
                     <table className="w-full min-w-[640px] text-left">
                       <thead className="bg-white text-xs font-semibold uppercase tracking-wider text-slate-500">
@@ -313,72 +355,36 @@ export default function AttendancePage() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-amber-100 bg-white">
-                        {dashboard.late_employees.map((employee) => (
-                          <tr
-                            key={employee.employee_id}
-                            onClick={() => router.push(`/employees/${employee.employee_id}`)}
-                            className="cursor-pointer hover:bg-amber-50"
-                          >
-                            <td className="px-5 py-3">
-                              <div className="font-semibold text-slate-900">{employee.employee_name}</div>
-                              <div className="text-sm text-slate-500">{employee.employee_number}</div>
-                            </td>
-                            <td className="px-5 py-3 text-sm text-slate-600">{employee.department || "Not assigned"}</td>
-                            <td className="px-5 py-3 text-sm text-slate-600">{employee.shift || "No shift"}</td>
-                            <td className="px-5 py-3 text-sm text-slate-600">
-                              {employee.actual_clock_in
-                                ? new Date(employee.actual_clock_in).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
-                                : "-"}
-                            </td>
-                            <td className="px-5 py-3 text-sm font-semibold text-amber-700">{employee.late_minutes} min</td>
-                          </tr>
-                        ))}
+                        {dashboard.late_employees
+                          .filter((employee) => employee.shift_period === showLate)
+                          .map((employee) => (
+                            <tr
+                              key={employee.employee_id}
+                              onClick={() => router.push(`/employees/${employee.employee_id}`)}
+                              className="cursor-pointer hover:bg-amber-50"
+                            >
+                              <td className="px-5 py-3">
+                                <div className="font-semibold text-slate-900">{employee.employee_name}</div>
+                                <div className="text-sm text-slate-500">{employee.employee_number}</div>
+                              </td>
+                              <td className="px-5 py-3 text-sm text-slate-600">{employee.department || "Not assigned"}</td>
+                              <td className="px-5 py-3 text-sm text-slate-600">{employee.shift || "No shift"}</td>
+                              <td className="px-5 py-3 text-sm text-slate-600">
+                                {employee.actual_clock_in
+                                  ? new Date(employee.actual_clock_in).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
+                                  : "-"}
+                              </td>
+                              <td className="px-5 py-3 text-sm font-semibold text-amber-700">{employee.late_minutes} min</td>
+                            </tr>
+                          ))}
                       </tbody>
                     </table>
                   </div>
                 ) : (
-                  <div className="p-8 text-center text-slate-500">No one is late today.</div>
+                  <div className="p-8 text-center text-slate-500">No one is late.</div>
                 )}
               </section>
             )}
-
-            <section className="mt-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-              <div className="border-b border-slate-200 px-5 py-5">
-                <h2 className="text-lg font-bold text-slate-900">Expected Now</h2>
-                <p className="mt-1 text-sm text-slate-500">
-                  Everyone whose shift is running right now, by department. People are only marked absent once their
-                  shift and its 3-hour punch window are over, so until then they show here as still to come.
-                </p>
-              </div>
-              {loading ? (
-                <TableSkeleton />
-              ) : dashboard?.not_yet_in_by_department?.length ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[520px] text-left">
-                    <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500">
-                      <tr>
-                        <th className="px-5 py-3">Department</th>
-                        <th className="px-5 py-3">Expected</th>
-                        <th className="px-5 py-3">In</th>
-                        <th className="px-5 py-3">Still to come</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {dashboard.not_yet_in_by_department.map((row) => (
-                        <tr key={row.department} className="hover:bg-slate-50/80">
-                          <td className="px-5 py-3 font-medium text-slate-900">{row.department}</td>
-                          <td className="px-5 py-3 text-sm text-slate-600">{row.expected}</td>
-                          <td className="px-5 py-3 text-sm text-emerald-700">{row.in}</td>
-                          <td className="px-5 py-3 text-sm font-semibold text-amber-700">{row.not_yet_in}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="p-10 text-center text-slate-500">Nobody is rostered to be at work right now.</div>
-              )}
-            </section>
 
             <section ref={actionCenterRef} className="mt-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm scroll-mt-6">
               <div className="flex flex-col gap-2 border-b border-slate-200 px-5 py-5 sm:flex-row sm:items-center sm:justify-between">
@@ -617,9 +623,12 @@ export default function AttendancePage() {
           <div className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-2xl bg-white shadow-xl print:max-h-none print:w-full print:max-w-none print:overflow-visible print:rounded-none print:shadow-none">
             <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 print:hidden">
               <div>
-                <h2 className="text-lg font-bold text-slate-900">Not Yet In — Printable Roster</h2>
+                <h2 className="text-lg font-bold text-slate-900">
+                  Not Yet In — {showNotYetInReport === "morning" ? "Morning" : "Night"} — Printable Roster
+                </h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  {dashboard.not_yet_in_employees.length} people expected but not yet clocked in.
+                  {dashboard.not_yet_in_employees.filter((employee) => employee.shift_period === showNotYetInReport).length} people
+                  expected but not yet clocked in.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -632,7 +641,7 @@ export default function AttendancePage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowNotYetInReport(false)}
+                  onClick={() => setShowNotYetInReport(null)}
                   className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
                 >
                   Close
@@ -643,14 +652,15 @@ export default function AttendancePage() {
             <div className="p-6">
               <div className="mb-4 hidden print:block">
                 <h2 className="text-xl font-bold text-slate-900">
-                  Not Yet In — {new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })}
+                  Not Yet In — {showNotYetInReport === "morning" ? "Morning" : "Night"} — {dashboard.date}
                 </h2>
                 <p className="text-sm text-slate-600">
-                  {dashboard.not_yet_in_employees.length} people expected but not yet clocked in.
+                  {dashboard.not_yet_in_employees.filter((employee) => employee.shift_period === showNotYetInReport).length} people
+                  expected but not yet clocked in.
                 </p>
               </div>
 
-              {dashboard.not_yet_in_employees.length ? (
+              {dashboard.not_yet_in_employees.filter((employee) => employee.shift_period === showNotYetInReport).length ? (
                 <table className="w-full text-left text-sm">
                   <thead className="border-b-2 border-slate-300 text-xs font-semibold uppercase tracking-wider text-slate-500">
                     <tr>
@@ -662,24 +672,84 @@ export default function AttendancePage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {dashboard.not_yet_in_employees.map((employee) => (
-                      <tr key={employee.employee_id}>
-                        <td className="py-2 pr-3 font-medium text-slate-900">{employee.department || "Not assigned"}</td>
-                        <td className="py-2 pr-3 text-slate-700">{employee.employee_name}</td>
-                        <td className="py-2 pr-3 text-slate-600">{employee.employee_number}</td>
-                        <td className="py-2 pr-3 text-slate-600">{employee.hostel ? "Yes" : "No"}</td>
-                        <td className="py-2 font-semibold text-slate-900">{employee.room || "-"}</td>
-                      </tr>
-                    ))}
+                    {dashboard.not_yet_in_employees
+                      .filter((employee) => employee.shift_period === showNotYetInReport)
+                      .map((employee) => (
+                        <tr key={employee.employee_id}>
+                          <td className="py-2 pr-3 font-medium text-slate-900">{employee.department || "Not assigned"}</td>
+                          <td className="py-2 pr-3 text-slate-700">{employee.employee_name}</td>
+                          <td className="py-2 pr-3 text-slate-600">{employee.employee_number}</td>
+                          <td className="py-2 pr-3 text-slate-600">{employee.hostel ? "Yes" : "No"}</td>
+                          <td className="py-2 font-semibold text-slate-900">{employee.room || "-"}</td>
+                        </tr>
+                      ))}
                   </tbody>
                 </table>
               ) : (
-                <p className="py-6 text-center text-slate-500">Everyone expected right now has already clocked in.</p>
+                <p className="py-6 text-center text-slate-500">Everyone expected has already clocked in.</p>
               )}
             </div>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ShiftColumn({
+  period,
+  title,
+  subtitle,
+  summary,
+  loading,
+  showLate,
+  onCardClick,
+}: {
+  period: ShiftPeriod;
+  title: string;
+  subtitle: string;
+  summary: PeriodSummary | undefined;
+  loading: boolean;
+  showLate: boolean;
+  onCardClick: (key: keyof PeriodSummary) => void;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
+      <div className="mb-4 flex items-center gap-2">
+        <span
+          className={`inline-flex h-9 w-9 items-center justify-center rounded-xl text-lg ${
+            period === "morning" ? "bg-amber-100 text-amber-700" : "bg-indigo-100 text-indigo-700"
+          }`}
+        >
+          {period === "morning" ? "☀️" : "🌙"}
+        </span>
+        <div>
+          <h2 className="text-lg font-bold text-slate-900">{title}</h2>
+          <p className="text-xs text-slate-500">{subtitle}</p>
+        </div>
+        {!loading && summary && summary.not_yet_in > 0 && (
+          <span className="ml-auto rounded-full bg-orange-50 px-3 py-1 text-xs font-semibold text-orange-700">
+            {summary.not_yet_in} not in yet
+          </span>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-2 2xl:grid-cols-3">
+        {loading
+          ? periodCards.map((card) => <SummaryCardSkeleton key={card.key} />)
+          : periodCards.map((card) => (
+              <SummaryCard
+                key={card.key}
+                label={card.label}
+                detail={card.detail}
+                value={summary?.[card.key] || 0}
+                accent={card.accent}
+                action={card.action}
+                active={card.key === "late" && showLate}
+                onClick={card.action ? () => onCardClick(card.key) : undefined}
+              />
+            ))}
+      </div>
     </div>
   );
 }

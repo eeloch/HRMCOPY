@@ -200,9 +200,9 @@ class LiveDashboardTests(TestCase):
         self.AttendanceEvent.objects.create(employee=self.people[0], device=self.device, timestamp=self.tz.now())
         self.process(self.today)
         data = DashboardService.get_dashboard()
-        self.assertEqual(data["summary"]["present"] + data["summary"]["late"], 1)
-        self.assertEqual(data["summary"]["absent"], 0)  # the shift has not ended
-        self.assertEqual((data["summary"]["expected"], data["summary"]["not_yet_in"]), (3, 2))
+        self.assertEqual(data["morning"]["present"] + data["morning"]["late"], 1)
+        self.assertEqual(data["morning"]["absent"], 0)  # the shift has not ended
+        self.assertEqual((data["morning"]["expected"], data["morning"]["not_yet_in"]), (3, 2))
         self.assertEqual(data["recent_events"][0]["employee_number"], "L0")
         self.assertEqual(data["recent_events"][0]["device"], "Gate")
         self.assertEqual(data["device_status"][0]["name"], "Gate")
