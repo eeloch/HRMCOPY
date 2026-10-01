@@ -544,6 +544,12 @@ class MealService:
             event, created = MealEvent.objects.get_or_create(device=device, external_event_id=str(external_event_id), defaults={"employee": identity.employee, "timestamp": timestamp, "verification_type": verification_type, "source_system": system, "raw_payload": raw_payload or {}})
             if not created: return event.collection, False
             work_date, roster = cls.resolve_work_day(identity.employee, timestamp)
+            # No roster row at all (never put on a shift plan) is not the same as a roster
+            # that says REST: it's not a declared non-work day, it's that nobody has told
+            # the system this person's schedule yet. Treating it as excess would bill them
+            # for a gap that is ours to fix, not theirs - so it gets its own status and
+            # skips the billable decision entirely; see _notify_unscheduled_meal_collection.
+            unscheduled = roster is None
             if roster and roster.status == RosterDayStatus.WORK:
                 base_entitlement = cls.approved_entitlement(
                     identity.employee,
@@ -563,8 +569,18 @@ class MealService:
                 entitlement = 0
             rate = cls.rate_for(work_date)
             sequence = MealCollection.objects.select_for_update().filter(employee=identity.employee, work_date=work_date, voided_at__isnull=True).count() + 1
-            collection = MealCollection.objects.create(event=event, employee=identity.employee, work_date=work_date, shift=roster.shift if roster else None, sequence_number=sequence, entitlement_snapshot=entitlement, rate_snapshot=rate.amount, status=MealCollectionStatus.WITHIN if sequence <= entitlement else (MealCollectionStatus.REST_DAY if entitlement == 0 else MealCollectionStatus.EXCESS))
-            if sequence > entitlement:
+            if unscheduled:
+                status = MealCollectionStatus.UNSCHEDULED
+            elif sequence <= entitlement:
+                status = MealCollectionStatus.WITHIN
+            elif entitlement == 0:
+                status = MealCollectionStatus.REST_DAY
+            else:
+                status = MealCollectionStatus.EXCESS
+            collection = MealCollection.objects.create(event=event, employee=identity.employee, work_date=work_date, shift=roster.shift if roster else None, sequence_number=sequence, entitlement_snapshot=entitlement, rate_snapshot=rate.amount, status=status)
+            if unscheduled:
+                cls._notify_unscheduled_meal_collection(identity.employee, device)
+            elif sequence > entitlement:
                 cls._cover_excess_ticket(collection, entitlement, rate.amount)
                 from .authorizations import apply_to_new_excess
 
@@ -613,6 +629,32 @@ class MealService:
                 event_type="meals.revoked_access_attempt",
                 title="Revoked employee attempted to collect a meal ticket",
                 message=f"{employee.full_name} ({employee.employee_id}) scanned at {device.name}, but their access was revoked.",
+                severity=NotificationSeverity.WARNING,
+                employee=employee,
+                related_url="/meals",
+            )
+
+    @staticmethod
+    def _notify_unscheduled_meal_collection(employee, device):
+        """One notification per employee per day - mirrors _notify_revoked_meal_access_attempt.
+        Flags the real fix (assign a shift plan) instead of quietly opening a billable
+        excess decision for a gap that isn't the employee's fault."""
+        from notifications.models import Notification, NotificationSeverity
+
+        already_notified_today = Notification.objects.filter(
+            event_type="meals.unscheduled_collection",
+            employee=employee,
+            created_at__date=timezone.now().date(),
+        ).exists()
+        if already_notified_today:
+            return
+
+        for user in get_user_model().objects.filter(is_superuser=True):
+            NotificationService.create(
+                recipient=user,
+                event_type="meals.unscheduled_collection",
+                title="Meal collected with no roster assigned",
+                message=f"{employee.full_name} ({employee.employee_id}) scanned at {device.name}, but has no shift plan or roster for today, so their meal entitlement can't be worked out. Assign them a shift plan.",
                 severity=NotificationSeverity.WARNING,
                 employee=employee,
                 related_url="/meals",

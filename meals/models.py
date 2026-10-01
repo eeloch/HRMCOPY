@@ -75,6 +75,7 @@ class MealCollectionStatus(models.TextChoices):
     WITHIN = "within_entitlement", "Within entitlement"
     EXCESS = "excess", "Excess"
     REST_DAY = "rest_day", "Not entitled - rest day"
+    UNSCHEDULED = "unscheduled", "Not yet scheduled"
 
 
 class MealCollection(models.Model):

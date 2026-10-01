@@ -752,6 +752,59 @@ class MealAbsencePenaltyTests(TestCase):
         self.assertEqual(excess.excess_quantity, 1)
         self.assertEqual(excess.proposed_deduction, Decimal("700.00"))
 
+    def test_no_roster_at_all_is_unscheduled_not_a_billable_excess(self):
+        """A brand-new hire with no shift plan yet has no EmployeeRosterDay row - that is
+        not the same as a declared rest day, and must not open a deduction decision for
+        something the employee didn't cause."""
+        work_date = date(2026, 9, 7)
+        device_serial_number = "MEALDEVICE004B"
+        admin = get_user_model().objects.create_superuser(
+            username="meal-unscheduled-admin",
+            email="meal-unscheduled@example.com",
+            password="password",
+        )
+
+        EmployeeMealEntitlement.objects.create(
+            employee=self.employee,
+            tickets_per_work_day=1,
+            effective_from=work_date,
+            reason="Unscheduled collection test",
+        )
+        MealTicketRate.objects.create(
+            amount=Decimal("700.00"),
+            effective_from=work_date,
+        )
+        MealDevice.objects.create(
+            name="Meal Unscheduled Device",
+            serial_number=device_serial_number,
+            active=True,
+        )
+        BiometricIdentity.objects.create(
+            employee=self.employee,
+            system="device",
+            source_identifier=device_serial_number,
+            external_user_id="BIOUSER004B",
+            is_active=True,
+        )
+
+        collection, created = MealService.ingest(
+            system="device",
+            source_identifier=device_serial_number,
+            device_serial_number=device_serial_number,
+            external_user_id="BIOUSER004B",
+            external_event_id="EVENT004B",
+            timestamp=timezone.make_aware(datetime(2026, 9, 7, 10, 0)),
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(collection.entitlement_snapshot, 0)
+        self.assertEqual(collection.status, MealCollectionStatus.UNSCHEDULED)
+        self.assertIsNone(collection.excess_exception)
+        self.assertFalse(MealExcessException.objects.filter(employee=self.employee, work_date=work_date).exists())
+
+        notification = Notification.objects.get(event_type="meals.unscheduled_collection", recipient=admin)
+        self.assertEqual(notification.employee, self.employee)
+
     def test_duplicate_meal_event_is_idempotent(self):
         work_date = date(2026, 9, 7)
         device_serial_number = "MEALDEVICE005"

@@ -30,7 +30,7 @@ from .models import (
 )
 from .services import MealService
 
-COLLECTION_TONES = {"within_entitlement": "green", "excess": "amber", "rest_day": "red"}
+COLLECTION_TONES = {"within_entitlement": "green", "excess": "amber", "rest_day": "red", "unscheduled": "grey"}
 EXCESS_TONES = {"pending": "amber", "approved": "blue", "deducted": "green", "cancelled": "grey", "declined": "red"}
 SEARCH = employee_search_fields("employee")
 
