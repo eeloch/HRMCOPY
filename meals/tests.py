@@ -2112,6 +2112,81 @@ class MealGatingTests(TestCase):
         self.assertEqual(build_device_command("SN1", "set_user_enabled", {"enrollid": 7, "enabled": True})["enable"], 1)
 
 
+class MealGatingExitTests(TestCase):
+    """gated_employees() only ever manages active employees, so the moment someone exits they drop out of
+    every future reconcile() and whatever enable state the terminal last had for them is never touched
+    again. disable_everywhere() is the explicit fix: force every meal-terminal identity off regardless of
+    gating scope or the identity's own active flag - wired to fire the moment an employee's status becomes
+    inactive (found 2026-09-30: real production terminals had dozens of exited staff still cached/enrolled
+    as enabled, weeks after they left)."""
+
+    def setUp(self):
+        from meals import gating
+
+        self.gating = gating
+        self.today = timezone.localdate()
+        self.leaver = Employee.objects.create(employee_id="LEAVER1", first_name="Leaver", last_name="One", status="active")
+        self.device_a = BiometricDevice.objects.create(name="Canteen A", serial_number="EXITGATE1", purpose="meal_ticket")
+        self.device_b = BiometricDevice.objects.create(name="Canteen B", serial_number="EXITGATE2", purpose="meal_ticket")
+        self.identity_a = BiometricIdentity.objects.create(employee=self.leaver, system=IDENTITY_SYSTEM, source_identifier="EXITGATE1", external_user_id="41")
+        # Already revoked on this one device before disable_everywhere ever runs - it must still be switched off.
+        self.identity_b = BiometricIdentity.objects.create(employee=self.leaver, system=IDENTITY_SYSTEM, source_identifier="EXITGATE2", external_user_id="42", is_active=False)
+
+    def test_disable_everywhere_switches_off_every_identity_active_or_not(self):
+        queued = self.gating.disable_everywhere(self.leaver)
+        self.assertEqual(queued, 2)
+        commands = {c.payload["enrollid"]: c.payload["enabled"] for c in DeviceCommand.objects.filter(command_type="set_user_enabled")}
+        self.assertEqual(commands, {41: False, 42: False})
+
+    def test_an_exited_employee_drops_out_of_gating_scope(self):
+        self.leaver.status = "inactive"
+        self.leaver.save()
+        self.assertFalse(self.gating.gated_employees().filter(pk=self.leaver.pk).exists())
+
+    def test_marking_someone_inactive_through_the_serializer_switches_them_off(self):
+        from employees.serializers import EmployeeCreateUpdateSerializer
+
+        serializer = EmployeeCreateUpdateSerializer(self.leaver, data={"status": "inactive"}, partial=True, context={"request": None})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        commands = {c.payload["enrollid"]: c.payload["enabled"] for c in DeviceCommand.objects.filter(command_type="set_user_enabled")}
+        self.assertEqual(commands, {41: False, 42: False})
+
+    def test_saving_an_already_inactive_employee_again_does_not_resend(self):
+        self.leaver.status = "inactive"
+        self.leaver.save()
+        from employees.serializers import EmployeeCreateUpdateSerializer
+
+        serializer = EmployeeCreateUpdateSerializer(self.leaver, data={"first_name": "Leaver"}, partial=True, context={"request": None})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        self.assertFalse(DeviceCommand.objects.filter(command_type="set_user_enabled").exists())
+
+    def test_reactivating_someone_does_not_trigger_a_disable(self):
+        self.leaver.status = "inactive"
+        self.leaver.save(update_fields=["status"])
+        from employees.serializers import EmployeeCreateUpdateSerializer
+
+        serializer = EmployeeCreateUpdateSerializer(self.leaver, data={"status": "active"}, partial=True, context={"request": None})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        self.assertFalse(DeviceCommand.objects.filter(command_type="set_user_enabled").exists())
+
+    def test_management_command_remediates_the_existing_backlog(self):
+        """The fix above only stops NEW exits from leaking - this is the one-off (and repeatable) cleanup
+        for people who already went inactive before it existed."""
+        from django.core.management import call_command
+
+        self.leaver.status = "inactive"
+        self.leaver.save(update_fields=["status"])  # bypasses the serializer, like the pre-fix backlog did
+        self.assertFalse(DeviceCommand.objects.filter(command_type="set_user_enabled").exists())
+
+        call_command("sync_meal_gating", "--exited")
+
+        commands = {c.payload["enrollid"]: c.payload["enabled"] for c in DeviceCommand.objects.filter(command_type="set_user_enabled")}
+        self.assertEqual(commands, {41: False, 42: False})
+
+
 class ExtraTicketAuthorizationTests(TestCase):
     """A supervisor authorises an extra ticket and says who pays; it is decided the moment it is scanned, and the
     person is switched on at the terminal for it."""
@@ -2313,3 +2388,168 @@ class OperationsFilterTests(TestCase):
         data = self.get("?page=2&page_size=2")
         self.assertEqual((data["collections_total"], len(data["collections"]), data["page"]), (3, 1, 2))
         self.assertEqual(self.get("?date_from=2026-09-25&date_to=2026-09-25")["range_summary"], {"collections": 2, "within_entitlement": 1, "excess": 1, "voided": 0})
+
+
+class MealExceptionsPaginationTests(TestCase):
+    """The review tab's backlog can run into the thousands - every pending case must be reachable by
+    paging, not just whichever ones happen to be newest (2026-09-30: a hard 500-row cap left ~1700 of a
+    2222-case backlog unreachable through the page)."""
+
+    def setUp(self):
+        self.viewer = get_user_model().objects.create_user(username="pg-viewer", password="x")
+        self.viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.viewer)
+        self.people = [Employee.objects.create(employee_id=f"PG{i:03d}", first_name="Pg", last_name=str(i)) for i in range(7)]
+        self.ids_newest_first = []
+        for i, employee in enumerate(self.people):
+            exc = MealExcessException.objects.create(
+                employee=employee, work_date=date(2026, 9, 1 + i), entitlement_snapshot=1,
+                collected_quantity=2, excess_quantity=1, rate_snapshot="700.00", proposed_deduction="700.00",
+            )
+            self.ids_newest_first.append(exc.pk)
+        self.ids_newest_first.reverse()  # ordering is -work_date, -created_at: latest work_date first
+
+    def get(self, query=""):
+        return self.client.get(f"/api/meals/operations/{query}").json()
+
+    def test_default_page_is_the_first_page_not_everything(self):
+        data = self.get("?exceptions_page_size=3")
+        self.assertEqual(data["exceptions_total"], 7)
+        self.assertEqual([e["id"] for e in data["exceptions"]], self.ids_newest_first[:3])
+        self.assertEqual((data["exceptions_page"], data["exceptions_page_size"]), (1, 3))
+
+    def test_every_case_is_reachable_by_paging_through(self):
+        seen = []
+        for page in (1, 2, 3):
+            seen += [e["id"] for e in self.get(f"?exceptions_page={page}&exceptions_page_size=3")["exceptions"]]
+        self.assertEqual(seen, self.ids_newest_first)
+
+    def test_page_size_is_capped(self):
+        data = self.get("?exceptions_page_size=9999")
+        self.assertEqual(data["exceptions_page_size"], 200)
+
+
+class MealCardVerifiedBatchingTests(TestCase):
+    """card_verified used to run one query per exception row - confirms the batched version still gets
+    the right answer per person instead of mixing rows up."""
+
+    def setUp(self):
+        self.viewer = get_user_model().objects.create_user(username="cv-viewer", password="x")
+        self.viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.viewer)
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=date(2026, 1, 1))
+        device = MealDevice.objects.create(name="Canteen", serial_number="CV1", active=True)
+        self.card_person = Employee.objects.create(employee_id="CV001", first_name="Card", last_name="Scanner")
+        self.face_person = Employee.objects.create(employee_id="CV002", first_name="Face", last_name="Scanner")
+        work_date = date(2026, 9, 10)
+        for employee, key, mode in ((self.card_person, "cv-c", 3), (self.face_person, "cv-f", 1)):
+            event = MealEvent.objects.create(
+                employee=employee, device=device, timestamp=timezone.make_aware(datetime(2026, 9, 10, 12, 0)),
+                external_event_id=key, source_system="device", raw_payload={"mode": mode},
+            )
+            MealCollection.objects.create(event=event, employee=employee, work_date=work_date, sequence_number=1, entitlement_snapshot=0, rate_snapshot="700.00", status="excess")
+            MealExcessException.objects.create(employee=employee, work_date=work_date, entitlement_snapshot=0, collected_quantity=1, excess_quantity=1, rate_snapshot="700.00", proposed_deduction="700.00")
+
+    def test_each_row_gets_its_own_answer_not_the_other_persons(self):
+        rows = {row["employee_number"]: row["card_verified"] for row in self.client.get("/api/meals/operations/").json()["exceptions"]}
+        self.assertEqual(rows, {"CV001": True, "CV002": False})
+
+
+class MealExcessBulkDecisionTests(TestCase):
+    """Accept/waive/decline several pending cases in one request - what the review tab's bulk toolbar
+    now calls instead of one HTTP round trip per case."""
+
+    def setUp(self):
+        self.reviewer = get_user_model().objects.create_user(username="bulk-reviewer", password="pw")
+        self.reviewer.user_permissions.add(Permission.objects.get(codename="review_meal_excess"), Permission.objects.get(codename="record_meal_operations"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.reviewer)
+        self.people = [Employee.objects.create(employee_id=f"BK{i:03d}", first_name="Bulk", last_name=str(i)) for i in range(4)]
+        self.exceptions = [
+            MealExcessException.objects.create(
+                employee=employee, work_date=date(2026, 9, 10), entitlement_snapshot=1,
+                collected_quantity=2, excess_quantity=1, rate_snapshot="700.00", proposed_deduction="700.00",
+            )
+            for employee in self.people
+        ]
+        self.ids = [e.pk for e in self.exceptions]
+
+    def post(self, body):
+        return self.client.post("/api/meals/excess/bulk-decision/", body, format="json")
+
+    def test_bulk_waive_decides_every_id_and_sends_one_notification_not_one_per_ticket(self):
+        superuser = get_user_model().objects.create_superuser(username="bulk-admin", password="pw", email="a@example.com")
+        response = self.post({"action": "waive", "ids": self.ids, "reason": "Bulk cleanup"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["succeeded"], self.ids)
+        self.assertEqual(response.json()["failed"], [])
+        for exception in self.exceptions:
+            exception.refresh_from_db()
+            self.assertEqual(exception.status, "cancelled")
+            self.assertEqual(exception.comment, "Bulk cleanup")
+        self.assertEqual(Notification.objects.filter(recipient=superuser, event_type="meals.excess_cancelled").count(), 1)
+
+    def test_bulk_accept_charges_every_ticket(self):
+        response = self.post({"action": "accept", "ids": self.ids})
+        self.assertEqual(response.json()["succeeded"], self.ids)
+        for exception in self.exceptions:
+            exception.refresh_from_db()
+            self.assertEqual(exception.status, "approved")
+
+    def test_bulk_decline_reports_already_decided_ids_as_failed_without_stopping_the_rest(self):
+        MealService.decline(self.exceptions[0], self.reviewer, "already handled")
+        response = self.post({"action": "decline", "ids": self.ids})
+        data = response.json()
+        self.assertEqual(data["succeeded"], self.ids[1:])
+        self.assertEqual([f["id"] for f in data["failed"]], [self.ids[0]])
+        self.assertIn("already been decided", data["failed"][0]["error"])
+
+    def test_unknown_ids_are_reported_failed_not_a_500(self):
+        response = self.post({"action": "waive", "ids": [999999, *self.ids]})
+        self.assertEqual(response.json()["failed"], [{"id": 999999, "error": "Not found."}])
+        self.assertEqual(response.json()["succeeded"], self.ids)
+
+    def test_more_than_the_cap_is_rejected_with_no_partial_effect(self):
+        response = self.post({"action": "waive", "ids": list(range(1, 302))})
+        self.assertEqual(response.status_code, 400)
+        for exception in self.exceptions:
+            exception.refresh_from_db()
+            self.assertEqual(exception.status, "pending")
+
+    def test_bad_action_or_empty_ids_is_rejected(self):
+        self.assertEqual(self.post({"action": "nonsense", "ids": self.ids}).status_code, 400)
+        self.assertEqual(self.post({"action": "accept", "ids": []}).status_code, 400)
+
+    def test_requires_the_review_permission(self):
+        viewer = get_user_model().objects.create_user(username="bulk-viewer", password="pw")
+        viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        self.client.force_authenticate(viewer)
+        self.assertEqual(self.post({"action": "accept", "ids": self.ids}).status_code, 403)
+
+
+class MealExcessPendingIdsTests(TestCase):
+    """Backs the review tab's 'select all N matching this filter, not just this page' action."""
+
+    def setUp(self):
+        self.viewer = get_user_model().objects.create_user(username="ids-viewer", password="x")
+        self.viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.viewer)
+        self.ada = Employee.objects.create(employee_id="ID001", first_name="Ida", last_name="One")
+        self.pending = MealExcessException.objects.create(employee=self.ada, work_date=date(2026, 9, 10), entitlement_snapshot=1, collected_quantity=2, excess_quantity=1, rate_snapshot="700.00", proposed_deduction="700.00")
+        self.decided = MealExcessException.objects.create(employee=self.ada, work_date=date(2026, 9, 5), entitlement_snapshot=1, collected_quantity=2, excess_quantity=1, rate_snapshot="700.00", proposed_deduction="700.00", status="declined")
+
+    def test_defaults_to_pending_only(self):
+        data = self.client.get("/api/meals/excess/pending-ids/").json()
+        self.assertEqual(data, {"ids": [self.pending.pk], "truncated": False})
+
+    def test_decisions_all_includes_decided_too(self):
+        data = self.client.get("/api/meals/excess/pending-ids/?decisions=all").json()
+        self.assertEqual(set(data["ids"]), {self.pending.pk, self.decided.pk})
+
+    def test_date_and_search_filters_apply(self):
+        data = self.client.get("/api/meals/excess/pending-ids/?decisions=all&date_from=2026-09-06").json()
+        self.assertEqual(data["ids"], [self.pending.pk])
+        self.assertEqual(self.client.get("/api/meals/excess/pending-ids/?search=nobody").json()["ids"], [])

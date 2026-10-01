@@ -635,11 +635,15 @@ class MealService:
 
     @staticmethod
     @transaction.atomic
-    def decline(exception, actor, reason):
+    def decline(exception, actor, reason, *, notify=True):
         """Reject a non-entitled meal: the tickets beyond the employee's entitlement
         are voided (so the vendor isn't billed for them) and nothing is deducted
         from the employee. Contrast cancel(), which waives the deduction but leaves
-        the tickets standing, i.e. the company still pays the vendor."""
+        the tickets standing, i.e. the company still pays the vendor.
+
+        notify=False skips the per-superuser notification - used by the bulk decision
+        endpoint, which sends one summary notification for the whole batch instead of
+        one per ticket."""
         reason = (reason or "").strip()
         if exception.status != MealExcessStatus.PENDING: raise ValueError("This meal excess has already been decided.")
         now = timezone.now()
@@ -653,7 +657,8 @@ class MealService:
 
         refresh(exception.employee_id)
         AuditService.log(event_type="meals.excess_declined", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.WARNING, title="Meal excess declined", description=f"{len(excess_tickets)} ticket(s) beyond entitlement declined; vendor not billed, no deduction.", metadata={"exception": exception.pk, "reason": reason, "tickets_voided": [t.pk for t in excess_tickets]})
-        for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_declined", title="Meal excess declined", message=f"{exception.employee.full_name}: {reason or 'No reason given'}", severity="warning", employee=exception.employee, related_url="/meals")
+        if notify:
+            for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_declined", title="Meal excess declined", message=f"{exception.employee.full_name}: {reason or 'No reason given'}", severity="warning", employee=exception.employee, related_url="/meals")
         return exception
 
     @staticmethod
@@ -812,12 +817,13 @@ class MealService:
         return applied
 
     @staticmethod
-    def cancel(exception, actor, comment):
+    def cancel(exception, actor, comment, *, notify=True):
         if exception.status != MealExcessStatus.PENDING: raise ValueError("This meal excess has already been decided.")
         comment = (comment or "").strip()
         exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.CANCELLED, actor, timezone.now(), comment; exception.save()
         AuditService.log(event_type="meals.excess_cancelled", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.WARNING, title="Meal excess waived", description="Meal excess deduction waived.", metadata={"exception":exception.pk,"reason":comment})
-        for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_cancelled", title="Meal excess waived", message=f"{exception.employee.full_name}: {comment or 'No reason given'}", severity="warning", employee=exception.employee, related_url="/meals")
+        if notify:
+            for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_cancelled", title="Meal excess waived", message=f"{exception.employee.full_name}: {comment or 'No reason given'}", severity="warning", employee=exception.employee, related_url="/meals")
         return exception
 
 

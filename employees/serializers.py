@@ -488,6 +488,16 @@ class EmployeeCreateUpdateSerializer(
 
         return attrs
 
+    def update(self, instance, validated_data):
+        previous_status = instance.status
+        employee = super().update(instance, validated_data)
+        if previous_status != "inactive" and employee.status == "inactive":
+            # Gating only ever manages active employees, so nothing else would tell a meal terminal to stop
+            # granting this person a ticket the moment they leave.
+            from meals.gating import disable_everywhere
+            disable_everywhere(employee)
+        return employee
+
 from rest_framework import serializers
 
 from .models import Employee, BiometricIdentity

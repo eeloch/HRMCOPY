@@ -61,6 +61,26 @@ def _meal_identities(employee):
     return BiometricIdentity.objects.filter(employee=employee, system=IDENTITY_SYSTEM, is_active=True, source_identifier__in=list(serials))
 
 
+def disable_everywhere(employee):
+    """Force every meal-terminal identity this person has switched off right now, regardless of gating scope
+    or the identity's own active flag.
+
+    gated_employees() only ever manages active employees, so the moment someone's status becomes anything else
+    they simply drop out of every future reconcile() - nothing else ever tells the terminal to stop granting
+    them a ticket. Call this the moment an employee exits. Identities already marked inactive are still included
+    (their terminal-side enrolment can outlive our own revocation of them), so this also mops up anyone whose
+    identity was revoked without the terminal ever being told."""
+    serials = BiometricDevice.objects.filter(purpose="meal_ticket").values_list("serial_number", flat=True)
+    identities = BiometricIdentity.objects.filter(employee=employee, system=IDENTITY_SYSTEM, source_identifier__in=list(serials))
+    devices = {d.serial_number: d for d in BiometricDevice.objects.filter(serial_number__in=list(serials))}
+    queued = 0
+    for identity in identities:
+        device = devices.get(identity.source_identifier)
+        if device is not None:
+            queued += _queue(device, employee, identity.external_user_id, False)
+    return queued
+
+
 def _queue(device, employee, enrollid, enabled):
     """One pending switch per person per direction is enough."""
     already = DeviceCommand.objects.filter(device=device, command_type=COMMAND_TYPE, status__in=["pending", "sent"], payload__enrollid=int(enrollid), payload__enabled=enabled).exists()

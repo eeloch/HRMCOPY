@@ -39,6 +39,8 @@ const vendorPaymentInitial = () => ({ amount: "", payment_date: "", reference: "
 const employmentTypeOptions = [["permanent", "Permanent"], ["contract", "Contract"], ["casual", "Casual"], ["intern", "Intern"], ["nysc", "NYSC"], ["expatriate", "Expatriate"]];
 const employmentCategoryOptions = [["staff", "Staff"], ["management", "Management"], ["executive", "Executive"]];
 const PAGE_SIZE = 50;
+const REVIEW_PAGE_SIZE = 50;
+const BULK_CHUNK_SIZE = 200;
 
 function apiMessage(data: unknown, fallback: string) {
   if (!data || typeof data !== "object") return fallback;
@@ -66,12 +68,24 @@ export default function MealsPage() {
   // Needs a decision
   const [exceptions, setExceptions] = useState<Exception[]>([]);
   const [exceptionsTotal, setExceptionsTotal] = useState(0);
+  const [exceptionsPage, setExceptionsPage] = useState(1);
   const [decisionFilter, setDecisionFilter] = useState<DecisionFilter>("pending");
   const [reviewRange, setReviewRange] = useState<DateRange>(rangeFor("all"));
   const [reviewSearch, setReviewSearch] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
+  const [selectAllMatching, setSelectAllMatching] = useState(false);
   const [bulkKind, setBulkKind] = useState<BulkKind | null>(null);
   const [bulkReason, setBulkReason] = useState("");
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
+  const [quickReviewOpen, setQuickReviewOpen] = useState(false);
+  const [quickReviewCase, setQuickReviewCase] = useState<Exception | null>(null);
+  const [quickReviewRemaining, setQuickReviewRemaining] = useState(0);
+  const [quickReviewDecided, setQuickReviewDecided] = useState(0);
+  const [quickReviewReasonKind, setQuickReviewReasonKind] = useState<"waive" | "decline" | null>(null);
+  const [quickReviewReason, setQuickReviewReason] = useState("");
+  const [quickReviewBusy, setQuickReviewBusy] = useState(false);
+  const [quickReviewDone, setQuickReviewDone] = useState(false);
+  const [quickReviewError, setQuickReviewError] = useState("");
   // Collections
   const [collections, setCollections] = useState<Collection[]>([]);
   const [collectionsTotal, setCollectionsTotal] = useState(0);
@@ -112,7 +126,8 @@ export default function MealsPage() {
   const canReview = currentUser?.permissions.review_meal_excess === true;
   const canConfigure = currentUser?.permissions.manage_meal_configuration === true;
 
-  const reviewQuery = useMemo(() => queryString({ decisions: decisionFilter, date_from: reviewRange.from, date_to: reviewRange.to, search: reviewSearch.trim(), page_size: "1" }), [decisionFilter, reviewRange, reviewSearch]);
+  const reviewFilters = useMemo(() => ({ decisions: decisionFilter, date_from: reviewRange.from, date_to: reviewRange.to, search: reviewSearch.trim() }), [decisionFilter, reviewRange, reviewSearch]);
+  const reviewQuery = useMemo(() => queryString({ ...reviewFilters, page_size: "1", exceptions_page: String(exceptionsPage), exceptions_page_size: String(REVIEW_PAGE_SIZE) }), [reviewFilters, exceptionsPage]);
   const collectionsQuery = useMemo(() => queryString({ date_from: collectionRange.from, date_to: collectionRange.to, search: collectionSearch.trim(), device: collectionDevice, status: collectionStatus === "all" ? "" : collectionStatus, page: String(collectionPage), page_size: String(PAGE_SIZE) }), [collectionRange, collectionSearch, collectionDevice, collectionStatus, collectionPage]);
 
   function fail(loadError: unknown, fallback: string) {
@@ -130,6 +145,8 @@ export default function MealsPage() {
       setSelected((current) => current.filter((id) => (data.exceptions || []).some((item: Exception) => item.id === id && item.status === "pending")));
     } catch (loadError) { fail(loadError, "Unable to load the decisions."); }
   }
+
+  function resetReviewPaging() { setExceptionsPage(1); setSelected([]); setSelectAllMatching(false); }
 
   async function loadCollections(query: string) {
     try {
@@ -211,6 +228,24 @@ export default function MealsPage() {
     return () => window.clearTimeout(timer);
   }, [vendorPeriodId]);
 
+  const handleQuickReviewKey = useEffectEvent((event: KeyboardEvent) => {
+    const target = event.target as HTMLElement | null;
+    if (target && (target.tagName === "TEXTAREA" || target.tagName === "INPUT")) {
+      if (event.key === "Escape") { (target as HTMLElement).blur(); setQuickReviewReasonKind(null); setQuickReviewReason(""); }
+      return;
+    }
+    if (event.key === "Escape") { event.preventDefault(); closeQuickReview(); return; }
+    if (quickReviewBusy || !quickReviewCase) return;
+    if (event.key === "a" || event.key === "A") { event.preventDefault(); void decideQuickReview("accept"); }
+    else if (event.key === "w" || event.key === "W") { event.preventDefault(); void decideQuickReview("waive"); }
+    else if (event.key === "d" || event.key === "D") { event.preventDefault(); void decideQuickReview("decline"); }
+  });
+  useEffect(() => {
+    if (!quickReviewOpen) return;
+    window.addEventListener("keydown", handleQuickReviewKey);
+    return () => window.removeEventListener("keydown", handleQuickReviewKey);
+  }, [quickReviewOpen]);
+
   async function request(path: string, method: "POST" | "PATCH", body: unknown, success: string) {
     setActing(true); setError("");
     try {
@@ -237,22 +272,88 @@ export default function MealsPage() {
     if (voidId === null) return;
     if (await request(`/meals/collections/${voidId}/void/`, "POST", { reason: voidReason.trim() }, "Ticket voided - it no longer counts toward the vendor total.")) { setVoidId(null); setVoidReason(""); }
   }
+  async function resolveBulkIds(): Promise<number[]> {
+    if (!selectAllMatching) return selected;
+    const response = await apiFetch(`/meals/excess/pending-ids/?${queryString(reviewFilters)}`);
+    if (!response.ok) throw new Error(apiMessage(await response.json().catch(() => null), "Unable to fetch the full matching list."));
+    const data = await response.json();
+    return (data.ids || []) as number[];
+  }
+
   async function runBulk() {
-    if (bulkKind === null || !selected.length) return;
+    if (bulkKind === null) return;
+    const action = { accept: "accept", waive: "waive", decline: "decline" }[bulkKind];
     const verb = { accept: "accepted", waive: "waived", decline: "declined" }[bulkKind];
     setActing(true); setError("");
-    let done = 0; let failed = 0; let lastError = "";
-    for (const id of selected) {
-      try {
-        const path = { accept: "approve", waive: "cancel", decline: "decline" }[bulkKind];
-        const response = await apiFetch(`/meals/excess/${id}/${path}/`, { method: "POST", body: JSON.stringify(bulkKind === "accept" ? {} : { reason: bulkReason.trim() }) });
-        if (response.ok) done += 1; else { failed += 1; lastError = apiMessage(await response.json().catch(() => null), "The request could not be completed."); }
-      } catch { failed += 1; lastError = "The request could not be completed."; }
+    try {
+      const ids = await resolveBulkIds();
+      if (!ids.length) { setActing(false); return; }
+      setBulkProgress({ done: 0, total: ids.length });
+      let done = 0; let failed = 0; const failMessages: string[] = [];
+      for (let start = 0; start < ids.length; start += BULK_CHUNK_SIZE) {
+        const chunk = ids.slice(start, start + BULK_CHUNK_SIZE);
+        const response = await apiFetch("/meals/excess/bulk-decision/", { method: "POST", body: JSON.stringify({ action, ids: chunk, reason: bulkReason.trim() }) });
+        const data = await response.json().catch(() => null);
+        if (!response.ok) { failed += chunk.length; failMessages.push(apiMessage(data, "The request could not be completed.")); }
+        else {
+          done += (data?.succeeded || []).length;
+          failed += (data?.failed || []).length;
+          for (const item of data?.failed || []) failMessages.push(`#${item.id}: ${item.error}`);
+        }
+        setBulkProgress({ done: Math.min(start + chunk.length, ids.length), total: ids.length });
+      }
+      setFeedback(`${done} decision${done === 1 ? "" : "s"} ${verb}.${failed ? ` ${failed} could not be ${verb}${failMessages.length ? ` (e.g. ${failMessages.slice(0, 3).join("; ")})` : ""}.` : ""}`);
+      setSelected([]); setSelectAllMatching(false); setBulkKind(null); setBulkReason("");
+      await refreshAll();
+    } catch (bulkError) {
+      setError(bulkError instanceof Error ? bulkError.message : "The bulk request could not be completed.");
+    } finally {
+      setBulkProgress(null); setActing(false);
     }
-    setFeedback(`${done} decision${done === 1 ? "" : "s"} ${verb}.${failed ? ` ${failed} could not be ${verb}: ${lastError}` : ""}`);
-    setSelected([]); setBulkKind(null); setBulkReason("");
-    await refreshAll();
-    setActing(false);
+  }
+
+  async function loadNextQuickReviewCase(afterDecision: boolean) {
+    setQuickReviewBusy(true);
+    try {
+      const response = await apiFetch(`/meals/operations/?${queryString({ decisions: "pending", date_from: reviewRange.from, date_to: reviewRange.to, search: reviewSearch.trim(), page_size: "1", exceptions_page: "1", exceptions_page_size: "1" })}`);
+      if (!response.ok) throw new Error(apiMessage(await response.json().catch(() => null), "Unable to load the next case."));
+      const data = await response.json();
+      const next: Exception | undefined = (data.exceptions || [])[0];
+      setQuickReviewRemaining(data.exceptions_total ?? 0);
+      setQuickReviewCase(next || null);
+      setQuickReviewReasonKind(null); setQuickReviewReason("");
+      if (afterDecision) setQuickReviewDecided((count) => count + 1);
+      if (!next) setQuickReviewDone(true);
+    } catch (loadError) {
+      fail(loadError, "Unable to load the next case.");
+    } finally {
+      setQuickReviewBusy(false);
+    }
+  }
+
+  function openQuickReview() {
+    setQuickReviewOpen(true); setQuickReviewDecided(0); setQuickReviewDone(false); setQuickReviewError("");
+    void loadNextQuickReviewCase(false);
+  }
+
+  async function decideQuickReview(kind: BulkKind) {
+    if (!quickReviewCase || quickReviewBusy) return;
+    if (kind !== "accept" && quickReviewReasonKind !== kind) { setQuickReviewReasonKind(kind); setQuickReviewError(""); return; }
+    setQuickReviewBusy(true); setQuickReviewError("");
+    try {
+      const path = { accept: "approve", waive: "cancel", decline: "decline" }[kind];
+      const response = await apiFetch(`/meals/excess/${quickReviewCase.id}/${path}/`, { method: "POST", body: JSON.stringify(kind === "accept" ? {} : { reason: quickReviewReason.trim() }) });
+      if (!response.ok) throw new Error(apiMessage(await response.json().catch(() => null), "The request could not be completed."));
+      await loadNextQuickReviewCase(true);
+    } catch (decisionError) {
+      setQuickReviewError(decisionError instanceof Error ? decisionError.message : "The request could not be completed.");
+      setQuickReviewBusy(false);
+    }
+  }
+
+  function closeQuickReview() {
+    setQuickReviewOpen(false); setQuickReviewCase(null); setQuickReviewReasonKind(null); setQuickReviewReason(""); setQuickReviewError("");
+    void loadReview(reviewQuery);
   }
   async function createRate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -301,6 +402,9 @@ export default function MealsPage() {
   const selectedRows = pendingRows.filter((item) => selected.includes(item.id));
   const selectedTotal = selectedRows.reduce((sum, item) => sum + Number(item.proposed_deduction || 0), 0);
   const allSelected = pendingRows.length > 0 && selectedRows.length === pendingRows.length;
+  const bulkCount = selectAllMatching ? exceptionsTotal : selectedRows.length;
+  const canOfferSelectAllMatching = allSelected && !selectAllMatching && exceptionsTotal > pendingRows.length && decisionFilter === "pending";
+  const exceptionsPages = Math.max(1, Math.ceil(exceptionsTotal / REVIEW_PAGE_SIZE));
   const pages = Math.max(1, Math.ceil(collectionsTotal / PAGE_SIZE));
   const showingFrom = collectionsTotal ? (collectionPage - 1) * PAGE_SIZE + 1 : 0;
   const showingTo = Math.min(collectionPage * PAGE_SIZE, collectionsTotal);
@@ -311,10 +415,10 @@ export default function MealsPage() {
     return !term || item.employee_name.toLowerCase().includes(term);
   });
   const bulkText = bulkKind === "accept"
-    ? `Accept ${selectedRows.length} excess ticket${selectedRows.length === 1 ? "" : "s"}: ${money(String(selectedTotal))} in total will be charged to the employees in that month's payroll.`
+    ? `Accept ${bulkCount} excess ticket${bulkCount === 1 ? "" : "s"}${selectAllMatching ? "" : `: ${money(String(selectedTotal))} in total`} will be charged to the employees in that month's payroll.`
     : bulkKind === "waive"
-      ? `Waive ${selectedRows.length} excess ticket${selectedRows.length === 1 ? "" : "s"}: no deduction is made and the company still pays the vendor.`
-      : `Decline ${selectedRows.length} excess ticket${selectedRows.length === 1 ? "" : "s"}: the vendor is not billed and nothing is deducted.`;
+      ? `Waive ${bulkCount} excess ticket${bulkCount === 1 ? "" : "s"}: no deduction is made and the company still pays the vendor.`
+      : `Decline ${bulkCount} excess ticket${bulkCount === 1 ? "" : "s"}: the vendor is not billed and nothing is deducted.`;
 
   return <div className="min-h-screen bg-slate-100"><Sidebar /><main className="ml-64 min-w-0 p-4 md:p-8">
     <PageHeader title="Meals" description="Monitor collections, review excesses, and maintain approved Meal configuration." actions={<div className="flex gap-2"><button type="button" onClick={() => router.push("/meals/live")} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700">Live Screen</button><button type="button" onClick={() => void refreshAll()} disabled={loading} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 disabled:opacity-50">Refresh</button></div>} />
@@ -324,14 +428,26 @@ export default function MealsPage() {
       <TabBar<Tab> value={tab} onChange={setTab} tabs={[["review", "Needs a decision", summary?.pending_review ?? null], ["collections", "Collections", null], ["vendor", "Vendor payments", null], ["setup", "Setup", null]]} />
 
       {tab === "review" && <>
-        <Section title="Needs a decision" subtitle="Extra tickets nobody authorised in advance. Accept: charge the employee in that month's payroll. Waive: no deduction, the company still pays the vendor. Decline: reject the ticket - the vendor isn't billed and nothing is deducted.">
+        <Section title="Needs a decision" subtitle="Extra tickets nobody authorised in advance. Accept: charge the employee in that month's payroll. Waive: no deduction, the company still pays the vendor. Decline: reject the ticket - the vendor isn't billed and nothing is deducted." actions={canReview && <button type="button" disabled={acting} onClick={openQuickReview} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">⚡ Quick Review</button>}>
           <div className="space-y-3 border-b border-slate-200 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3"><Chips<DecisionFilter> value={decisionFilter} onChange={(value) => { setDecisionFilter(value); setSelected([]); }} options={[["pending", "Waiting for a decision"], ["decided", "Already decided"], ["all", "Everything"]]} /><SearchBox value={reviewSearch} onChange={setReviewSearch} /></div>
-            <DateRangeFilter value={reviewRange} onChange={setReviewRange} />
-            <p className="text-xs text-slate-500">{exceptionsTotal} {exceptionsTotal === 1 ? "case" : "cases"}{reviewRange.from || reviewRange.to ? " in the chosen dates" : " across all dates"}{exceptionsTotal > exceptions.length ? ` (showing the newest ${exceptions.length})` : ""}.</p>
+            <div className="flex flex-wrap items-center justify-between gap-3"><Chips<DecisionFilter> value={decisionFilter} onChange={(value) => { setDecisionFilter(value); resetReviewPaging(); }} options={[["pending", "Waiting for a decision"], ["decided", "Already decided"], ["all", "Everything"]]} /><SearchBox value={reviewSearch} onChange={(value) => { setReviewSearch(value); resetReviewPaging(); }} /></div>
+            <DateRangeFilter value={reviewRange} onChange={(range) => { setReviewRange(range); resetReviewPaging(); }} />
+            <p className="text-xs text-slate-500">{exceptionsTotal} {exceptionsTotal === 1 ? "case" : "cases"}{reviewRange.from || reviewRange.to ? " in the chosen dates" : " across all dates"}.</p>
           </div>
-          {canReview && selectedRows.length > 0 && <div className="sticky top-0 z-20 flex flex-wrap items-center gap-3 border-b border-blue-200 bg-blue-50 px-5 py-3 text-sm"><span className="font-semibold text-blue-900">{selectedRows.length} selected · {money(String(selectedTotal))}</span><button type="button" disabled={acting} onClick={() => setBulkKind("accept")} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Accept selected</button><button type="button" disabled={acting} onClick={() => setBulkKind("waive")} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700">Waive selected</button><button type="button" disabled={acting} onClick={() => setBulkKind("decline")} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-semibold text-red-700">Decline selected</button><button type="button" onClick={() => setSelected([])} className="ml-auto text-xs font-semibold text-slate-500 underline">Clear</button></div>}
-          {exceptions.length ? <ScrollArea maxHeight="55vh"><table className="w-full min-w-[900px] text-left"><thead className="text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>{canReview && <th className="w-10 px-4 py-3"><input type="checkbox" aria-label="Select all waiting decisions" checked={allSelected} disabled={!pendingRows.length} onChange={(event) => setSelected(event.target.checked ? pendingRows.map((item) => item.id) : [])} /></th>}<th className="px-4 py-3">Employee</th><th className="px-4 py-3">Work Date</th><th className="px-4 py-3">Entitlement</th><th className="px-4 py-3">Collected</th><th className="px-4 py-3">Excess</th><th className="px-4 py-3">Deduction</th><th className="px-4 py-3">Status</th>{canReview && <th className="px-4 py-3">Actions</th>}</tr></thead><tbody className="divide-y divide-slate-100">{exceptions.map((item) => <tr key={item.id} className={selected.includes(item.id) ? "bg-blue-50/60" : ""}>{canReview && <td className="px-4 py-3">{item.status === "pending" && <input type="checkbox" aria-label={`Select ${item.employee_name}`} checked={selected.includes(item.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} />}</td>}<td className="px-4 py-3 font-medium">{item.employee_name}<span className="block text-xs font-normal text-slate-500">{item.employee_number}</span>{item.card_verified && <span className="mt-1 inline-block rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700">Card scan - gating bypassed</span>}</td><td className="px-4 py-3 text-sm text-slate-600">{day(item.work_date)}</td><td className="px-4 py-3">{item.entitlement}</td><td className="px-4 py-3">{item.collected_quantity}</td><td className="px-4 py-3">{item.excess_quantity}</td><td className="px-4 py-3 font-semibold">{money(item.proposed_deduction)}</td><td className="px-4 py-3"><StatusBadge status={item.status} />{item.status !== "pending" && item.comment && <span className="mt-1 block max-w-[14rem] text-xs text-slate-500">{item.comment}</span>}</td>{canReview && <td className="px-4 py-3">{item.status === "pending" ? <div className="flex gap-2"><button type="button" disabled={acting} onClick={() => void approve(item)} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Accept</button><button type="button" disabled={acting} onClick={() => setCancelId(item.id)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700">Waive</button><button type="button" disabled={acting} onClick={() => setDeclineId(item.id)} className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700">Decline</button></div> : <span className="text-xs text-slate-500">{excessOutcome[item.status] || item.status}</span>}</td>}</tr>)}</tbody></table></ScrollArea> : <p className="p-8 text-center text-sm text-slate-500">{decisionFilter === "pending" ? "Nothing is waiting for a decision for these filters." : "No cases for these filters."}</p>}
+          {canReview && (selectedRows.length > 0 || selectAllMatching) && <div className="sticky top-0 z-20 border-b border-blue-200 bg-blue-50 text-sm">
+            <div className="flex flex-wrap items-center gap-3 px-5 py-3">
+              <span className="font-semibold text-blue-900">{selectAllMatching ? `All ${exceptionsTotal} matching this filter selected` : <>{selectedRows.length} selected · {money(String(selectedTotal))}</>}</span>
+              <button type="button" disabled={acting} onClick={() => setBulkKind("accept")} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Accept selected</button>
+              <button type="button" disabled={acting} onClick={() => setBulkKind("waive")} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700">Waive selected</button>
+              <button type="button" disabled={acting} onClick={() => setBulkKind("decline")} className="rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-semibold text-red-700">Decline selected</button>
+              <button type="button" onClick={() => { setSelected([]); setSelectAllMatching(false); }} className="ml-auto text-xs font-semibold text-slate-500 underline">Clear</button>
+            </div>
+            {bulkProgress && <div className="border-t border-blue-200 px-5 py-2 text-xs text-blue-800">Processing {bulkProgress.done} of {bulkProgress.total}...</div>}
+          </div>}
+          {canOfferSelectAllMatching && <div className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-900">All {pendingRows.length} on this page are selected. <button type="button" onClick={() => setSelectAllMatching(true)} className="font-semibold underline">Select all {exceptionsTotal} matching this filter instead</button></div>}
+          {exceptions.length ? <><ScrollArea maxHeight="55vh"><table className="w-full min-w-[900px] text-left"><thead className="text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>{canReview && <th className="w-10 px-4 py-3"><input type="checkbox" aria-label="Select all waiting decisions on this page" checked={allSelected} disabled={!pendingRows.length} onChange={(event) => { setSelectAllMatching(false); setSelected(event.target.checked ? pendingRows.map((item) => item.id) : []); }} /></th>}<th className="px-4 py-3">Employee</th><th className="px-4 py-3">Work Date</th><th className="px-4 py-3">Entitlement</th><th className="px-4 py-3">Collected</th><th className="px-4 py-3">Excess</th><th className="px-4 py-3">Deduction</th><th className="px-4 py-3">Status</th>{canReview && <th className="px-4 py-3">Actions</th>}</tr></thead><tbody className="divide-y divide-slate-100">{exceptions.map((item) => <tr key={item.id} className={selected.includes(item.id) || selectAllMatching ? "bg-blue-50/60" : ""}>{canReview && <td className="px-4 py-3">{item.status === "pending" && <input type="checkbox" aria-label={`Select ${item.employee_name}`} checked={selected.includes(item.id) || selectAllMatching} disabled={selectAllMatching} onChange={(event) => setSelected((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} />}</td>}<td className="px-4 py-3 font-medium">{item.employee_name}<span className="block text-xs font-normal text-slate-500">{item.employee_number}</span>{item.card_verified && <span className="mt-1 inline-block rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700">Card scan - gating bypassed</span>}</td><td className="px-4 py-3 text-sm text-slate-600">{day(item.work_date)}</td><td className="px-4 py-3">{item.entitlement}</td><td className="px-4 py-3">{item.collected_quantity}</td><td className="px-4 py-3">{item.excess_quantity}</td><td className="px-4 py-3 font-semibold">{money(item.proposed_deduction)}</td><td className="px-4 py-3"><StatusBadge status={item.status} />{item.status !== "pending" && item.comment && <span className="mt-1 block max-w-[14rem] text-xs text-slate-500">{item.comment}</span>}</td>{canReview && <td className="px-4 py-3">{item.status === "pending" ? <div className="flex gap-2"><button type="button" disabled={acting} onClick={() => void approve(item)} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Accept</button><button type="button" disabled={acting} onClick={() => setCancelId(item.id)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700">Waive</button><button type="button" disabled={acting} onClick={() => setDeclineId(item.id)} className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700">Decline</button></div> : <span className="text-xs text-slate-500">{excessOutcome[item.status] || item.status}</span>}</td>}</tr>)}</tbody></table></ScrollArea>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3 text-sm text-slate-600"><span>{exceptionsTotal ? `Showing ${(exceptionsPage - 1) * REVIEW_PAGE_SIZE + 1}-${Math.min(exceptionsPage * REVIEW_PAGE_SIZE, exceptionsTotal)} of ${exceptionsTotal}` : "Nothing to show"}</span><span className="flex items-center gap-2"><button type="button" disabled={exceptionsPage <= 1} onClick={() => setExceptionsPage((p) => Math.max(1, p - 1))} className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold disabled:opacity-40">Previous</button><span>Page {exceptionsPage} of {exceptionsPages}</span><button type="button" disabled={exceptionsPage >= exceptionsPages} onClick={() => setExceptionsPage((p) => Math.min(exceptionsPages, p + 1))} className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold disabled:opacity-40">Next</button></span></div>
+          </> : <p className="p-8 text-center text-sm text-slate-500">{decisionFilter === "pending" ? "Nothing is waiting for a decision for these filters." : "No cases for these filters."}</p>}
         </Section>
         <div className="mt-6"><ExtraTicketAuthorizations canReview={canReview} /></div>
       </>}
@@ -373,7 +489,46 @@ export default function MealsPage() {
       </>}
     </>}
   </main>
-  {canReview && bulkKind !== null && <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/40 p-4"><div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl"><h2 className="text-xl font-bold">{bulkKind === "accept" ? "Accept" : bulkKind === "waive" ? "Waive" : "Decline"} selected excess</h2><p className="mt-2 text-sm text-slate-600">{bulkText}</p>{bulkKind !== "accept" && <textarea autoFocus value={bulkReason} onChange={(event) => setBulkReason(event.target.value)} className="mt-5 min-h-24 w-full rounded-xl border border-slate-300 p-3 text-sm" placeholder="Reason (optional, applied to every ticket)" />}<div className="mt-5 flex justify-end gap-3"><button type="button" onClick={() => { setBulkKind(null); setBulkReason(""); }} className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold">Back</button><button type="button" disabled={acting} onClick={() => void runBulk()} className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white ${bulkKind === "accept" ? "bg-emerald-600" : "bg-red-600"}`}>{acting ? "Working..." : `Confirm (${selectedRows.length})`}</button></div></div></div>}
+  {canReview && bulkKind !== null && <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/40 p-4"><div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl"><h2 className="text-xl font-bold">{bulkKind === "accept" ? "Accept" : bulkKind === "waive" ? "Waive" : "Decline"} selected excess</h2><p className="mt-2 text-sm text-slate-600">{bulkText}</p>{bulkKind !== "accept" && <textarea autoFocus disabled={acting} value={bulkReason} onChange={(event) => setBulkReason(event.target.value)} className="mt-5 min-h-24 w-full rounded-xl border border-slate-300 p-3 text-sm disabled:opacity-50" placeholder="Reason (optional, applied to every ticket)" />}{bulkProgress && <div className="mt-5"><div className="h-2 w-full overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${Math.round((bulkProgress.done / bulkProgress.total) * 100)}%` }} /></div><p className="mt-2 text-xs text-slate-500">Processing {bulkProgress.done} of {bulkProgress.total}...</p></div>}<div className="mt-5 flex justify-end gap-3"><button type="button" disabled={acting} onClick={() => { setBulkKind(null); setBulkReason(""); }} className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold disabled:opacity-50">Back</button><button type="button" disabled={acting} onClick={() => void runBulk()} className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-70 ${bulkKind === "accept" ? "bg-emerald-600" : "bg-red-600"}`}>{acting ? "Working..." : `Confirm (${bulkCount})`}</button></div></div></div>}
+  {canReview && quickReviewOpen && <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/50 p-4">
+    <div className="w-full max-w-xl rounded-2xl bg-white shadow-xl">
+      <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+        <div><h2 className="text-lg font-bold">⚡ Quick Review</h2><p className="text-xs text-slate-500">{quickReviewDecided} decided this session · {quickReviewRemaining} remaining · keys: A accept, W waive, D decline, Esc close</p></div>
+        <button type="button" onClick={closeQuickReview} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-700">Close</button>
+      </div>
+      <div className="p-6">
+        {quickReviewBusy && !quickReviewCase && !quickReviewDone ? <p className="py-10 text-center text-sm text-slate-500">Loading...</p>
+          : quickReviewDone || !quickReviewCase ? <div className="py-10 text-center"><p className="text-lg font-semibold text-slate-900">All done!</p><p className="mt-1 text-sm text-slate-500">Nothing is waiting for a decision for these filters.</p><button type="button" onClick={closeQuickReview} className="mt-5 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white">Back to the table</button></div>
+          : <>
+            <div className="rounded-xl border border-slate-200 p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div><p className="text-xl font-bold text-slate-900">{quickReviewCase.employee_name}</p><p className="text-sm text-slate-500">{quickReviewCase.employee_number}</p></div>
+                <span className="text-sm text-slate-500">{day(quickReviewCase.work_date)}</span>
+              </div>
+              {quickReviewCase.card_verified && <span className="mt-3 inline-block rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700">Card scan - gating bypassed</span>}
+              <div className="mt-4 grid grid-cols-4 gap-3 text-center">
+                <div className="rounded-lg bg-slate-50 p-3"><p className="text-xl font-bold">{quickReviewCase.entitlement}</p><p className="text-xs text-slate-500">Entitlement</p></div>
+                <div className="rounded-lg bg-slate-50 p-3"><p className="text-xl font-bold">{quickReviewCase.collected_quantity}</p><p className="text-xs text-slate-500">Collected</p></div>
+                <div className="rounded-lg bg-slate-50 p-3"><p className="text-xl font-bold">{quickReviewCase.excess_quantity}</p><p className="text-xs text-slate-500">Excess</p></div>
+                <div className="rounded-lg bg-amber-50 p-3"><p className="text-xl font-bold text-amber-800">{money(quickReviewCase.proposed_deduction)}</p><p className="text-xs text-amber-700">Deduction</p></div>
+              </div>
+            </div>
+            {quickReviewError && <p className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{quickReviewError}</p>}
+            {quickReviewReasonKind ? <div className="mt-5">
+              <textarea autoFocus disabled={quickReviewBusy} value={quickReviewReason} onChange={(event) => setQuickReviewReason(event.target.value)} className="min-h-24 w-full rounded-xl border border-slate-300 p-3 text-sm disabled:opacity-50" placeholder="Reason (optional)" />
+              <div className="mt-3 flex justify-end gap-3">
+                <button type="button" disabled={quickReviewBusy} onClick={() => { setQuickReviewReasonKind(null); setQuickReviewReason(""); }} className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold disabled:opacity-50">Back</button>
+                <button type="button" disabled={quickReviewBusy} onClick={() => void decideQuickReview(quickReviewReasonKind)} className={`rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-70 ${quickReviewReasonKind === "waive" ? "bg-slate-700" : "bg-red-600"}`}>{quickReviewBusy ? "Working..." : `Confirm ${quickReviewReasonKind === "waive" ? "Waive" : "Decline"}`}</button>
+              </div>
+            </div> : <div className="mt-5 grid grid-cols-3 gap-3">
+              <button type="button" disabled={quickReviewBusy} onClick={() => void decideQuickReview("accept")} className="rounded-xl bg-emerald-600 py-3 text-sm font-semibold text-white disabled:opacity-50">Accept <span className="opacity-70">(A)</span></button>
+              <button type="button" disabled={quickReviewBusy} onClick={() => void decideQuickReview("waive")} className="rounded-xl border border-slate-300 bg-white py-3 text-sm font-semibold text-slate-700 disabled:opacity-50">Waive <span className="opacity-60">(W)</span></button>
+              <button type="button" disabled={quickReviewBusy} onClick={() => void decideQuickReview("decline")} className="rounded-xl border border-red-200 bg-white py-3 text-sm font-semibold text-red-700 disabled:opacity-50">Decline <span className="opacity-60">(D)</span></button>
+            </div>}
+          </>}
+      </div>
+    </div>
+  </div>}
   {canReview && declineId !== null && <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/40 p-4"><div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl"><h2 className="text-xl font-bold">Decline Meal Excess</h2><p className="mt-2 text-sm text-slate-500">The ticket beyond this employee&apos;s entitlement is rejected: the vendor is not billed for it and nothing is deducted from the employee. Adding a reason is optional.</p><textarea autoFocus value={declineReason} onChange={(event) => setDeclineReason(event.target.value)} className="mt-5 min-h-24 w-full rounded-xl border border-slate-300 p-3 text-sm" placeholder="Reason (optional)" /><div className="mt-5 flex justify-end gap-3"><button type="button" onClick={() => { setDeclineId(null); setDeclineReason(""); }} className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold">Back</button><button type="button" disabled={acting} onClick={() => void declineExcess()} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white">Decline Excess</button></div></div></div>}
   {canReview && voidId !== null && <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/40 p-4"><div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl"><h2 className="text-xl font-bold">Void Meal Ticket</h2><p className="mt-2 text-sm text-slate-500">Use this for a test or accidental scan. The ticket stays on record but stops counting toward the vendor total and the employee&apos;s daily tickets. Adding a reason is optional.</p><textarea autoFocus value={voidReason} onChange={(event) => setVoidReason(event.target.value)} className="mt-5 min-h-24 w-full rounded-xl border border-slate-300 p-3 text-sm" placeholder="Reason (optional), e.g. Test scan" /><div className="mt-5 flex justify-end gap-3"><button type="button" onClick={() => { setVoidId(null); setVoidReason(""); }} className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold">Back</button><button type="button" disabled={acting} onClick={() => void voidTicket()} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white">Void Ticket</button></div></div></div>}
   {canReview && cancelId !== null && <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/40 p-4"><div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-xl"><h2 className="text-xl font-bold">Waive Meal Excess</h2><p className="mt-2 text-sm text-slate-500">No deduction is made from the employee and the vendor is still paid for the ticket - the company absorbs it. Adding a reason is optional.</p><textarea autoFocus value={reason} onChange={(event) => setReason(event.target.value)} className="mt-5 min-h-32 w-full rounded-xl border border-slate-300 p-3 text-sm" placeholder="Reason (optional)" /><div className="mt-5 flex justify-end gap-3"><button type="button" onClick={() => { setCancelId(null); setReason(""); }} className="rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold">Back</button><button type="button" disabled={acting} onClick={() => void cancel()} className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white">Waive Excess</button></div></div></div>}</div>;

@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from django.contrib.auth import get_user_model
 from django.db.models import Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -9,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from employees.models import Employee
+from notifications.services import NotificationService
 
 from .models import (
     EmployeeMealEntitlement,
@@ -32,15 +34,26 @@ from payroll.models import PayrollPeriod
 CARD_VERIFICATION_MODE = 3  # confirmed 2026-09-23: matches meals/bridge.py's CARD_VERIFICATION_MODE
 
 
-def _is_card_verified(employee_id, work_date, sequence_number):
-    """Whether the collection that produced this pending exception was a card scan - see
-    meals/bridge.py's _notify_card_gating_bypass for why that matters here."""
-    collection = (
-        MealCollection.objects.filter(employee_id=employee_id, work_date=work_date, sequence_number=sequence_number)
+def _card_verified_map(rows):
+    """Whether the collection that produced each pending exception was a card scan - see
+    meals/bridge.py's _notify_card_gating_bypass for why that matters here. One query for the
+    whole page instead of one per row."""
+    if not rows:
+        return {}
+    keys = {(x.employee_id, x.work_date, x.collected_quantity) for x in rows}
+    employee_ids = {key[0] for key in keys}
+    work_dates = {key[1] for key in keys}
+    by_key = {}
+    for collection in (
+        MealCollection.objects.filter(employee_id__in=employee_ids, work_date__in=work_dates)
         .select_related("event")
-        .first()
-    )
-    return bool(collection) and collection.event.raw_payload.get("mode") == CARD_VERIFICATION_MODE
+    ):
+        by_key[(collection.employee_id, collection.work_date, collection.sequence_number)] = collection
+    return {
+        x.pk: bool((collection := by_key.get((x.employee_id, x.work_date, x.collected_quantity))))
+        and collection.event.raw_payload.get("mode") == CARD_VERIFICATION_MODE
+        for x in rows
+    }
 
 
 class CanViewMealOperations(BasePermission):
@@ -346,6 +359,7 @@ class MealOperationsAPIView(APIView):
       status               collections: within | excess | voided | all
       decisions            pending (default) | decided | all
       page, page_size      collections, 50 per page by default, at most 200
+      exceptions_page, exceptions_page_size   decisions, 50 per page by default, at most 200
     """
 
     permission_classes = [IsAuthenticated, CanViewMealOperations]
@@ -363,6 +377,11 @@ class MealOperationsAPIView(APIView):
             page_size = min(max(int(params.get("page_size", 100 if "page" not in params and "page_size" not in params else 50)), 1), 200)
         except ValueError:
             page, page_size = 1, 100
+        try:
+            exceptions_page = max(1, int(params.get("exceptions_page", 1)))
+            exceptions_page_size = min(max(int(params.get("exceptions_page_size", 50)), 1), 200)
+        except ValueError:
+            exceptions_page, exceptions_page_size = 1, 50
 
         collections = (
             MealCollection.objects
@@ -399,7 +418,9 @@ class MealOperationsAPIView(APIView):
         in_range_within = live.filter(status="within_entitlement").count()
         in_range_total = live.count()
         exceptions_total = exceptions.count()
-        exception_rows = list(exceptions[:500])
+        exceptions_start = (exceptions_page - 1) * exceptions_page_size
+        exception_rows = list(exceptions[exceptions_start:exceptions_start + exceptions_page_size])
+        card_verified = _card_verified_map(exception_rows)
 
         # The metric cards need real, unambiguous totals for today - not something derived client-side
         # from whichever rows happen to still be in the window.
@@ -449,6 +470,8 @@ class MealOperationsAPIView(APIView):
                     for x in shown
                 ],
                 "exceptions_total": exceptions_total,
+                "exceptions_page": exceptions_page,
+                "exceptions_page_size": exceptions_page_size,
                 "exceptions": [
                     {
                         "id": x.pk,
@@ -468,7 +491,7 @@ class MealOperationsAPIView(APIView):
                         # Card verification does not respect the terminal's enable/disable state the way
                         # face verification does (confirmed 2026-09-23) - flagged so a reviewer isn't left
                         # guessing why gating didn't stop this one.
-                        "card_verified": _is_card_verified(x.employee_id, x.work_date, x.collected_quantity),
+                        "card_verified": card_verified.get(x.pk, False),
                     }
                     for x in exception_rows
                 ],
@@ -486,6 +509,94 @@ class MealExcessDeclineAPIView(APIView):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
         return Response({"id": exception.pk, "status": exception.status, "reviewer": exception.reviewer_id, "reviewed_at": exception.reviewed_at, "comment": exception.comment})
+
+
+MAX_BULK_DECISION_IDS = 300
+
+
+class MealExcessBulkDecisionAPIView(APIView):
+    """Accept/waive/decline several pending excess tickets in one request, instead of one HTTP round
+    trip per ticket. Capped per call (the frontend chunks a larger selection) so one request can't run
+    long enough to risk a proxy/worker timeout with a 2000+ case backlog."""
+
+    permission_classes = [IsAuthenticated, CanReviewMealExcess]
+
+    ACTIONS = {"accept": "approve", "waive": "cancel", "decline": "decline"}
+
+    def post(self, request):
+        action = request.data.get("action")
+        if action not in self.ACTIONS:
+            return Response({"detail": "action must be one of accept, waive, decline."}, status=400)
+        ids = request.data.get("ids")
+        if not isinstance(ids, list) or not ids:
+            return Response({"detail": "ids must be a non-empty list."}, status=400)
+        if len(ids) > MAX_BULK_DECISION_IDS:
+            return Response({"detail": f"At most {MAX_BULK_DECISION_IDS} at a time. Send this in smaller batches."}, status=400)
+
+        reason = str(request.data.get("reason", "")).strip()
+        exceptions = {x.pk: x for x in MealExcessException.objects.select_related("employee").filter(pk__in=ids)}
+
+        succeeded, failed = [], []
+        for raw_id in ids:
+            try:
+                item_id = int(raw_id)
+            except (TypeError, ValueError):
+                failed.append({"id": raw_id, "error": "Not a valid id."})
+                continue
+            exception = exceptions.get(item_id)
+            if exception is None:
+                failed.append({"id": item_id, "error": "Not found."})
+                continue
+            try:
+                if action == "accept":
+                    MealService.approve(exception, None, request.user, "")
+                elif action == "waive":
+                    MealService.cancel(exception, request.user, reason, notify=False)
+                else:
+                    MealService.decline(exception, request.user, reason, notify=False)
+                succeeded.append(item_id)
+            except ValueError as exc:
+                failed.append({"id": item_id, "error": str(exc)})
+
+        if succeeded and action in ("waive", "decline"):
+            title = "Meal excess waived (bulk)" if action == "waive" else "Meal excess declined (bulk)"
+            event_type = "meals.excess_cancelled" if action == "waive" else "meals.excess_declined"
+            message = f"{len(succeeded)} ticket(s) {'waived' if action == 'waive' else 'declined'} in bulk by {request.user.get_full_name() or request.user.username}."
+            for user in get_user_model().objects.filter(is_superuser=True):
+                NotificationService.create(recipient=user, event_type=event_type, title=title, message=message, severity="warning", related_url="/meals")
+
+        return Response({"succeeded": succeeded, "failed": failed})
+
+
+MAX_PENDING_IDS = 5000
+
+
+class MealExcessPendingIdsAPIView(APIView):
+    """Every id matching the review tab's current filters, for 'select all N across every page' - capped
+    so a runaway filter can't hand the browser more than it can sanely act on in one sitting."""
+
+    permission_classes = [IsAuthenticated, CanViewMealOperations]
+
+    def get(self, request):
+        params = request.query_params
+        date_from, date_to = _date_param(params.get("date_from")), _date_param(params.get("date_to"))
+        search = params.get("search", "").strip()
+        decisions = params.get("decisions", "pending")
+
+        exceptions = MealExcessException.objects.order_by("-work_date", "-created_at")
+        if decisions == "pending":
+            exceptions = exceptions.filter(status="pending")
+        elif decisions == "decided":
+            exceptions = exceptions.exclude(status="pending")
+        if date_from:
+            exceptions = exceptions.filter(work_date__gte=date_from)
+        if date_to:
+            exceptions = exceptions.filter(work_date__lte=date_to)
+        if search:
+            exceptions = _employee_search(exceptions, search)
+
+        ids = list(exceptions.values_list("id", flat=True)[:MAX_PENDING_IDS])
+        return Response({"ids": ids, "truncated": exceptions.count() > len(ids)})
 
 
 class MealCollectionVoidAPIView(APIView):
