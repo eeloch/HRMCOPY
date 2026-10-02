@@ -225,7 +225,10 @@ class BiometricDevice(models.Model):
     ONLINE_GRACE = timedelta(seconds=120)
 
     class Meta:
-        permissions = [("manage_devices", "Can register and manage biometric devices")]
+        permissions = [
+            ("manage_devices", "Can register and manage biometric devices"),
+            ("view_biometrics_overview", "Can view who is and is not enrolled on biometric devices"),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.serial_number}, {self.get_purpose_display()})"

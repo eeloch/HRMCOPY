@@ -13,6 +13,7 @@ MANAGED_PERMISSIONS = [
     {"codename": "change_employee", "app_label": "employees", "label": "Change employee records and status", "group": "Employees"},
     {"codename": "view_salary", "app_label": "employees", "label": "View & set employee salary", "group": "Employees"},
     {"codename": "view_bank_details", "app_label": "employees", "label": "View & set employee bank details", "group": "Employees"},
+    {"codename": "view_biometrics_overview", "app_label": "attendance", "label": "View biometrics overview (who is and is not enrolled)", "group": "Attendance"},
     {"codename": "manage_devices", "app_label": "attendance", "label": "Manage biometric devices", "group": "Attendance"},
     {"codename": "manage_shifts", "app_label": "attendance", "label": "Assign & change shifts", "group": "Attendance"},
     {"codename": "manage_roster", "app_label": "attendance", "label": "Manage work rosters", "group": "Attendance"},

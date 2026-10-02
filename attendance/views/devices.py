@@ -46,6 +46,14 @@ class CanManageDevices(BasePermission):
         return request.user.has_perm("attendance.manage_devices")
 
 
+class CanViewBiometricsOverview(BasePermission):
+    """Seeing who is enrolled is a lighter right than managing the terminals, so it has its own permission;
+    anyone who can manage devices can see it too."""
+
+    def has_permission(self, request, view):
+        return request.user.has_perm("attendance.view_biometrics_overview") or request.user.has_perm("attendance.manage_devices")
+
+
 class BiometricDeviceListCreateAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -539,7 +547,7 @@ class BiometricsOverviewAPIView(APIView):
     nobody has to track it by memory or a stale one-off count.
     """
 
-    permission_classes = [IsAuthenticated, CanManageDevices]
+    permission_classes = [IsAuthenticated, CanViewBiometricsOverview]
 
     def get(self, request):
         active_employees = (

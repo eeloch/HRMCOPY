@@ -392,3 +392,39 @@ class ForcedPasswordChangeTests(TestCase):
         self.set_must_change_password(user, True)
         client = self.login("fpc-logout", "Logout-Secret-6609")
         self.assertNotEqual(client.post("/api/auth/logout/", {}, format="json").status_code, 403)
+
+
+class BiometricsOverviewPermissionTests(TestCase):
+    """Seeing the biometrics overview is its own permission, separate from managing the devices."""
+
+    endpoint = "/api/attendance/biometrics-overview/"
+
+    def get_as(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client.get(self.endpoint)
+
+    def user_with(self, username, *codenames):
+        user = get_user_model().objects.create_user(username=username, password="pw")
+        user.user_permissions.add(*Permission.objects.filter(codename__in=codenames))
+        return user
+
+    def test_someone_with_only_the_overview_permission_can_see_it(self):
+        self.assertEqual(self.get_as(self.user_with("bio-viewer", "view_biometrics_overview")).status_code, 200)
+
+    def test_a_device_manager_can_still_see_it(self):
+        self.assertEqual(self.get_as(self.user_with("bio-manager", "manage_devices")).status_code, 200)
+
+    def test_someone_with_neither_is_refused(self):
+        self.assertEqual(self.get_as(self.user_with("bio-nobody")).status_code, 403)
+
+    def test_the_overview_permission_does_not_let_you_manage_devices(self):
+        user = self.user_with("bio-viewer-2", "view_biometrics_overview")
+        client = APIClient()
+        client.force_authenticate(user)
+        response = client.post("/api/attendance/devices/", {"name": "x", "serial_number": "X1", "location": "y", "device_type": "face"}, format="json")
+        self.assertEqual(response.status_code, 403)
+
+    def test_both_permissions_are_offered_in_settings(self):
+        self.assertIn("view_biometrics_overview", MANAGED_PERMISSION_CODENAMES)
+        self.assertIn("manage_devices", MANAGED_PERMISSION_CODENAMES)
