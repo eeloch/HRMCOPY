@@ -179,7 +179,7 @@ class ShiftPlanAssignAPIView(APIView):
         from django.utils import timezone
 
         from attendance.models import ShiftPlan, ShiftPlanAssignment
-        from attendance.services.shift_plans import assign_plan, split_groups
+        from attendance.services.shift_plans import KEEP, assign_plan, split_groups
         from employees.models import Employee
 
         plan = get_object_or_404(ShiftPlan, pk=request.data.get("plan"))
@@ -202,6 +202,10 @@ class ShiftPlanAssignAPIView(APIView):
         except ValueError:
             return Response({"detail": "The start date is not valid."}, status=status.HTTP_400_BAD_REQUEST)
         group = str(request.data.get("group", "")).upper()
+        try:
+            day_off = _parse_day_off(request.data) if "day_off" in request.data else KEEP
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
         if request.data.get("dry_run"):
             split = {"A": len(split_groups(people)[0]), "B": len(split_groups(people)[1])} if group == "SPLIT" else None
             return Response({"people": len(people), "split": split, "sample": [e.full_name for e in people[:5]]})
@@ -209,11 +213,11 @@ class ShiftPlanAssignAPIView(APIView):
             try:
                 if plan.kind in ("rotation", "alternating") and group == "SPLIT":
                     group_a, group_b = split_groups(people)
-                    _, first = assign_plan(group_a, plan, group="A", start_date=start, actor=request.user.get_username())
-                    _, second = assign_plan(group_b, plan, group="B", start_date=start, actor=request.user.get_username()) if group_b else (None, None)
+                    _, first = assign_plan(group_a, plan, group="A", start_date=start, actor=request.user.get_username(), day_off=day_off)
+                    _, second = assign_plan(group_b, plan, group="B", start_date=start, actor=request.user.get_username(), day_off=day_off) if group_b else (None, None)
                     summary = {"created": first.created + (second.created if second else 0), "updated": first.updated + (second.updated if second else 0)}
                 else:
-                    _, done = assign_plan(people, plan, group=group, start_date=start, actor=request.user.get_username())
+                    _, done = assign_plan(people, plan, group=group, start_date=start, actor=request.user.get_username(), day_off=day_off)
                     summary = {"created": done.created, "updated": done.updated}
             except ValueError as error:
                 return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
@@ -306,6 +310,7 @@ class EmployeeShiftPlanAPIView(APIView):
                 "name": assignment.plan.name,
                 "kind": assignment.plan.kind,
                 "group": assignment.group,
+                "day_off": assignment.day_off,
                 "start_date": assignment.start_date,
             } if assignment else None,
             "today": {
@@ -318,3 +323,46 @@ class EmployeeShiftPlanAPIView(APIView):
                 } if roster_today.shift else None,
             } if roster_today else None,
         })
+
+
+def _parse_day_off(data):
+    """The weekday a request names as the person's day off: 0 (Monday) to 6 (Sunday), or none ("", null, "none")."""
+    value = data.get("day_off")
+    if value in (None, "", "none"):
+        return None
+    try:
+        day = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("The day off must be a weekday from Monday to Sunday.")
+    if not 0 <= day <= 6:
+        raise ValueError("The day off must be a weekday from Monday to Sunday.")
+    return day
+
+
+class ShiftPlanDayOffAPIView(APIView):
+    """Set (or remove) people's own weekly day off from a date, keeping their shift plan. Their earlier history is
+    left alone and the roster is rebuilt from the date on."""
+
+    permission_classes = [IsAuthenticated, CanManageShifts]
+
+    def post(self, request):
+        from datetime import date
+
+        from django.utils import timezone
+
+        from attendance.services.shift_plans import set_day_off
+        from employees.models import Employee
+
+        ids = request.data.get("employee_ids") or []
+        people = list(Employee.objects.filter(pk__in=ids, status="active").order_by("employee_id"))
+        if not people:
+            return Response({"detail": "Choose at least one active employee."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            day_off = _parse_day_off(request.data)
+            start = date.fromisoformat(request.data["start_date"]) if request.data.get("start_date") else timezone.localdate()
+        except (ValueError, TypeError) as error:
+            return Response({"detail": str(error) if isinstance(error, ValueError) and "day off" in str(error) else "The start date is not valid."}, status=status.HTTP_400_BAD_REQUEST)
+        result = set_day_off(people, day_off, start, actor=request.user.get_username())
+        if result["no_plan"]:
+            return Response({"detail": f"These people are not on a shift plan yet, so a day off cannot be set: {', '.join(result['no_plan'])}. Put them on a plan first."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"people": result["people"], "roster_days_changed": result["roster"].created + result["roster"].updated, "absences_cleared": len(result["absences_cleared"]), "start_date": start})

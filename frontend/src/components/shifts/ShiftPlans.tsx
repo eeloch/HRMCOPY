@@ -31,7 +31,7 @@ export function ShiftPlans({ onChanged }: { onChanged?: () => void }) {
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
-  const [form, setForm] = useState({ plan: "", group: "split", who: "departments", departments: [] as number[], currentPlan: "", start: nextMondayISO() });
+  const [form, setForm] = useState({ plan: "", group: "split", dayOff: "keep", who: "departments", departments: [] as number[], currentPlan: "", start: nextMondayISO() });
   const [preview, setPreview] = useState<{ people: number; split: { A: number; B: number } | null; sample: string[] } | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -52,6 +52,7 @@ export function ShiftPlans({ onChanged }: { onChanged?: () => void }) {
   function body(dryRun: boolean) {
     return {
       plan: Number(form.plan), group: rotation ? form.group : "", start_date: form.start, dry_run: dryRun,
+      ...(form.dayOff !== "keep" ? { day_off: form.dayOff } : {}),
       ...(form.who === "everyone" ? { everyone: true } : form.who === "plan" ? { current_plan: Number(form.currentPlan) } : { department_ids: form.departments }),
     };
   }
@@ -150,6 +151,7 @@ export function ShiftPlans({ onChanged }: { onChanged?: () => void }) {
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <label className="text-sm font-semibold text-slate-700">Plan<select value={form.plan} onChange={(event) => { setForm({ ...form, plan: event.target.value }); setPreview(null); }} className={inputClass}><option value="">Choose a plan</option>{overview.results.map((plan) => <option key={plan.id} value={plan.id}>{plan.name}</option>)}</select></label>
                 {rotation && <label className="text-sm font-semibold text-slate-700">Group<select value={form.group} onChange={(event) => { setForm({ ...form, group: event.target.value }); setPreview(null); }} className={inputClass}><option value="split">Split evenly between A and B</option><option value="A">All in Group A</option><option value="B">All in Group B</option></select></label>}
+                <label className="text-sm font-semibold text-slate-700">Weekly day off<select value={form.dayOff} onChange={(event) => setForm({ ...form, dayOff: event.target.value })} className={inputClass}><option value="keep">Keep each person&apos;s current day off</option><option value="none">No fixed day off</option>{["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((name, index) => <option key={name} value={index}>{name}</option>)}</select></label>
                 <label className="text-sm font-semibold text-slate-700">Starting from<input type="date" value={form.start} onChange={(event) => setForm({ ...form, start: event.target.value })} className={inputClass} /></label>
               </div>
               <div className="mt-3 text-sm font-semibold text-slate-700">Who

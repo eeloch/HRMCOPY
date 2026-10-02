@@ -10,7 +10,7 @@ import { AccommodationTracker } from "@/components/accommodation/AccommodationTr
 import { EmployeeStatement } from "@/components/statements/EmployeeStatement";
 import { apiFetch, getAccessToken, getCurrentUser, type CurrentUser } from "@/lib/api";
 
-type ShiftPlanInfo = { id: number; name: string; kind: string; group: string } | null;
+type ShiftPlanInfo = { id: number; name: string; kind: string; group: string; day_off?: number | null } | null;
 
 type Employee = {
   id: number;
@@ -80,13 +80,16 @@ function csvCell(value: string | number) {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
 function shiftPlanCell(employee: Employee): { label: string; sub: string; missing: boolean } {
   const plan = employee.shift_plan;
   if (!plan) return { label: "Not assigned", sub: "", missing: true };
+  const off = plan.day_off != null ? ` · off ${DAY_NAMES[plan.day_off]}` : "";
   if (plan.kind === "rotation" || plan.kind === "alternating") {
-    return { label: plan.name, sub: `Group ${plan.group}${employee.current_shift ? ` · ${employee.current_shift.name} today` : ""}`, missing: false };
+    return { label: plan.name, sub: `Group ${plan.group}${employee.current_shift ? ` · ${employee.current_shift.name} today` : ""}${off}`, missing: false };
   }
-  return { label: plan.name, sub: employee.current_shift ? `${employee.current_shift.name}, ${employee.current_shift.start_time.slice(0, 5)}-${employee.current_shift.end_time.slice(0, 5)}` : "", missing: false };
+  return { label: plan.name, sub: `${employee.current_shift ? `${employee.current_shift.name}, ${employee.current_shift.start_time.slice(0, 5)}-${employee.current_shift.end_time.slice(0, 5)}` : ""}${off}`.replace(/^ · /, ""), missing: false };
 }
 
 export default function EmployeesPage() {

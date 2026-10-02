@@ -10,7 +10,8 @@ type Props = {
   onAssignmentChanged: () => void;
 };
 
-type PlanSummary = { id: number; name: string; kind: string; group: string; start_date: string } | null;
+type PlanSummary = { id: number; name: string; kind: string; group: string; day_off: number | null; start_date: string } | null;
+const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 type TodaySummary = { date: string; status: "work" | "rest"; shift: { name: string; start_time: string; end_time: string } | null } | null;
 type Plan = { id: number; name: string; kind: string };
 
@@ -38,7 +39,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({ plan: "", group: "", start: new Date().toISOString().slice(0, 10) });
+  const [form, setForm] = useState({ plan: "", group: "", dayOff: "none", start: new Date().toISOString().slice(0, 10) });
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
@@ -71,7 +72,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
   const needsGroup = selectedPlan?.kind === "rotation" || selectedPlan?.kind === "alternating";
 
   function openModal() {
-    setForm({ plan: plan ? String(plan.id) : "", group: plan?.group || "", start: new Date().toISOString().slice(0, 10) });
+    setForm({ plan: plan ? String(plan.id) : "", group: plan?.group || "", dayOff: plan?.day_off != null ? String(plan.day_off) : "none", start: new Date().toISOString().slice(0, 10) });
     setShowModal(true);
   }
 
@@ -84,6 +85,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
         body: JSON.stringify({
           plan: Number(form.plan),
           group: needsGroup ? form.group : "",
+          day_off: form.dayOff,
           start_date: form.start,
           employee_ids: [employee.id],
         }),
@@ -127,6 +129,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
               <>
                 <p className="mt-1 text-lg font-bold text-slate-900">{plan.name}</p>
                 {plan.group && <p className="mt-1 text-sm text-slate-600">Group {plan.group}</p>}
+                <p className="mt-1 text-sm text-slate-600">Weekly day off: <span className="font-semibold">{plan.day_off != null ? WEEKDAYS[plan.day_off] : "none set"}</span></p>
                 <p className="mt-1 text-sm text-slate-500">Effective from {formatDate(plan.start_date)}</p>
               </>
             ) : (
@@ -171,6 +174,13 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
                 </select>
               </label>
             )}
+            <label className="mt-4 block text-sm font-semibold text-slate-700">
+              Weekly day off
+              <select value={form.dayOff} onChange={(event) => setForm({ ...form, dayOff: event.target.value })} className={inputClass}>
+                <option value="none">No fixed day off (the plan&apos;s own days)</option>
+                {WEEKDAYS.map((name, index) => <option key={name} value={index}>{name}</option>)}
+              </select>
+            </label>
             <label className="mt-4 block text-sm font-semibold text-slate-700">
               Starting from
               <input type="date" value={form.start} onChange={(event) => setForm({ ...form, start: event.target.value })} className={inputClass} />

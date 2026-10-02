@@ -309,6 +309,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
             "name": assignment.plan.name,
             "kind": assignment.plan.kind,
             "group": assignment.group,
+            "day_off": assignment.day_off,
         }
 
     def get_attention_reasons(self, employee):

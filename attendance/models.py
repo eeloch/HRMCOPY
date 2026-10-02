@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -112,6 +113,9 @@ class ShiftPlanAssignment(models.Model):
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="shift_plan_assignments")
     plan = models.ForeignKey(ShiftPlan, on_delete=models.PROTECT, related_name="assignments")
     group = models.CharField(max_length=1, blank=True)  # "A" or "B" for a rotation plan
+    # The person's own weekly day off (0 = Monday ... 6 = Sunday), applied on top of whatever the plan says: that
+    # weekday is always a rest day for them. Blank means the plan's own working days apply.
+    day_off = models.PositiveSmallIntegerField(null=True, blank=True, validators=[MaxValueValidator(6)])
     start_date = models.DateField()
     end_date = models.DateField(null=True, blank=True)
     assigned_by = models.CharField(max_length=150, blank=True)

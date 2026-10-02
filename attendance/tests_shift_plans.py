@@ -8,7 +8,7 @@ from rest_framework.test import APIClient
 from employees.models import Department, Employee
 
 from .models import EmployeeRosterDay, RosterDaySource, Shift, ShiftPlan, ShiftPlanAssignment
-from .services.shift_plans import assign_plan, day_group_for_week, extend_rosters, flip_rotation_week, planned_day
+from .services.shift_plans import assign_plan, day_group_for_week, extend_rosters, flip_rotation_week, planned_day, set_day_off
 
 MONDAY = date(2026, 9, 21)  # a Monday: Group A starts on Day this week
 
@@ -348,3 +348,152 @@ class WeekdayShiftsTests(TestCase):
         call_command("setup_weekday_shifts")
         self.assertEqual(ShiftPlan.objects.filter(name=plan.name).count(), 1)
         self.assertEqual(Shift.objects.filter(name__in=["Standard Day Shift (7AM-7PM)", "Half Saturday Shift (7AM-3PM)"]).count(), 2)
+
+
+class PersonalDayOffTests(PlanTestCase):
+    """A personal weekly day off sits on top of whatever plan the person is on (2026-10-02 request)."""
+
+    WEDNESDAY = 2
+    START = date(2026, 10, 1)
+
+    def person(self, number="OFF-001"):
+        return Employee.objects.create(employee_id=number, first_name="Off", last_name="Day")
+
+    def status(self, employee, when):
+        row = EmployeeRosterDay.objects.get(employee=employee, date=when)
+        return row.status, row.shift.name if row.shift else None
+
+    def test_the_day_off_is_a_rest_day_on_a_fixed_plan_and_the_other_days_are_unchanged(self):
+        employee = self.person()
+        assign_plan([employee], self.perm_day, start_date=date(2026, 9, 28))
+        set_day_off([employee], self.WEDNESDAY, self.START)
+        self.assertEqual(self.status(employee, date(2026, 10, 7)), ("rest", None))
+        self.assertEqual(self.status(employee, date(2026, 10, 8)), ("work", "Day"))
+        self.assertEqual(self.status(employee, date(2026, 10, 14)), ("rest", None))  # every week
+
+    def test_it_works_on_the_day_night_rotation_too(self):
+        employee = self.person("OFF-002")
+        assign_plan([employee], self.rotation, group="A", start_date=date(2026, 9, 28))
+        set_day_off([employee], 3, self.START)  # Thursday
+        self.assertEqual(self.status(employee, date(2026, 10, 8))[0], "rest")
+        self.assertEqual(self.status(employee, date(2026, 10, 9))[0], "work")
+
+    def test_history_before_the_start_date_is_kept_and_the_old_assignment_is_closed(self):
+        employee = self.person("OFF-003")
+        assign_plan([employee], self.perm_day, start_date=date(2026, 9, 21))
+        set_day_off([employee], self.WEDNESDAY, self.START)
+        self.assertEqual(self.status(employee, date(2026, 9, 23)), ("work", "Day"))  # a Wednesday before the start
+        first, second = ShiftPlanAssignment.objects.filter(employee=employee).order_by("start_date")
+        self.assertEqual((first.end_date, first.day_off), (date(2026, 9, 30), None))
+        self.assertEqual((second.start_date, second.day_off, second.plan_id), (self.START, self.WEDNESDAY, self.perm_day.pk))
+
+    def test_a_false_absence_on_the_new_day_off_is_cleared_but_real_attendance_is_kept(self):
+        from django.utils import timezone
+
+        from .models import AttendanceException, DailyAttendance
+
+        absent, worked = self.person("OFF-004"), self.person("OFF-005")
+        for employee in (absent, worked):
+            assign_plan([employee], self.perm_day, start_date=date(2026, 9, 28))
+        thursday = date(2026, 10, 1)
+        missed = DailyAttendance.objects.create(employee=absent, date=thursday, status="absent", shift=self.day)
+        AttendanceException.objects.create(attendance=missed, exception_type="absence", status="pending")
+        came = DailyAttendance.objects.create(employee=worked, date=thursday, status="late", shift=self.day, late_minutes=16, actual_clock_in=timezone.make_aware(__import__("datetime").datetime(2026, 10, 1, 7, 16)))
+
+        result = set_day_off([absent, worked], 3, self.START)  # Thursday off for both
+
+        self.assertEqual(result["absences_cleared"], [("OFF-004", thursday)])
+        self.assertFalse(DailyAttendance.objects.filter(pk=missed.pk).exists())
+        self.assertFalse(AttendanceException.objects.filter(attendance_id=missed.pk).exists())
+        self.assertTrue(DailyAttendance.objects.filter(pk=came.pk).exists())
+
+    def test_the_day_off_follows_the_person_to_a_new_plan_unless_changed(self):
+        employee = self.person("OFF-006")
+        assign_plan([employee], self.perm_day, start_date=date(2026, 9, 28))
+        set_day_off([employee], self.WEDNESDAY, self.START)
+        assign_plan([employee], self.admin, start_date=date(2026, 10, 12))
+        self.assertEqual(self.status(employee, date(2026, 10, 14)), ("rest", None))
+        self.assertEqual(ShiftPlanAssignment.objects.get(employee=employee, start_date=date(2026, 10, 12)).day_off, self.WEDNESDAY)
+        assign_plan([employee], self.admin, start_date=date(2026, 10, 19), day_off=None)
+        self.assertEqual(self.status(employee, date(2026, 10, 21))[0], "work")
+
+    def test_the_day_off_can_be_removed_and_a_bad_value_is_refused(self):
+        employee = self.person("OFF-007")
+        assign_plan([employee], self.perm_day, start_date=date(2026, 9, 28))
+        set_day_off([employee], self.WEDNESDAY, self.START)
+        set_day_off([employee], None, date(2026, 10, 12))
+        self.assertEqual(self.status(employee, date(2026, 10, 7))[0], "rest")   # before the removal date
+        self.assertEqual(self.status(employee, date(2026, 10, 14))[0], "work")  # after it
+        with self.assertRaises(ValueError):
+            set_day_off([employee], 9, self.START)
+
+    def test_someone_with_no_plan_is_reported_not_guessed(self):
+        employee = self.person("OFF-008")
+        self.assertEqual(set_day_off([employee], 2, self.START)["no_plan"], ["OFF-008"])
+
+    def test_a_meal_on_a_day_off_is_not_an_entitled_meal(self):
+        from datetime import datetime
+
+        from django.utils import timezone
+
+        from meals.models import EmployeeMealEntitlement, MealCollectionStatus, MealDevice, MealExcessException, MealTicketRate
+        from meals.services import MealService
+        from employees.models import BiometricIdentity
+
+        employee = self.person("OFF-009")
+        assign_plan([employee], self.perm_day, start_date=date(2026, 9, 28))
+        set_day_off([employee], self.WEDNESDAY, self.START)
+        wednesday = date(2026, 10, 7)
+        EmployeeMealEntitlement.objects.create(employee=employee, tickets_per_work_day=2, effective_from=date(2026, 9, 1), reason="test")
+        MealTicketRate.objects.create(amount=700, effective_from=date(2026, 9, 1))
+        MealDevice.objects.create(name="Off day device", serial_number="OFFDEV1", active=True)
+        BiometricIdentity.objects.create(employee=employee, system="device", source_identifier="OFFDEV1", external_user_id="9001", is_active=True)
+        collection, _ = MealService.ingest(system="device", source_identifier="OFFDEV1", device_serial_number="OFFDEV1", external_user_id="9001", external_event_id="E-OFF-1", timestamp=timezone.make_aware(datetime(2026, 10, 7, 13, 0)))
+        self.assertEqual((collection.entitlement_snapshot, collection.status), (0, MealCollectionStatus.REST_DAY))
+        self.assertTrue(MealExcessException.objects.filter(employee=employee, work_date=wednesday).exists())  # flagged for review
+
+
+class DayOffApiTests(PlanTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = get_user_model().objects.create_user(username="dayoff-manager", password="pw")
+        self.user.user_permissions.add(Permission.objects.get(codename="manage_shifts"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.department = Department.objects.create(name="Off Dept")
+        self.employee = Employee.objects.create(employee_id="API-OFF-1", first_name="Api", last_name="Off", department=self.department)
+
+    def test_assigning_a_plan_with_a_day_off(self):
+        response = self.client.post("/api/attendance/shift-plans/assign/", {"plan": self.perm_day.pk, "employee_ids": [self.employee.pk], "start_date": "2026-10-05", "day_off": 3}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(ShiftPlanAssignment.objects.get(employee=self.employee).day_off, 3)
+        self.assertEqual(EmployeeRosterDay.objects.get(employee=self.employee, date=date(2026, 10, 8)).status, "rest")
+
+    def test_a_bad_day_off_is_refused(self):
+        response = self.client.post("/api/attendance/shift-plans/assign/", {"plan": self.perm_day.pk, "employee_ids": [self.employee.pk], "day_off": 9}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_setting_a_day_off_for_people_already_on_a_plan(self):
+        assign_plan([self.employee], self.perm_day, start_date=date(2026, 10, 1))
+        response = self.client.post("/api/attendance/shift-plans/day-off/", {"employee_ids": [self.employee.pk], "day_off": 2, "start_date": "2026-10-05"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(EmployeeRosterDay.objects.get(employee=self.employee, date=date(2026, 10, 7)).status, "rest")
+        removed = self.client.post("/api/attendance/shift-plans/day-off/", {"employee_ids": [self.employee.pk], "day_off": "none", "start_date": "2026-10-12"}, format="json")
+        self.assertEqual(removed.status_code, 200)
+        self.assertEqual(EmployeeRosterDay.objects.get(employee=self.employee, date=date(2026, 10, 14)).status, "work")
+
+    def test_someone_without_a_plan_gets_a_clear_message(self):
+        response = self.client.post("/api/attendance/shift-plans/day-off/", {"employee_ids": [self.employee.pk], "day_off": 2}, format="json")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("not on a shift plan", response.json()["detail"])
+
+    def test_it_needs_the_shift_management_permission(self):
+        plain = get_user_model().objects.create_user(username="dayoff-plain", password="pw")
+        client = APIClient()
+        client.force_authenticate(plain)
+        self.assertEqual(client.post("/api/attendance/shift-plans/day-off/", {"employee_ids": [self.employee.pk], "day_off": 2}, format="json").status_code, 403)
+
+    def test_the_employee_shift_plan_shows_the_day_off(self):
+        assign_plan([self.employee], self.perm_day, start_date=date(2026, 10, 1), day_off=1)
+        data = self.client.get(f"/api/attendance/shift-plans/for-employee/{self.employee.pk}/").json()
+        self.assertEqual(data["plan"]["day_off"], 1)
