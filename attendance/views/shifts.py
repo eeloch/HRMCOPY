@@ -305,6 +305,7 @@ class EmployeeShiftPlanAPIView(APIView):
         )
         roster_today = EmployeeRosterDay.objects.select_related("shift").filter(employee=employee, date=today).first()
         return Response({
+            "weeks": _week_shifts(employee, assignment, today),
             "plan": {
                 "id": assignment.plan_id,
                 "name": assignment.plan.name,
@@ -323,6 +324,30 @@ class EmployeeShiftPlanAPIView(APIView):
                 } if roster_today.shift else None,
             } if roster_today else None,
         })
+
+
+def _week_shifts(employee, assignment, today):
+    """For a plan whose shift changes from week to week (the Day/Night rotation, alternating shifts): which shift
+    the person works this week and next, from their written roster - so "Group A" is never mistaken for "always
+    Day". Sunday is left out, since a rotation's Sunday is the start of the next week's night shift."""
+    from datetime import timedelta
+
+    from attendance.models import EmployeeRosterDay
+    from attendance.services.shift_plans import monday_of
+
+    if assignment is None or assignment.plan.kind not in ("rotation", "alternating"):
+        return None
+    this_monday = monday_of(today)
+    weeks = {}
+    for key, monday in (("this_week", this_monday), ("next_week", this_monday + timedelta(days=7))):
+        row = (
+            EmployeeRosterDay.objects.select_related("shift")
+            .filter(employee=employee, status="work", date__range=(monday, monday + timedelta(days=5)))
+            .order_by("date")
+            .first()
+        )
+        weeks[key] = {"monday": monday, "shift": row.shift.name if row and row.shift else None}
+    return weeks if any(week["shift"] for week in weeks.values()) else None
 
 
 def _parse_day_off(data):

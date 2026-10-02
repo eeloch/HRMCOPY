@@ -497,3 +497,47 @@ class DayOffApiTests(PlanTestCase):
         assign_plan([self.employee], self.perm_day, start_date=date(2026, 10, 1), day_off=1)
         data = self.client.get(f"/api/attendance/shift-plans/for-employee/{self.employee.pk}/").json()
         self.assertEqual(data["plan"]["day_off"], 1)
+
+
+class WeekShiftsLineTests(PlanTestCase):
+    """The shift panel says which shift a rotating person works this week and next."""
+
+    def setUp(self):
+        super().setUp()
+        from django.utils import timezone
+
+        from .services.shift_plans import monday_of
+
+        self.user = get_user_model().objects.create_user(username="weeks-viewer", password="pw")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.department = Department.objects.create(name="Weeks Dept")
+        self.monday = monday_of(timezone.localdate())
+        # a rotation whose reference week is this week: Group A is on Day now and on Night next week
+        ShiftPlan.objects.filter(pk=self.rotation.pk).update(anchor_monday=self.monday)
+        self.rotation.refresh_from_db()
+
+    def person(self, number):
+        return Employee.objects.create(employee_id=number, first_name="Wk", last_name=number, department=self.department)
+
+    def weeks(self, employee):
+        return self.client.get(f"/api/attendance/shift-plans/for-employee/{employee.pk}/").json()["weeks"]
+
+    def test_a_rotating_person_sees_this_week_and_next_week(self):
+        group_a, group_b = self.person("WK-A"), self.person("WK-B")
+        assign_plan([group_a], self.rotation, group="A", start_date=self.monday)
+        assign_plan([group_b], self.rotation, group="B", start_date=self.monday)
+        a, b = self.weeks(group_a), self.weeks(group_b)
+        self.assertEqual((a["this_week"]["shift"], a["next_week"]["shift"]), ("Day", "Night"))
+        self.assertEqual((b["this_week"]["shift"], b["next_week"]["shift"]), ("Night", "Day"))
+        self.assertEqual(a["next_week"]["monday"], (self.monday + timedelta(days=7)).isoformat())
+
+    def test_a_person_on_a_fixed_plan_has_no_weekly_line(self):
+        fixed = self.person("WK-F")
+        assign_plan([fixed], self.perm_day, start_date=self.monday)
+        self.assertIsNone(self.weeks(fixed))
+
+    def test_a_rotating_person_with_the_first_day_off_still_gets_the_weeks_shift(self):
+        off = self.person("WK-O")
+        assign_plan([off], self.rotation, group="A", start_date=self.monday, day_off=0)  # Monday off
+        self.assertEqual(self.weeks(off)["this_week"]["shift"], "Day")

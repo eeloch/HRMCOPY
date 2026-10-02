@@ -14,6 +14,7 @@ type PlanSummary = { id: number; name: string; kind: string; group: string; day_
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 type TodaySummary = { date: string; status: "work" | "rest"; shift: { name: string; start_time: string; end_time: string } | null } | null;
 type Plan = { id: number; name: string; kind: string };
+type Weeks = { this_week: { monday: string; shift: string | null }; next_week: { monday: string; shift: string | null } } | null;
 
 const inputClass = "mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500";
 
@@ -35,6 +36,7 @@ function apiError(data: unknown, fallback: string) {
 export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
   const [plan, setPlan] = useState<PlanSummary>(null);
   const [today, setToday] = useState<TodaySummary>(null);
+  const [weeks, setWeeks] = useState<Weeks>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -55,6 +57,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
       const plansData = await plansResponse.json();
       setPlan(summary.plan);
       setToday(summary.today);
+      setWeeks(summary.weeks ?? null);
       setPlans((plansData.results || []).map((p: { id: number; name: string; kind: string }) => ({ id: p.id, name: p.name, kind: p.kind })));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load this employee's shift.");
@@ -129,6 +132,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
               <>
                 <p className="mt-1 text-lg font-bold text-slate-900">{plan.name}</p>
                 {plan.group && <p className="mt-1 text-sm text-slate-600">Group {plan.group}</p>}
+                {weeks && <p className="mt-1 text-sm text-slate-600">This week: <span className="font-semibold">{weeks.this_week.shift ?? "-"}</span>. Next week (from {formatDate(weeks.next_week.monday)}): <span className="font-semibold">{weeks.next_week.shift ?? "-"}</span>.</p>}
                 <p className="mt-1 text-sm text-slate-600">Weekly day off: <span className="font-semibold">{plan.day_off != null ? WEEKDAYS[plan.day_off] : "none set"}</span></p>
                 <p className="mt-1 text-sm text-slate-500">Effective from {formatDate(plan.start_date)}</p>
               </>
