@@ -16,7 +16,7 @@ from notifications.models import Notification, NotificationSeverity
 from notifications.services import NotificationService
 
 OFFLINE_AFTER = timedelta(minutes=3)
-ALERT_FROM_HOUR, ALERT_UNTIL_HOUR = 5, 22  # local time; a terminal switched off overnight is not an incident
+ALERT_FROM_HOUR, ALERT_UNTIL_HOUR = 10, 21  # local time: terminals work 10:00-21:00; outside that, being off is normal
 OFFLINE_EVENT = "meals.terminal_offline"
 BACK_EVENT = "meals.terminal_back_online"
 

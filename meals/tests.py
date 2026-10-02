@@ -2637,10 +2637,12 @@ class MealTerminalOfflineAlertTests(TestCase):
 
         self.assertEqual(self.check(self.noon), [])
 
-    def test_no_alert_overnight(self):
+    def test_no_alert_outside_working_hours(self):
         BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=self.noon - timedelta(hours=9))
 
-        self.assertEqual(self.check(timezone.make_aware(datetime(2026, 10, 2, 2, 0))), [])
+        for hour in (2, 9, 21, 23):
+            self.assertEqual(self.check(timezone.make_aware(datetime(2026, 10, 2, hour, 30))), [], hour)
+        self.assertEqual(self.check(timezone.make_aware(datetime(2026, 10, 2, 10, 0))), ["offline: Alert Meal Terminal"])
 
     def test_coming_back_resolves_the_alert_and_says_so(self):
         BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=self.noon - timedelta(minutes=10))
