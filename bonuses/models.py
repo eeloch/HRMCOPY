@@ -11,6 +11,7 @@ from payroll.models import EmployeePayroll, PayrollLineItem
 class BonusKind(models.TextChoices):
     PERFORMANCE = "performance", "Performance bonus"
     EMPLOYEE_OF_MONTH = "employee_of_month", "Employee of the Month"
+    POLICY_REWARD = "policy_reward", "Policy reward"
     OTHER = "other", "Other bonus"
 
 
@@ -39,6 +40,10 @@ class Bonus(models.Model):
     pay_year = models.PositiveSmallIntegerField()
     pay_month = models.PositiveSmallIntegerField(validators=[MinValueValidator(1), MaxValueValidator(12)])
     status = models.CharField(max_length=20, choices=BonusStatus.choices, default=BonusStatus.PROPOSED)
+    # Set when this is a reward from the Disciplinary Action Policy (e.g. "No absence"), and which time the person
+    # has earned it - that decides the first-time or second-time amount.
+    reward_type = models.ForeignKey("offences.RewardType", on_delete=models.SET_NULL, null=True, blank=True, related_name="bonuses")
+    occurrence = models.PositiveSmallIntegerField(null=True, blank=True)
 
     recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -51,6 +56,14 @@ class Bonus(models.Model):
 
     class Meta:
         ordering = ["-performance_year", "-performance_month", "-created_at"]
+        constraints = [
+            # A policy reward is earned once per person per month: re-running the automatic check can never double up.
+            models.UniqueConstraint(
+                fields=["employee", "reward_type", "performance_year", "performance_month"],
+                condition=models.Q(reward_type__isnull=False, status__in=["proposed", "approved", "paid"]),
+                name="one_policy_reward_per_person_per_month",
+            ),
+        ]
         permissions = [
             ("view_bonuses", "Can view bonuses and employees of the month"),
             ("record_bonus", "Can record bonuses and propose employees of the month"),

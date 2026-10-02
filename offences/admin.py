@@ -12,7 +12,7 @@ from employees.admin_common import (
     status_badge,
 )
 
-from .models import EmployeeOffence, EmployeeOffenceStatus, OffenceType
+from .models import EmployeeOffence, EmployeeOffenceStatus, OffenceType, RewardType
 from .services import OffenceService
 
 OFFENCE_STATUS_TONES = {
@@ -28,10 +28,10 @@ class OffenceTypeAdmin(HRAdminMixin, AuditedAdminMixin, admin.ModelAdmin):
     audit_module = "offences"
     audit_prefix = "offence_type"
 
-    list_display = ("name", "default_amount", "active", "description", "offence_count")
-    list_filter = ("active",)
-    search_fields = ("name", "description")
-    ordering = ("name",)
+    list_display = ("name", "category", "penalty_first", "penalty_second", "penalty_third", "active", "offence_count")
+    list_filter = ("category", "active")
+    search_fields = ("name", "description", "category")
+    ordering = ("sort_order", "category", "name")
 
     def audit_employee(self, obj):
         return None
@@ -42,6 +42,20 @@ class OffenceTypeAdmin(HRAdminMixin, AuditedAdminMixin, admin.ModelAdmin):
     @admin.display(description="Recorded", ordering="offences_total")
     def offence_count(self, obj):
         return obj.offences_total
+
+
+@admin.register(RewardType)
+class RewardTypeAdmin(HRAdminMixin, AuditedAdminMixin, admin.ModelAdmin):
+    audit_module = "offences"
+    audit_prefix = "reward_type"
+
+    list_display = ("name", "category", "reward_first", "reward_second", "auto_rule", "active")
+    list_filter = ("category", "auto_rule", "active")
+    search_fields = ("name", "category")
+    ordering = ("sort_order", "category", "name")
+
+    def audit_employee(self, obj):
+        return None
 
 
 @admin.register(EmployeeOffence)

@@ -10,7 +10,7 @@ from payroll.models import EmployeePayroll, PayrollPeriod
 from payroll.services import generate_payroll_for_period
 
 from .models import Bonus, BonusStatus, EmployeeOfTheMonth
-from .services import BonusService, EmployeeOfTheMonthService
+from .services import AttendanceRewardService, BonusService, EmployeeOfTheMonthService
 
 
 def user_with(name, *codenames):
@@ -170,3 +170,94 @@ class EmployeeOfTheMonthTests(TestCase):
         client.force_authenticate(self.boss)
         self.assertEqual(client.post("/api/bonuses/", {"employee": self.ada.pk, "amount": "1", "reason": "x", "performance_year": 2026, "performance_month": 9}, format="json").status_code, 403)
         self.assertEqual(client.post(f"/api/bonuses/{created.json()['id']}/approve/").json()["status"], "approved")
+
+
+class AttendanceRewardTests(TestCase):
+    """The automatic "No absence" / "No lateness" rewards from the Disciplinary Action Policy."""
+
+    def setUp(self):
+        from datetime import date
+
+        from attendance.models import DailyAttendance
+        from django.core.management import call_command
+
+        call_command("load_disciplinary_policy")
+        self.date = date
+        self.DailyAttendance = DailyAttendance
+        self.boss = user_with("reward-boss", "approve_bonus")
+        self.bystander = user_with("reward-bystander", "view_bonuses")
+        self.dept = Department.objects.create(name="Packaging")
+
+        def person(code):
+            return Employee.objects.create(employee_id=code, first_name=code, last_name="Worker", department=self.dept, employment_date=date(2025, 1, 1), basic_salary=Decimal("100000.00"))
+
+        self.perfect, self.late_once, self.absent_once, self.never_came = person("R-PERFECT"), person("R-LATE"), person("R-ABSENT"), person("R-NONE")
+        for employee, statuses in [(self.perfect, ["present"] * 3), (self.late_once, ["present", "late", "present"]), (self.absent_once, ["present", "absent", "present"])]:
+            for day, status in enumerate(statuses, start=1):
+                DailyAttendance.objects.create(employee=employee, date=date(2026, 9, day), status=status)
+
+    def run_september(self, **kwargs):
+        return AttendanceRewardService.propose_for_month(2026, 9, today=self.date(2026, 10, 2), **kwargs)
+
+    def test_each_person_gets_exactly_the_rewards_they_earned(self):
+        summary = self.run_september()
+        self.assertEqual(summary["proposed"], {"No absence": 2, "No lateness": 2})
+        got = {(b.employee.employee_id, b.reward_type.name): b.amount for b in Bonus.objects.all()}
+        self.assertEqual(got, {
+            ("R-PERFECT", "No absence"): Decimal("1000.00"), ("R-PERFECT", "No lateness"): Decimal("2000.00"),
+            ("R-LATE", "No absence"): Decimal("1000.00"), ("R-ABSENT", "No lateness"): Decimal("2000.00"),
+        })
+        self.assertFalse(Bonus.objects.filter(employee=self.never_came).exists())
+
+    def test_they_wait_for_approval_and_the_approvers_are_told_once(self):
+        from notifications.models import Notification
+
+        self.run_september()
+        self.assertEqual(set(Bonus.objects.values_list("status", flat=True)), {BonusStatus.PROPOSED})
+        mine = Notification.objects.filter(event_type="bonuses.attendance_rewards_pending")
+        self.assertEqual(mine.filter(recipient=self.boss).count(), 1)
+        self.assertEqual(mine.filter(recipient=self.bystander).count(), 0)
+        self.assertEqual(mine.get(recipient=self.boss).related_url, "/bonuses")
+
+    def test_running_it_again_never_doubles_up(self):
+        self.run_september()
+        again = self.run_september()
+        self.assertEqual(Bonus.objects.count(), 4)
+        self.assertEqual(again["already_proposed"], 4)
+
+    def test_the_second_time_pays_the_second_amount(self):
+        from attendance.models import DailyAttendance
+
+        self.run_september()
+        for day in (1, 2):
+            DailyAttendance.objects.create(employee=self.perfect, date=self.date(2026, 10, day), status="present")
+        october = AttendanceRewardService.propose_for_month(2026, 10, today=self.date(2026, 11, 2))
+        self.assertEqual(october["proposed"]["No absence"], 1)
+        second = Bonus.objects.get(employee=self.perfect, reward_type__name="No absence", performance_month=10)
+        self.assertEqual((second.occurrence, second.amount), (2, Decimal("2000.00")))
+
+    def test_a_month_that_has_not_finished_or_has_no_attendance_is_refused(self):
+        with self.assertRaises(ValueError):
+            AttendanceRewardService.propose_for_month(2026, 9, today=self.date(2026, 9, 20))
+        with self.assertRaises(ValueError):
+            AttendanceRewardService.propose_for_month(2026, 8, today=self.date(2026, 10, 2))
+
+    def test_an_approved_reward_goes_into_payroll_as_an_earning(self):
+        self.run_september()
+        bonus = Bonus.objects.get(employee=self.perfect, reward_type__name="No absence")
+        period = PayrollPeriod.objects.create(year=2026, month=9)
+        EmployeePayroll.objects.create(payroll_period=period, employee=self.perfect, basic_salary=Decimal("100000.00"), gross_earnings=Decimal("100000.00"), net_pay=Decimal("100000.00"))
+        BonusService.approve(bonus, actor=self.boss)
+        bonus.refresh_from_db()
+        self.assertEqual(bonus.status, BonusStatus.PAID)
+        self.assertEqual(bonus.payroll_line_item.description.split(" (")[0], "No absence")
+
+    def test_the_command_does_nothing_outside_the_first_days_of_a_month(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command("propose_attendance_rewards", "--month", "2026-09", "--dry-run", stdout=out)
+        self.assertIn("DRY RUN", out.getvalue())
+        self.assertEqual(Bonus.objects.count(), 0)

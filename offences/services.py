@@ -36,6 +36,36 @@ class OffenceService:
         if offence.status != EmployeeOffenceStatus.PENDING:
             raise ValueError("This offence has already been decided.")
 
+        if offence.amount <= 0:
+            # A warning, suspension, dismissal... - confirmed and on record, but nothing to take from pay.
+            offence.status = EmployeeOffenceStatus.APPROVED
+            offence.reviewer = actor
+            offence.reviewed_at = timezone.now()
+            offence.comment = comment.strip()
+            offence.save()
+            AuditService.log(
+                event_type="offences.approved",
+                module="offences",
+                employee=offence.employee,
+                actor=actor,
+                object=offence,
+                severity=AuditSeverity.SUCCESS,
+                title="Employee offence approved",
+                description="Offence confirmed. No money is deducted - the penalty is non-monetary.",
+                metadata={"offence": offence.pk, "amount": "0.00", "deducted_now": False, "penalty": offence.penalty_text},
+            )
+            if offence.recorded_by_id:
+                NotificationService.create(
+                    recipient=offence.recorded_by,
+                    event_type="offences.approved",
+                    title="Offence approved",
+                    message=f"{offence.employee.full_name}: {offence.offence_type.name} was approved. Penalty: {offence.penalty_text or 'as decided by management'} (nothing is deducted from pay).",
+                    severity=NotificationSeverity.SUCCESS,
+                    employee=offence.employee,
+                    related_url="/offences",
+                )
+            return offence
+
         period = (
             PayrollPeriod.objects
             .exclude(status__in=[
@@ -127,7 +157,7 @@ class OffenceService:
         from .models import EmployeeOffence
 
         applied = 0
-        awaiting = EmployeeOffence.objects.filter(status=EmployeeOffenceStatus.APPROVED).filter(
+        awaiting = EmployeeOffence.objects.filter(status=EmployeeOffenceStatus.APPROVED, amount__gt=0).filter(
             Q(payroll_period=period)
             | Q(payroll_period__isnull=True, incident_date__year=period.year, incident_date__month=period.month)
         ).select_related("employee", "offence_type")
@@ -192,7 +222,11 @@ class OffenceService:
                 recipient=user,
                 event_type="offences.pending",
                 title="Offence pending review",
-                message=f"{offence.employee.full_name}: {offence.offence_type.name} ({offence.amount}) awaits review.",
+                message=(
+                    f"{offence.employee.full_name}: {offence.offence_type.name} ({offence.amount}) awaits review."
+                    if offence.amount > 0
+                    else f"{offence.employee.full_name}: {offence.offence_type.name} awaits review. Penalty: {offence.penalty_text or 'to be decided'}."
+                ),
                 severity=NotificationSeverity.INFO,
                 employee=offence.employee,
                 related_url="/offences",

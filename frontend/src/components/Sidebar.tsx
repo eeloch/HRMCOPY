@@ -79,7 +79,7 @@ const menu: MenuItem[] = [
     href: "/meals",
   },
   {
-    label: "Offences",
+    label: "Offences & Rewards",
     href: "/offences",
   },
   {

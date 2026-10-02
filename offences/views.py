@@ -1,11 +1,13 @@
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import EmployeeOffence, OffenceType
-from .serializers import EmployeeOffenceSerializer, OffenceTypeSerializer
+from employees.models import Employee
+from .models import EmployeeOffence, EmployeeOffenceStatus, OffenceType, RewardType
+from .serializers import EmployeeOffenceSerializer, OffenceTypeSerializer, RewardTypeSerializer
 from .services import OffenceService
 
 
@@ -43,7 +45,7 @@ class OffenceTypeListCreateAPIView(APIView):
         return [IsAuthenticated(), permission()]
 
     def get(self, request):
-        offence_types = OffenceType.objects.order_by("name")
+        offence_types = OffenceType.objects.order_by("sort_order", "category", "name")
         return Response({
             "count": offence_types.count(),
             "results": OffenceTypeSerializer(offence_types, many=True).data,
@@ -92,17 +94,57 @@ class EmployeeOffenceListCreateAPIView(APIView):
 
     def post(self, request):
         data = request.data.copy()
-        if not data.get("amount"):
-            offence_type = get_object_or_404(OffenceType, pk=data.get("offence_type"))
-            data["amount"] = offence_type.default_amount
+        if data.get("amount") in ("", None):
+            data.pop("amount", None)
         serializer = EmployeeOffenceSerializer(data=data)
         serializer.is_valid(raise_exception=True)
-        offence = serializer.save(recorded_by=request.user)
+        offence_type = serializer.validated_data["offence_type"]
+        employee = serializer.validated_data["employee"]
+        occurrence = _occurrence_for(employee, offence_type)
+        penalty_text, tier_amount = offence_type.penalty_for(occurrence)
+        extra = {"occurrence": occurrence, "penalty_text": penalty_text}
+        if "amount" not in serializer.validated_data:
+            extra["amount"] = tier_amount or 0
+        offence = serializer.save(recorded_by=request.user, **extra)
         OffenceService.notify_reviewers_of_pending_offence(offence)
         return Response(
             EmployeeOffenceSerializer(offence).data,
             status=201,
         )
+
+
+def _occurrence_for(employee, offence_type):
+    """Which time this is: one more than the offences of this kind already logged for the person (not rejected)."""
+    earlier = EmployeeOffence.objects.filter(employee=employee, offence_type=offence_type).exclude(status=EmployeeOffenceStatus.REJECTED).count()
+    return earlier + 1
+
+
+class OffencePenaltyPreviewAPIView(APIView):
+    """What the policy says should happen if this person does this offence now - shown before it is logged."""
+
+    permission_classes = [IsAuthenticated, CanRecordOffences]
+
+    def get(self, request):
+        employee = get_object_or_404(Employee, pk=_int_or_404(request.query_params.get("employee")))
+        offence_type = get_object_or_404(OffenceType, pk=_int_or_404(request.query_params.get("offence_type")))
+        occurrence = _occurrence_for(employee, offence_type)
+        text, amount = offence_type.penalty_for(occurrence)
+        return Response({"occurrence": occurrence, "penalty_text": text, "amount": str(amount) if amount is not None else None})
+
+
+def _int_or_404(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise Http404
+
+
+class RewardTypeListAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanViewOffences]
+
+    def get(self, request):
+        rewards = RewardType.objects.order_by("sort_order", "category", "name")
+        return Response({"count": rewards.count(), "results": RewardTypeSerializer(rewards, many=True).data})
 
 
 class EmployeeOffenceApproveAPIView(APIView):

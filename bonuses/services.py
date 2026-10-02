@@ -1,10 +1,17 @@
+import calendar
+from datetime import date
 from decimal import Decimal
 
-from django.db import transaction
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from audit.models import AuditSeverity
 from audit.services import AuditService
+from notifications.models import NotificationSeverity
+from notifications.services import NotificationService
 from payroll.models import EmployeePayrollStatus, PayrollLineItem, PayrollLineItemType, PayrollPeriod, PayrollPeriodStatus
 from payroll.services import recalculate_employee_payroll
 
@@ -26,7 +33,7 @@ def _check_month(year, month, what):
 
 class BonusService:
     @staticmethod
-    def record(*, employee, amount, reason, performance_year, performance_month, pay_year=None, pay_month=None, kind=BonusKind.PERFORMANCE, actor):
+    def record(*, employee, amount, reason, performance_year, performance_month, pay_year=None, pay_month=None, kind=BonusKind.PERFORMANCE, actor, reward_type=None, occurrence=None):
         amount = Decimal(amount)
         if amount <= 0:
             raise ValueError("The bonus amount must be more than zero.")
@@ -37,7 +44,7 @@ class BonusService:
         pay_year, pay_month = pay_year or performance_year, pay_month or performance_month
         _check_month(performance_year, performance_month, "month for the good work")
         _check_month(pay_year, pay_month, "payroll month")
-        bonus = Bonus.objects.create(employee=employee, kind=kind, amount=amount, reason=reason.strip(), performance_year=performance_year, performance_month=performance_month, pay_year=pay_year, pay_month=pay_month, recorded_by=actor)
+        bonus = Bonus.objects.create(employee=employee, kind=kind, amount=amount, reason=reason.strip(), performance_year=performance_year, performance_month=performance_month, pay_year=pay_year, pay_month=pay_month, recorded_by=actor, reward_type=reward_type, occurrence=occurrence)
         BonusService._log("bonus.recorded", bonus, actor, AuditSeverity.INFO, "Bonus recorded", f"A bonus of {amount:,.2f} was recorded for {employee.full_name} for {month_label(performance_year, performance_month)}.")
         return bonus
 
@@ -99,12 +106,15 @@ class BonusService:
 
     @staticmethod
     def _apply(bonus, period, actor):
+        bonus = Bonus.objects.select_related("reward_type").get(pk=bonus.pk)
         payroll = period.employee_payrolls.select_for_update().filter(employee=bonus.employee).exclude(status__in=LOCKED_RECORD).first()
         if payroll is None or bonus.status != BonusStatus.APPROVED:
             return False
         if bonus.kind == BonusKind.EMPLOYEE_OF_MONTH:
             eotm = EmployeeOfTheMonth.objects.filter(bonus=bonus).select_related("department").first()
             title = f"Employee of the Month - {eotm.department.name}" if eotm else "Employee of the Month"
+        elif bonus.kind == BonusKind.POLICY_REWARD and bonus.reward_type_id:
+            title = bonus.reward_type.name
         else:
             title = "Performance bonus" if bonus.kind == BonusKind.PERFORMANCE else "Bonus"
         line = PayrollLineItem.objects.create(
@@ -193,3 +203,103 @@ class EmployeeOfTheMonthService:
     @staticmethod
     def _log(event, entry, actor, severity, title, description):
         AuditService.log(event_type=event, module="bonuses", employee=entry.employee, actor=actor, object=entry, severity=severity, title=title, description=description, metadata={"eotm_id": entry.pk, "department": entry.department.name, "status": entry.status})
+
+
+class AttendanceRewardService:
+    """The policy's automatic rewards: "No absence" and "No lateness" for a whole month.
+
+    Run after a month has ended (the daily attendance job calls it in the first days of the month). Everyone who
+    earned a reward gets a proposed bonus - the first-time or second-time amount from the policy - and the people who
+    approve bonuses are notified once. Nothing is paid until a person approves it in Payroll > Bonuses.
+    """
+
+    RULES = ("no_absence", "no_lateness")
+
+    @staticmethod
+    def previous_month(today=None):
+        today = today or timezone.localdate()
+        return (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+
+    @staticmethod
+    def earners(year, month):
+        """{rule: [employees]} who earned each automatic reward for that (finished) month."""
+        from attendance.models import DailyAttendance
+        from employees.models import Employee
+
+        first, last = date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1])
+        counts = {
+            row["employee_id"]: row
+            for row in DailyAttendance.objects.filter(date__range=(first, last)).values("employee_id").annotate(
+                worked=Count("id", filter=Q(status__in=["present", "late", "incomplete"])),
+                late=Count("id", filter=Q(status="late")),
+                absent=Count("id", filter=Q(status="absent")),
+            )
+        }
+        if not counts:
+            raise ValueError(f"No attendance has been processed for {month_label(year, month)} yet.")
+        employees = Employee.objects.filter(status="active").filter(Q(employment_date__isnull=True) | Q(employment_date__lte=first)).select_related("department").order_by("employee_id")
+        result = {rule: [] for rule in AttendanceRewardService.RULES}
+        for employee in employees:
+            row = counts.get(employee.pk)
+            if not row or row["worked"] < 1:
+                continue
+            if row["absent"] == 0:
+                result["no_absence"].append(employee)
+            if row["late"] == 0:
+                result["no_lateness"].append(employee)
+        return result
+
+    @staticmethod
+    def propose_for_month(year, month, *, dry_run=False, today=None):
+        from offences.models import RewardType
+
+        today = today or timezone.localdate()
+        if date(year, month, calendar.monthrange(year, month)[1]) >= today:
+            raise ValueError(f"{month_label(year, month)} has not finished yet.")
+        earners = AttendanceRewardService.earners(year, month)
+        summary = {"month": month_label(year, month), "proposed": {}, "already_proposed": 0, "missing_reward": []}
+        for rule, people in earners.items():
+            reward = RewardType.objects.filter(auto_rule=rule, active=True).first()
+            if reward is None:
+                summary["missing_reward"].append(rule)
+                continue
+            proposed = 0
+            for employee in people:
+                if Bonus.objects.filter(employee=employee, reward_type=reward, performance_year=year, performance_month=month, status__in=[BonusStatus.PROPOSED, BonusStatus.APPROVED, BonusStatus.PAID]).exists():
+                    summary["already_proposed"] += 1
+                    continue
+                earlier = Bonus.objects.filter(employee=employee, reward_type=reward).exclude(status__in=[BonusStatus.DECLINED, BonusStatus.CANCELLED]).filter(Q(performance_year__lt=year) | Q(performance_year=year, performance_month__lt=month)).count()
+                occurrence = earlier + 1
+                text, amount = reward.reward_for(occurrence)
+                if not amount:
+                    continue
+                proposed += 1
+                if dry_run:
+                    continue
+                reason = f"{reward.name} for {month_label(year, month)} - {text} ({'first' if occurrence == 1 else 'second or later'} time). Reward under the Disciplinary Action Policy."
+                try:
+                    with transaction.atomic():
+                        BonusService.record(employee=employee, amount=amount, reason=reason, performance_year=year, performance_month=month, kind=BonusKind.POLICY_REWARD, actor=None, reward_type=reward, occurrence=occurrence)
+                except IntegrityError:
+                    proposed -= 1
+                    summary["already_proposed"] += 1
+            summary["proposed"][reward.name] = proposed
+        if not dry_run and any(summary["proposed"].values()):
+            AttendanceRewardService.notify_approvers(summary)
+        return summary
+
+    @staticmethod
+    def notify_approvers(summary):
+        permission = Permission.objects.filter(content_type__app_label="bonuses", codename="approve_bonus").first()
+        approvers = get_user_model().objects.filter(is_active=True).filter(Q(is_superuser=True) | Q(user_permissions=permission) | Q(groups__permissions=permission)).distinct()
+        total = sum(summary["proposed"].values())
+        detail = ", ".join(f"{count} for \"{name}\"" for name, count in summary["proposed"].items() if count)
+        for user in approvers:
+            NotificationService.create(
+                recipient=user,
+                event_type="bonuses.attendance_rewards_pending",
+                title=f"{total} attendance reward{'s' if total != 1 else ''} awaiting approval",
+                message=f"{summary['month']}: {detail}. Review and approve them in Payroll > Bonuses.",
+                severity=NotificationSeverity.INFO,
+                related_url="/bonuses",
+            )
