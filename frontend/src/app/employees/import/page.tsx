@@ -118,6 +118,9 @@ export default function EmployeeImportPage() {
   const [importing, setImporting] =
     useState(false);
 
+  const [importSummary, setImportSummary] =
+    useState<{ created: number; updated: number; skipped: number; mealsSet: number; details: string[] } | null>(null);
+
   const [
     loadingOrganization,
     setLoadingOrganization,
@@ -297,6 +300,7 @@ export default function EmployeeImportPage() {
     setImporting(true);
     setError("");
     setImportMessage("");
+    setImportSummary(null);
 
     let importSucceeded = false;
 
@@ -373,14 +377,14 @@ export default function EmployeeImportPage() {
         if (accommodationParts.length) parts.push(`accommodation: ${accommodationParts.join(", ")}`);
       }
 
-      setImportMessage(
-        `${parts.join(", ") || "No changes were needed"}. Redirecting to Employees...`
-      );
-
-      window.setTimeout(
-        () => router.push("/employees"),
-        1200
-      );
+      setImportMessage("");
+      setImportSummary({
+        created: imported,
+        updated,
+        skipped,
+        mealsSet,
+        details: parts.filter((part) => part.startsWith("accommodation")),
+      });
 
     } catch (error) {
       console.error(error);
@@ -1378,6 +1382,45 @@ export default function EmployeeImportPage() {
 
               <div className="mt-6 bg-green-50 border border-green-200 text-green-700 rounded-xl p-4">
                 {importMessage}
+              </div>
+
+            )}
+
+            {importSummary && (
+
+              <div className="mt-6 rounded-2xl border border-green-200 bg-green-50 p-6">
+                <h3 className="text-lg font-bold text-green-900">Import complete</h3>
+                <div className="mt-4 grid grid-cols-2 gap-4 md:grid-cols-4">
+                  <div className="rounded-xl bg-white p-4 text-center shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">New employees created</p>
+                    <p className="mt-1 text-3xl font-bold text-slate-900">{importSummary.created}</p>
+                  </div>
+                  <div className="rounded-xl bg-white p-4 text-center shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Existing updated</p>
+                    <p className="mt-1 text-3xl font-bold text-slate-900">{importSummary.updated}</p>
+                  </div>
+                  <div className="rounded-xl bg-white p-4 text-center shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Meal entitlements set</p>
+                    <p className="mt-1 text-3xl font-bold text-slate-900">{importSummary.mealsSet}</p>
+                  </div>
+                  <div className="rounded-xl bg-white p-4 text-center shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Rows skipped</p>
+                    <p className="mt-1 text-3xl font-bold text-slate-900">{importSummary.skipped}</p>
+                  </div>
+                </div>
+                {importSummary.details.map((detail) => (
+                  <p key={detail} className="mt-3 text-sm text-green-900">{detail}</p>
+                ))}
+                {importSummary.created === 0 && importSummary.updated === 0 && (
+                  <p className="mt-3 text-sm text-green-900">No changes were needed.</p>
+                )}
+                <button
+                  type="button"
+                  onClick={() => router.push("/employees")}
+                  className="mt-5 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700"
+                >
+                  Go to Employees
+                </button>
               </div>
 
             )}
