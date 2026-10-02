@@ -752,10 +752,9 @@ class MealAbsencePenaltyTests(TestCase):
         self.assertEqual(excess.excess_quantity, 1)
         self.assertEqual(excess.proposed_deduction, Decimal("700.00"))
 
-    def test_no_roster_at_all_is_unscheduled_not_a_billable_excess(self):
-        """A brand-new hire with no shift plan yet has no EmployeeRosterDay row - that is
-        not the same as a declared rest day, and must not open a deduction decision for
-        something the employee didn't cause."""
+    def test_no_roster_at_all_is_unscheduled_but_still_reviewable(self):
+        """No EmployeeRosterDay row is labelled unscheduled (not a declared rest day), but
+        still opens a pending decision so it can never go unseen."""
         work_date = date(2026, 9, 7)
         device_serial_number = "MEALDEVICE004B"
         admin = get_user_model().objects.create_superuser(
@@ -799,8 +798,9 @@ class MealAbsencePenaltyTests(TestCase):
         self.assertTrue(created)
         self.assertEqual(collection.entitlement_snapshot, 0)
         self.assertEqual(collection.status, MealCollectionStatus.UNSCHEDULED)
-        self.assertIsNone(collection.excess_exception)
-        self.assertFalse(MealExcessException.objects.filter(employee=self.employee, work_date=work_date).exists())
+        decision = MealExcessException.objects.get(employee=self.employee, work_date=work_date)
+        self.assertEqual(collection.excess_exception, decision)
+        self.assertEqual(decision.status, MealExcessStatus.PENDING)
 
         notification = Notification.objects.get(event_type="meals.unscheduled_collection", recipient=admin)
         self.assertEqual(notification.employee, self.employee)

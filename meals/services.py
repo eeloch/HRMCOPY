@@ -545,10 +545,9 @@ class MealService:
             if not created: return event.collection, False
             work_date, roster = cls.resolve_work_day(identity.employee, timestamp)
             # No roster row at all (never put on a shift plan) is not the same as a roster
-            # that says REST: it's not a declared non-work day, it's that nobody has told
-            # the system this person's schedule yet. Treating it as excess would bill them
-            # for a gap that is ours to fix, not theirs - so it gets its own status and
-            # skips the billable decision entirely; see _notify_unscheduled_meal_collection.
+            # that says REST: nobody has told the system this person's schedule yet. It gets
+            # its own status so the reviewer can see why, but it still opens a decision so it
+            # is never invisible - the reviewer can Waive it for a genuine scheduling gap.
             unscheduled = roster is None
             if roster and roster.status == RosterDayStatus.WORK:
                 base_entitlement = cls.approved_entitlement(
@@ -580,7 +579,7 @@ class MealService:
             collection = MealCollection.objects.create(event=event, employee=identity.employee, work_date=work_date, shift=roster.shift if roster else None, sequence_number=sequence, entitlement_snapshot=entitlement, rate_snapshot=rate.amount, status=status)
             if unscheduled:
                 cls._notify_unscheduled_meal_collection(identity.employee, device)
-            elif sequence > entitlement:
+            if sequence > entitlement:
                 cls._cover_excess_ticket(collection, entitlement, rate.amount)
                 from .authorizations import apply_to_new_excess
 
@@ -637,8 +636,7 @@ class MealService:
     @staticmethod
     def _notify_unscheduled_meal_collection(employee, device):
         """One notification per employee per day - mirrors _notify_revoked_meal_access_attempt.
-        Flags the real fix (assign a shift plan) instead of quietly opening a billable
-        excess decision for a gap that isn't the employee's fault."""
+        Flags the real fix (assign a shift plan) alongside the excess decision."""
         from notifications.models import Notification, NotificationSeverity
 
         already_notified_today = Notification.objects.filter(
