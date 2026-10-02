@@ -77,7 +77,8 @@ class ShiftAssignment(models.Model):
 class ShiftPlan(models.Model):
     """How a group of people work across the weeks, so nobody has to be moved by hand each week.
 
-    fixed    - always the same shift on the chosen weekdays (Permanent Day, Permanent Night, Admin...).
+    fixed    - always the same shift on the chosen weekdays (Permanent Day, Permanent Night, Admin...), optionally
+               with a different shift on Saturday (half-day Saturdays).
     rotation - the Rotic weekly Day/Night rotation. Group A is on Day in the anchor week and on Night the week
                after, and so on; Group B is the opposite. In a Day week people work Monday to Saturday on Day and
                start the Night shift on Sunday 19:00; in a Night week they work Monday to Saturday nights and rest
@@ -94,6 +95,9 @@ class ShiftPlan(models.Model):
     kind = models.CharField(max_length=20, choices=KIND_CHOICES)
     description = models.CharField(max_length=255, blank=True)
     shift = models.ForeignKey(Shift, null=True, blank=True, on_delete=models.PROTECT, related_name="+")
+    # Fixed plans only: a different (usually shorter) shift on Saturday, e.g. Monday-Friday 7AM-7PM and a half
+    # Saturday 7AM-3PM. Blank means Saturday uses the same shift as every other working day.
+    saturday_shift = models.ForeignKey(Shift, null=True, blank=True, on_delete=models.PROTECT, related_name="+")
     working_weekdays = models.JSONField(default=list, blank=True)  # 0 = Monday ... 6 = Sunday (fixed plans)
     day_shift = models.ForeignKey(Shift, null=True, blank=True, on_delete=models.PROTECT, related_name="+")
     night_shift = models.ForeignKey(Shift, null=True, blank=True, on_delete=models.PROTECT, related_name="+")

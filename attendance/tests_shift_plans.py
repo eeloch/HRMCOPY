@@ -296,3 +296,55 @@ class SalesAndPlanningScheduleTests(TestCase):
         plan = ShiftPlan.objects.get(name__contains="off Tuesday")
         flip_rotation_week(plan)
         self.assertEqual(day_group_for_week(plan, date(2026, 9, 28)), "B")
+
+
+class WeekdayShiftsTests(TestCase):
+    """The shift roster of 2026-10-02: Admin plan moves to 7AM-7PM; a new Monday-Friday plan with a half Saturday."""
+
+    MONDAY_NEXT = date(2026, 10, 5)
+
+    def setUp(self):
+        from django.core.management import call_command
+
+        self.department = Department.objects.create(name="Admin")
+        self.person = Employee.objects.create(employee_id="WK-001", first_name="Ada", last_name="Test", department=self.department)
+        self.old_admin, _ = Shift.objects.get_or_create(name="Admin Shift (MON-Friday)", defaults={"start_time": time(8), "end_time": time(18)})
+        Shift.objects.filter(pk=self.old_admin.pk).update(start_time=time(8), end_time=time(18))
+        self.admin_plan, _ = ShiftPlan.objects.get_or_create(name="Admin Shift (Mon-Friday)", defaults={"kind": "fixed", "shift": self.old_admin, "working_weekdays": [0, 1, 2, 3, 4]})
+        ShiftPlan.objects.filter(pk=self.admin_plan.pk).update(shift=self.old_admin, description="")
+        assign_plan([self.person], self.admin_plan, start_date=self.MONDAY_NEXT)
+        call_command("setup_weekday_shifts")
+
+    def hours(self, employee, when):
+        row = EmployeeRosterDay.objects.get(employee=employee, date=when)
+        return (row.status, f"{row.shift.start_time:%H:%M}-{row.shift.end_time:%H:%M}") if row.shift else (row.status, None)
+
+    def test_the_admin_plan_is_now_7am_to_7pm_monday_to_friday(self):
+        self.old_admin.refresh_from_db()
+        self.assertEqual((self.old_admin.start_time, self.old_admin.end_time), (time(7), time(19)))
+        # people already on it follow automatically: their roster days point at this shift
+        self.assertEqual(self.hours(self.person, self.MONDAY_NEXT), ("work", "07:00-19:00"))
+        self.assertEqual(self.hours(self.person, date(2026, 10, 10)), ("rest", None))  # Saturday still off on this plan
+
+    def test_the_new_plan_has_a_half_saturday(self):
+        plan = ShiftPlan.objects.get(name="Mon-Fri 7AM-7PM + Half Saturday (7AM-3PM)")
+        other = Employee.objects.create(employee_id="WK-002", first_name="Bola", last_name="Test", department=self.department)
+        assign_plan([other], plan, start_date=self.MONDAY_NEXT)
+        week = [self.hours(other, self.MONDAY_NEXT + timedelta(days=offset)) for offset in range(7)]
+        self.assertEqual(week[:5], [("work", "07:00-19:00")] * 5)
+        self.assertEqual(week[5], ("work", "07:00-15:00"))  # Saturday
+        self.assertEqual(week[6], ("rest", None))  # Sunday
+
+    def test_a_plan_without_a_saturday_shift_is_unchanged(self):
+        plan = ShiftPlan.objects.create(name="Plain six days", kind="fixed", shift=self.old_admin, working_weekdays=[0, 1, 2, 3, 4, 5])
+        status, shift = planned_day(plan, "", date(2026, 10, 10))
+        self.assertEqual((status, shift), ("work", self.old_admin))
+
+    def test_nobody_is_assigned_to_the_new_plan_and_running_again_changes_nothing(self):
+        from django.core.management import call_command
+
+        plan = ShiftPlan.objects.get(name="Mon-Fri 7AM-7PM + Half Saturday (7AM-3PM)")
+        self.assertEqual(plan.assignments.count(), 0)
+        call_command("setup_weekday_shifts")
+        self.assertEqual(ShiftPlan.objects.filter(name=plan.name).count(), 1)
+        self.assertEqual(Shift.objects.filter(name__in=["Standard Day Shift (7AM-7PM)", "Half Saturday Shift (7AM-3PM)"]).count(), 2)

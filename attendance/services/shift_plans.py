@@ -30,7 +30,11 @@ def day_group_for_week(plan, monday):
 def planned_day(plan, group, day):
     """What a plan says about one date: (status, shift)."""
     if plan.kind == "fixed":
-        return (RosterDayStatus.WORK, plan.shift) if day.weekday() in (plan.working_weekdays or []) else (RosterDayStatus.REST, None)
+        if day.weekday() not in (plan.working_weekdays or []):
+            return RosterDayStatus.REST, None
+        if day.weekday() == 5 and plan.saturday_shift_id:
+            return RosterDayStatus.WORK, plan.saturday_shift
+        return RosterDayStatus.WORK, plan.shift
     if plan.kind == "alternating":
         if day.weekday() not in (plan.working_weekdays or []):
             return RosterDayStatus.REST, None
@@ -143,7 +147,7 @@ def extend_rosters(today=None, horizon_days=HORIZON_DAYS):
     today = today or timezone.localdate()
     end = today + timedelta(days=horizon_days)
     assignments = (
-        ShiftPlanAssignment.objects.select_related("plan", "plan__shift", "plan__day_shift", "plan__night_shift")
+        ShiftPlanAssignment.objects.select_related("plan", "plan__shift", "plan__saturday_shift", "plan__day_shift", "plan__night_shift")
         .filter(employee__status="active", plan__active=True, start_date__lte=end)
         .filter(Q(end_date__isnull=True) | Q(end_date__gte=today))
     )

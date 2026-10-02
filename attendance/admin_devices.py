@@ -746,7 +746,7 @@ class ShiftPlanAdmin(admin.ModelAdmin):
     list_display = ("name", "kind", "shifts", "days", "anchor", "active", "people_now")
     list_filter = ("kind", "active")
     search_fields = ("name", "description")
-    autocomplete_fields = ("shift", "day_shift", "night_shift")
+    autocomplete_fields = ("shift", "saturday_shift", "day_shift", "night_shift")
     ordering = ("name",)
 
     def get_queryset(self, request):
@@ -761,6 +761,8 @@ class ShiftPlanAdmin(admin.ModelAdmin):
             return f"Day: {obj.day_shift.name if obj.day_shift else '?'} / Night: {obj.night_shift.name if obj.night_shift else '?'}"
         if obj.kind == "alternating":
             return f"{obj.day_shift.name if obj.day_shift else '?'} <-> {obj.night_shift.name if obj.night_shift else '?'}"
+        if obj.saturday_shift:
+            return f"{obj.shift.name if obj.shift else '?'}; Saturday: {obj.saturday_shift.name}"
         return obj.shift.name if obj.shift else "?"
 
     @admin.display(description="Working days")

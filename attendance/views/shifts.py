@@ -151,11 +151,11 @@ class ShiftPlanListAPIView(APIView):
         current = ShiftPlanAssignment.objects.filter(employee__status="active", start_date__lte=today).filter(Q(end_date__isnull=True) | Q(end_date__gte=today))
         counts = {row["plan"]: row for row in current.values("plan").annotate(total=Count("id"), a=Count("id", filter=Q(group="A")), b=Count("id", filter=Q(group="B")))}
         results = []
-        for plan in ShiftPlan.objects.select_related("shift", "day_shift", "night_shift").order_by("id"):
+        for plan in ShiftPlan.objects.select_related("shift", "saturday_shift", "day_shift", "night_shift").order_by("id"):
             row = counts.get(plan.pk, {})
             item = {"id": plan.pk, "name": plan.name, "kind": plan.kind, "description": plan.description, "active": plan.active,
                     "members": row.get("total", 0), "group_a": row.get("a", 0), "group_b": row.get("b", 0),
-                    "shift": plan.shift.name if plan.shift else None, "working_weekdays": plan.working_weekdays}
+                    "shift": plan.shift.name if plan.shift else None, "saturday_shift": plan.saturday_shift.name if plan.saturday_shift else None, "working_weekdays": plan.working_weekdays}
             if plan.kind in ("rotation", "alternating") and plan.anchor_monday:
                 monday = monday_of(today)
                 item["this_week"] = {"monday": monday, "day_group": day_group_for_week(plan, monday), "next_monday": monday + timedelta(days=7), "next_day_group": day_group_for_week(plan, monday + timedelta(days=7))}
