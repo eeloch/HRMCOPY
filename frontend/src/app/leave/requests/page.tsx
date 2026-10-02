@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { LeaveShell } from "@/components/leave/LeaveShell";
 import type { LeaveRequest, ListResponse } from "@/components/leave/types";
 import { PageHeader, Section, StatusBadge } from "@/components/ui";
-import { apiFetch, getAccessToken } from "@/lib/api";
+import { apiFetch, getAccessToken, getCurrentUser } from "@/lib/api";
 import { useRouter } from "next/navigation";
 
 export default function LeaveRequestsPage() {
@@ -17,6 +17,7 @@ export default function LeaveRequestsPage() {
   const [status, setStatus] = useState("");
   const [cancellingId, setCancellingId] = useState<number | null>(null);
   const [actionError, setActionError] = useState("");
+  const [canRaise, setCanRaise] = useState(false);
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -24,6 +25,9 @@ export default function LeaveRequestsPage() {
       return;
     }
     void loadRequests();
+    getCurrentUser()
+      .then((user) => setCanRaise(user.is_superuser || user.permissions.raise_leave_request))
+      .catch(() => {});
   }, [router]);
 
   async function loadRequests() {
@@ -70,7 +74,7 @@ export default function LeaveRequestsPage() {
       <PageHeader
         title="My Leave Requests"
         description="Track submitted leave requests and their current status."
-        actions={<button onClick={() => router.push("/leave/new")} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">Request Leave</button>}
+        actions={canRaise ? <button onClick={() => router.push("/leave/new")} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">Request Leave</button> : undefined}
       />
       {error ? <ErrorPanel message={error} retry={loadRequests} /> : (
         <Section title="Requests" subtitle="Search and filter your leave request history." actions={<button onClick={() => void loadRequests()} className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">Refresh</button>}>

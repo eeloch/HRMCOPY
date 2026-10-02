@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import Sidebar from "@/components/Sidebar";
+import { getCurrentUser } from "@/lib/api";
 
 const links = [
   { href: "/leave", label: "Dashboard" },
@@ -17,13 +18,22 @@ const links = [
 
 export function LeaveShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const [canRaise, setCanRaise] = useState(false);
+
+  useEffect(() => {
+    getCurrentUser()
+      .then((user) => setCanRaise(user.is_superuser || user.permissions.raise_leave_request))
+      .catch(() => {});
+  }, []);
+
+  const visibleLinks = links.filter((link) => link.href !== "/leave/new" || canRaise);
 
   return (
     <div className="min-h-screen bg-slate-100">
       <Sidebar />
       <main className="ml-64 min-w-0 p-4 md:p-8">
         <nav className="mb-8 flex gap-2 overflow-x-auto pb-1" aria-label="Leave navigation">
-          {links.map((link) => {
+          {visibleLinks.map((link) => {
             const active = pathname === link.href;
             return (
               <Link

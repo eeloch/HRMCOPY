@@ -175,6 +175,7 @@ class LeaveRequest(models.Model):
         ordering = ["-created_at"]
         permissions = [
             ("approve_leave", "Can approve leave requests"),
+            ("raise_leave_request", "Can raise leave requests for employees"),
         ]
 
     def __str__(self):

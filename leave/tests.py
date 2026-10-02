@@ -87,7 +87,10 @@ class LeaveRequestDurationTests(TestCase):
         self.assertIn("date_range", result["errors"])
 
     def test_api_ignores_a_client_supplied_total_days(self):
+        from django.contrib.auth.models import Permission
+
         user = get_user_model().objects.create_user("leave-requester", password="password")
+        user.user_permissions.add(Permission.objects.get(codename="raise_leave_request"))
         client = APIClient()
         client.force_authenticate(user)
 
@@ -224,3 +227,45 @@ class LeaveCancelTests(TestCase):
         client.force_authenticate(self.requester)
         client.post(f"/api/leave/requests/{self.request.pk}/cancel/", {}, format="json")
         self.assertFalse(Notification.objects.filter(recipient=self.requester, event_type="leave.cancelled").exists())
+
+
+class RaiseLeaveRequestPermissionTests(TestCase):
+    """Only users who have been granted "Raise leave requests for employees" can raise a request."""
+
+    def setUp(self):
+        from django.contrib.auth.models import Permission
+
+        self.employee = Employee.objects.create(employee_id="RAISE-001", first_name="Rai", last_name="Se", employment_type=EmploymentType.PERMANENT)
+        self.leave_type = LeaveType.objects.create(name="Raise Annual", code="RAISE-ANNUAL")
+        LeavePolicy.objects.create(leave_type=self.leave_type, employment_type=EmploymentType.PERMANENT, allocated_days=Decimal("15.00"))
+        self.granted = get_user_model().objects.create_user(username="raise-granted", password="pw")
+        self.granted.user_permissions.add(Permission.objects.get(codename="raise_leave_request"))
+        self.approver_only = get_user_model().objects.create_user(username="raise-approver", password="pw")
+        self.approver_only.user_permissions.add(Permission.objects.get(codename="approve_leave"))
+        self.payload = {
+            "employee_id": self.employee.pk, "leave_type_id": self.leave_type.pk,
+            "start_date": "2026-11-02", "end_date": "2026-11-03", "reason": "Family matter.",
+        }
+
+    def post_as(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client.post("/api/leave/request/", self.payload, format="json")
+
+    def test_a_user_without_the_permission_is_refused(self):
+        plain = get_user_model().objects.create_user(username="raise-plain", password="pw")
+        self.assertEqual(self.post_as(plain).status_code, 403)
+        self.assertEqual(self.post_as(self.approver_only).status_code, 403)
+
+    def test_a_granted_user_can_raise_a_request(self):
+        response = self.post_as(self.granted)
+        self.assertEqual(response.status_code, 201, response.data)
+
+    def test_a_superuser_can_raise_a_request(self):
+        admin = get_user_model().objects.create_superuser(username="raise-admin", email="raise@example.com", password="pw")
+        self.assertEqual(self.post_as(admin).status_code, 201)
+
+    def test_the_permission_is_offered_in_settings(self):
+        from core.permissions_registry import MANAGED_PERMISSION_CODENAMES
+
+        self.assertIn("raise_leave_request", MANAGED_PERMISSION_CODENAMES)

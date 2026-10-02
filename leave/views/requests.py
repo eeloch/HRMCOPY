@@ -1,7 +1,7 @@
 from django.shortcuts import get_object_or_404
 
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -12,8 +12,15 @@ from audit.models import AuditSeverity
 from audit.services import AuditService
 
 
+class CanRaiseLeaveRequest(BasePermission):
+    message = "You don't have permission to raise leave requests."
+
+    def has_permission(self, request, view):
+        return request.user.has_perm("leave.raise_leave_request")
+
+
 class LeaveRequestCreateAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, CanRaiseLeaveRequest]
 
     def post(self, request):
         serializer = LeaveRequestCreateSerializer(data=request.data)
