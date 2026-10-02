@@ -7,6 +7,7 @@ from .views import (
     OffenceTypeDetailAPIView,
     OffencePenaltyPreviewAPIView,
     OffenceTypeListCreateAPIView,
+    RewardTypeDetailAPIView,
     RewardTypeListAPIView,
 )
 
@@ -23,6 +24,7 @@ urlpatterns = [
     ),
     path("penalty-preview/", OffencePenaltyPreviewAPIView.as_view(), name="offence-penalty-preview"),
     path("reward-types/", RewardTypeListAPIView.as_view(), name="reward-types"),
+    path("reward-types/<int:pk>/", RewardTypeDetailAPIView.as_view(), name="reward-type-detail"),
     path(
         "",
         EmployeeOffenceListCreateAPIView.as_view(),

@@ -15,13 +15,23 @@ class OffenceTypeSerializer(serializers.ModelSerializer):
         )
         extra_kwargs = {"default_amount": {"required": False}}
 
+    def update(self, instance, validated_data):
+        offence_type = super().update(instance, validated_data)
+        if "amount_first" in validated_data:
+            # The standard amount is the first-time amount; keep the two in step.
+            offence_type.default_amount = offence_type.amount_first or 0
+            offence_type.save(update_fields=["default_amount"])
+        return offence_type
+
 
 class RewardTypeSerializer(serializers.ModelSerializer):
+    # "auto_rule" decides which reward the monthly attendance check proposes, so it is not editable here.
     auto_rule_label = serializers.CharField(source="get_auto_rule_display", read_only=True)
 
     class Meta:
         model = RewardType
         fields = ("id", "category", "name", "reward_first", "reward_second", "amount_first", "amount_second", "auto_rule", "auto_rule_label", "sort_order", "active")
+        read_only_fields = ("auto_rule",)
 
 
 class EmployeeOffenceSerializer(serializers.ModelSerializer):

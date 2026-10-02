@@ -7,6 +7,8 @@ from rest_framework.views import APIView
 
 from employees.models import Employee
 from .models import EmployeeOffence, EmployeeOffenceStatus, OffenceType, RewardType
+from audit.models import AuditSeverity
+from audit.services import AuditService
 from .serializers import EmployeeOffenceSerializer, OffenceTypeSerializer, RewardTypeSerializer
 from .services import OffenceService
 
@@ -60,14 +62,57 @@ class OffenceTypeListCreateAPIView(APIView):
         )
 
 
+POLICY_FIELDS = {
+    "offence": ("category", "name", "penalty_first", "penalty_second", "penalty_third", "amount_first", "amount_second", "amount_third", "active"),
+    "reward": ("category", "name", "reward_first", "reward_second", "amount_first", "amount_second", "active"),
+}
+
+
+def _log_policy_change(request, kind, instance, before):
+    """Who changed which penalty or amount in the policy, from what to what - these set what staff are fined or paid."""
+    changes = {
+        field: {"from": str(before[field]) if before[field] is not None else None, "to": str(getattr(instance, field)) if getattr(instance, field) is not None else None}
+        for field in POLICY_FIELDS[kind]
+        if before[field] != getattr(instance, field)
+    }
+    if not changes:
+        return
+    AuditService.log(
+        event_type=f"offences.{kind}_policy_changed",
+        module="offences",
+        actor=request.user,
+        object=instance,
+        severity=AuditSeverity.WARNING,
+        title=f"{'Offence' if kind == 'offence' else 'Reward'} policy changed",
+        description=f"{instance.name}: " + ", ".join(f"{field.replace('_', ' ')}" for field in changes) + " changed.",
+        metadata={"id": instance.pk, "name": instance.name, "changes": changes},
+    )
+
+
 class OffenceTypeDetailAPIView(APIView):
     permission_classes = [IsAuthenticated, CanManageOffenceConfiguration]
 
     def patch(self, request, pk):
         offence_type = get_object_or_404(OffenceType, pk=pk)
+        before = {field: getattr(offence_type, field) for field in POLICY_FIELDS["offence"]}
         serializer = OffenceTypeSerializer(offence_type, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        return Response(OffenceTypeSerializer(serializer.save()).data)
+        saved = serializer.save()
+        _log_policy_change(request, "offence", saved, before)
+        return Response(OffenceTypeSerializer(saved).data)
+
+
+class RewardTypeDetailAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanManageOffenceConfiguration]
+
+    def patch(self, request, pk):
+        reward_type = get_object_or_404(RewardType, pk=pk)
+        before = {field: getattr(reward_type, field) for field in POLICY_FIELDS["reward"]}
+        serializer = RewardTypeSerializer(reward_type, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        saved = serializer.save()
+        _log_policy_change(request, "reward", saved, before)
+        return Response(RewardTypeSerializer(saved).data)
 
 
 class EmployeeOffenceListCreateAPIView(APIView):

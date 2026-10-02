@@ -165,3 +165,61 @@ class DisciplinaryPolicyTests(TestCase):
         response = self.client.get("/api/offences/reward-types/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["count"], 19)
+
+
+class EditPolicyAmountsTests(TestCase):
+    """Only people with the configuration permission can change the standard penalties and amounts, and it is audited."""
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Permission
+
+        from .models import RewardType
+
+        self.offence = OffenceType.objects.create(category="Attendance", name="Late arrival", penalty_first="₦300", penalty_second="₦300", penalty_third="₦500", amount_first=300, amount_second=300, amount_third=500, default_amount=300)
+        self.reward = RewardType.objects.create(category="Attendance and Punctuality", name="No absence", reward_first="₦1,000", reward_second="₦2,000", amount_first=1000, amount_second=2000, auto_rule="no_absence")
+        self.configurer = get_user_model().objects.create_user(username="policy-configurer", password="pw")
+        self.configurer.user_permissions.add(Permission.objects.get(codename="manage_offence_configuration"))
+        self.recorder = get_user_model().objects.create_user(username="policy-recorder", password="pw")
+        self.recorder.user_permissions.add(Permission.objects.get(codename="record_employee_offences"))
+
+    def patch(self, user, path, body):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client.patch(path, body, format="json")
+
+    def test_a_configurer_can_change_an_offence_penalty_and_the_standard_amount_follows(self):
+        response = self.patch(self.configurer, f"/api/offences/types/{self.offence.pk}/", {"penalty_first": "₦400", "amount_first": "400.00"})
+        self.assertEqual(response.status_code, 200)
+        self.offence.refresh_from_db()
+        self.assertEqual((self.offence.amount_first, self.offence.default_amount), (400, 400))
+
+    def test_someone_who_can_only_record_offences_cannot_change_the_policy(self):
+        self.assertEqual(self.patch(self.recorder, f"/api/offences/types/{self.offence.pk}/", {"amount_first": "1.00"}).status_code, 403)
+        self.assertEqual(self.patch(self.recorder, f"/api/offences/reward-types/{self.reward.pk}/", {"amount_first": "1.00"}).status_code, 403)
+        self.offence.refresh_from_db()
+        self.assertEqual(self.offence.amount_first, 300)
+
+    def test_a_configurer_can_change_a_reward_amount_which_the_automatic_rewards_then_use(self):
+        response = self.patch(self.configurer, f"/api/offences/reward-types/{self.reward.pk}/", {"reward_first": "₦1,500", "amount_first": "1500.00"})
+        self.assertEqual(response.status_code, 200)
+        self.reward.refresh_from_db()
+        self.assertEqual(self.reward.reward_for(1), ("₦1,500", 1500))
+
+    def test_the_automatic_rule_cannot_be_changed_from_the_page(self):
+        self.patch(self.configurer, f"/api/offences/reward-types/{self.reward.pk}/", {"auto_rule": ""})
+        self.reward.refresh_from_db()
+        self.assertEqual(self.reward.auto_rule, "no_absence")
+
+    def test_a_negative_amount_is_refused(self):
+        self.assertEqual(self.patch(self.configurer, f"/api/offences/types/{self.offence.pk}/", {"amount_first": "-5"}).status_code, 400)
+
+    def test_every_change_is_written_to_the_audit_trail_with_before_and_after(self):
+        from audit.models import AuditEvent
+
+        self.patch(self.configurer, f"/api/offences/types/{self.offence.pk}/", {"amount_first": "450.00"})
+        event = AuditEvent.objects.get(event_type="offences.offence_policy_changed")
+        self.assertEqual(event.actor, self.configurer)
+        self.assertEqual(event.metadata["changes"]["amount_first"], {"from": "300.00", "to": "450.00"})
+        self.patch(self.configurer, f"/api/offences/types/{self.offence.pk}/", {"amount_first": "450.00"})
+        self.assertEqual(AuditEvent.objects.filter(event_type="offences.offence_policy_changed").count(), 1)  # no change, no entry
