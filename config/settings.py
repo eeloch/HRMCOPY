@@ -224,6 +224,8 @@ REST_FRAMEWORK = {
         "login": os.environ.get("DJANGO_LOGIN_THROTTLE_RATE", "5/min"),
         # Per account, whatever address the attempts come from (password guessing against one username).
         "login_user": os.environ.get("DJANGO_LOGIN_USER_THROTTLE_RATE", "20/hour"),
+        # Guessing the current password from a stolen session.
+        "change_password": os.environ.get("DJANGO_CHANGE_PASSWORD_THROTTLE_RATE", "10/hour"),
     },
     # The app only ever sits behind one proxy (nginx), which appends the real client address to X-Forwarded-For.
     # Trusting exactly that last entry means a client cannot dodge the login throttle by sending its own header.

@@ -8,6 +8,7 @@ from rest_framework_simplejwt.views import (
 )
 
 from core.views import (
+    ChangePasswordAPIView,
     CurrentUserAPIView,
     LogoutAPIView,
     ThrottledTokenObtainPairView,
@@ -39,6 +40,12 @@ urlpatterns = [
         "api/auth/logout/",
         LogoutAPIView.as_view(),
         name="token_logout",
+    ),
+
+    path(
+        "api/auth/change-password/",
+        ChangePasswordAPIView.as_view(),
+        name="change_password",
     ),
 
     path(

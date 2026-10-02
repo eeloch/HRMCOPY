@@ -250,6 +250,13 @@ export default function Sidebar() {
 
       <div className="p-4 border-t border-slate-800 shrink-0">
 
+        <Link
+          href="/account/password"
+          className={`block w-full text-left px-4 py-3 rounded-lg hover:bg-slate-800 ${pathname === "/account/password" ? "bg-slate-800 text-white" : "text-slate-300"}`}
+        >
+          Change Password
+        </Link>
+
         <button
           onClick={logout}
           className="w-full text-left px-4 py-3 rounded-lg text-slate-300 hover:bg-slate-800"

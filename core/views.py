@@ -3,6 +3,8 @@ import secrets
 import string
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.contrib.auth.models import Group, Permission
 from rest_framework import status
 from rest_framework.permissions import BasePermission, IsAuthenticated
@@ -60,6 +62,30 @@ class LogoutAPIView(APIView):
         except TokenError:
             return Response({"detail": "Token is invalid or already blacklisted."}, status=status.HTTP_400_BAD_REQUEST)
         return Response(status=status.HTTP_205_RESET_CONTENT)
+
+
+class ChangePasswordAPIView(APIView):
+    """Any signed-in user changing their own password (accounts start on a generated temporary one)."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "change_password"
+
+    def post(self, request):
+        current_password = request.data.get("current_password") or ""
+        new_password = request.data.get("new_password") or ""
+        user = request.user
+        if not user.check_password(current_password):
+            return Response({"detail": "Your current password is not correct."}, status=status.HTTP_400_BAD_REQUEST)
+        if new_password == current_password:
+            return Response({"detail": "Choose a password different from your current one."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_password(new_password, user)
+        except ValidationError as error:
+            return Response({"detail": " ".join(error.messages)}, status=status.HTTP_400_BAD_REQUEST)
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+        return Response({"detail": "Your password has been changed."})
 
 
 class CurrentUserAPIView(APIView):

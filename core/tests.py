@@ -303,3 +303,39 @@ class RoleGroupPermissionTests(TestCase):
         self.client.patch(f"/api/auth/users/{self.user.pk}/", {"permissions": []}, format="json")
         self.assertEqual(list(self.user.groups.values_list("name", flat=True)), ["Payroll Officer"])
 
+
+
+class ChangePasswordTests(TestCase):
+    endpoint = "/api/auth/change-password/"
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.user = get_user_model().objects.create_user(username="pw-user", password="Temporary-Pass-482")
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def change(self, current, new):
+        return self.client.post(self.endpoint, {"current_password": current, "new_password": new}, format="json")
+
+    def test_a_user_can_change_their_own_password(self):
+        response = self.change("Temporary-Pass-482", "Brand-New-Secret-731")
+        self.assertEqual(response.status_code, 200)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("Brand-New-Secret-731"))
+
+    def test_the_wrong_current_password_is_refused(self):
+        response = self.change("not-it", "Brand-New-Secret-731")
+        self.assertEqual(response.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("Temporary-Pass-482"))
+
+    def test_a_weak_or_unchanged_password_is_refused(self):
+        self.assertEqual(self.change("Temporary-Pass-482", "12345678").status_code, 400)
+        self.assertEqual(self.change("Temporary-Pass-482", "short").status_code, 400)
+        self.assertEqual(self.change("Temporary-Pass-482", "Temporary-Pass-482").status_code, 400)
+
+    def test_it_needs_a_signed_in_user(self):
+        from rest_framework.test import APIClient
+
+        self.assertEqual(APIClient().post(self.endpoint, {}, format="json").status_code, 401)
