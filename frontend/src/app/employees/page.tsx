@@ -83,7 +83,7 @@ function csvCell(value: string | number) {
 function shiftPlanCell(employee: Employee): { label: string; sub: string; missing: boolean } {
   const plan = employee.shift_plan;
   if (!plan) return { label: "Not assigned", sub: "", missing: true };
-  if (plan.kind === "rotation") {
+  if (plan.kind === "rotation" || plan.kind === "alternating") {
     return { label: plan.name, sub: `Group ${plan.group}${employee.current_shift ? ` · ${employee.current_shift.name} today` : ""}`, missing: false };
   }
   return { label: plan.name, sub: employee.current_shift ? `${employee.current_shift.name}, ${employee.current_shift.start_time.slice(0, 5)}-${employee.current_shift.end_time.slice(0, 5)}` : "", missing: false };

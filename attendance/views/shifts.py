@@ -156,7 +156,7 @@ class ShiftPlanListAPIView(APIView):
             item = {"id": plan.pk, "name": plan.name, "kind": plan.kind, "description": plan.description, "active": plan.active,
                     "members": row.get("total", 0), "group_a": row.get("a", 0), "group_b": row.get("b", 0),
                     "shift": plan.shift.name if plan.shift else None, "working_weekdays": plan.working_weekdays}
-            if plan.kind == "rotation" and plan.anchor_monday:
+            if plan.kind in ("rotation", "alternating") and plan.anchor_monday:
                 monday = monday_of(today)
                 item["this_week"] = {"monday": monday, "day_group": day_group_for_week(plan, monday), "next_monday": monday + timedelta(days=7), "next_day_group": day_group_for_week(plan, monday + timedelta(days=7))}
             results.append(item)
@@ -207,7 +207,7 @@ class ShiftPlanAssignAPIView(APIView):
             return Response({"people": len(people), "split": split, "sample": [e.full_name for e in people[:5]]})
         with transaction.atomic():
             try:
-                if plan.kind == "rotation" and group == "SPLIT":
+                if plan.kind in ("rotation", "alternating") and group == "SPLIT":
                     group_a, group_b = split_groups(people)
                     _, first = assign_plan(group_a, plan, group="A", start_date=start, actor=request.user.get_username())
                     _, second = assign_plan(group_b, plan, group="B", start_date=start, actor=request.user.get_username()) if group_b else (None, None)

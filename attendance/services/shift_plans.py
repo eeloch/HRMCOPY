@@ -31,6 +31,11 @@ def planned_day(plan, group, day):
     """What a plan says about one date: (status, shift)."""
     if plan.kind == "fixed":
         return (RosterDayStatus.WORK, plan.shift) if day.weekday() in (plan.working_weekdays or []) else (RosterDayStatus.REST, None)
+    if plan.kind == "alternating":
+        if day.weekday() not in (plan.working_weekdays or []):
+            return RosterDayStatus.REST, None
+        first_this_week = day_group_for_week(plan, monday_of(day)) == group
+        return RosterDayStatus.WORK, (plan.day_shift if first_this_week else plan.night_shift)
     on_day_this_week = day_group_for_week(plan, monday_of(day)) == group
     if day.weekday() < 6:  # Monday to Saturday: the week's shift
         return RosterDayStatus.WORK, (plan.day_shift if on_day_this_week else plan.night_shift)
@@ -106,10 +111,12 @@ def split_groups(people):
 def assign_plan(employees, plan, *, group="", start_date=None, actor=""):
     """Put these people on a plan from start_date. A person's earlier assignment is closed the day before, and the
     generated roster from start_date on is rewritten to follow the new plan (manual days are kept)."""
-    if plan.kind == "rotation" and group not in ("A", "B"):
+    if plan.kind in ("rotation", "alternating") and group not in ("A", "B"):
         raise ValueError("Choose Group A or Group B for a rotation plan.")
-    if plan.kind == "rotation" and not plan.anchor_monday:
+    if plan.kind in ("rotation", "alternating") and not plan.anchor_monday:
         raise ValueError("This rotation has no start week set.")
+    if plan.kind == "alternating" and (plan.day_shift is None or plan.night_shift is None or not plan.working_weekdays):
+        raise ValueError("This plan needs its two shifts and its working days set.")
     if plan.kind == "fixed" and (plan.shift is None or not plan.working_weekdays):
         raise ValueError("This plan has no shift or working days set.")
     start_date = start_date or timezone.localdate()
@@ -122,7 +129,7 @@ def assign_plan(employees, plan, *, group="", start_date=None, actor=""):
                 else:
                     old.end_date = start_date - timedelta(days=1)
                     old.save(update_fields=["end_date"])
-            created.append(ShiftPlanAssignment.objects.create(employee=employee, plan=plan, group=group if plan.kind == "rotation" else "", start_date=start_date, assigned_by=str(actor)))
+            created.append(ShiftPlanAssignment.objects.create(employee=employee, plan=plan, group=group if plan.kind in ("rotation", "alternating") else "", start_date=start_date, assigned_by=str(actor)))
         horizon_end = timezone.localdate() + timedelta(days=HORIZON_DAYS)
         # Days planned earlier beyond the horizon (from an old plan or an older generation) would be stale.
         EmployeeRosterDay.objects.filter(employee__in=[a.employee_id for a in created], date__gt=horizon_end, source=RosterDaySource.GENERATED).delete()
@@ -145,7 +152,7 @@ def extend_rosters(today=None, horizon_days=HORIZON_DAYS):
 
 def flip_rotation_week(plan):
     """Swap which group is on Day: moves the reference week on by one. For when the plan started the wrong way round."""
-    if plan.kind != "rotation":
+    if plan.kind not in ("rotation", "alternating"):
         raise ValueError("Only a rotation plan has groups to swap.")
     plan.anchor_monday = plan.anchor_monday + timedelta(days=7)
     plan.save(update_fields=["anchor_monday"])

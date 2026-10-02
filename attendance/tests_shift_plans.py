@@ -206,3 +206,93 @@ class LiveDashboardTests(TestCase):
         self.assertEqual(data["recent_events"][0]["employee_number"], "L0")
         self.assertEqual(data["recent_events"][0]["device"], "Gate")
         self.assertEqual(data["device_status"][0]["name"], "Gate")
+
+
+class SalesAndPlanningScheduleTests(TestCase):
+    """The Sales & Planning team's work schedule (2026-10-02): own day off each, two of them swap weekly."""
+
+    FRIDAY = date(2026, 10, 2)
+
+    def setUp(self):
+        from django.core.management import call_command
+
+        self.department = Department.objects.create(name="Planning")
+        self.people = {
+            number: Employee.objects.create(employee_id=number, first_name=name, last_name="Test", department=self.department)
+            for number, name in (("001142", "Franklyn"), ("000817", "Peter"), ("000753", "Isaac"), ("000982", "Faith"))
+        }
+        self.old_day, _ = Shift.objects.get_or_create(name="Day Shift", defaults={"start_time": time(7), "end_time": time(19)})
+        self.old_plan, _ = ShiftPlan.objects.get_or_create(name="Permanent Day (Mon-Sat)", defaults={"kind": "fixed", "shift": self.old_day, "working_weekdays": [0, 1, 2, 3, 4, 5]})
+        assign_plan(list(self.people.values()), self.old_plan, start_date=date(2026, 9, 28))
+        call_command("setup_sales_planning_shifts", "--start", "2026-10-02")
+
+    def day(self, number, when):
+        row = EmployeeRosterDay.objects.get(employee=self.people[number], date=when)
+        return (row.status, row.shift.name if row.shift else None)
+
+    def week(self, number, monday):
+        return [self.day(number, monday + timedelta(days=offset)) for offset in range(7)]
+
+    def test_the_shifts_have_the_hours_on_the_schedule(self):
+        morning = Shift.objects.get(name="Sales & Planning Morning (7AM-6PM)")
+        afternoon = Shift.objects.get(name="Sales & Planning Afternoon (11AM-10PM)")
+        self.assertEqual((morning.start_time, morning.end_time, morning.is_overnight), (time(7), time(18), False))
+        self.assertEqual((afternoon.start_time, afternoon.end_time, afternoon.is_overnight), (time(11), time(22), False))
+
+    def test_franklyn_works_mornings_and_is_off_on_wednesday(self):
+        week = self.week("001142", date(2026, 10, 5))
+        self.assertEqual(week[2], ("rest", None))  # Wednesday
+        self.assertEqual({shift for status, shift in week if status == "work"}, {"Sales & Planning Morning (7AM-6PM)"})
+        self.assertEqual(sum(1 for status, _ in week if status == "work"), 5)
+
+    def test_peter_works_afternoons_and_is_off_on_thursday(self):
+        week = self.week("000817", date(2026, 10, 5))
+        self.assertEqual(week[3], ("rest", None))  # Thursday
+        self.assertEqual({shift for status, shift in week if status == "work"}, {"Sales & Planning Afternoon (11AM-10PM)"})
+
+    def test_isaac_is_on_morning_this_week_with_tuesday_off_then_swaps_to_afternoon(self):
+        this_week, next_week = self.week("000753", date(2026, 9, 28)), self.week("000753", date(2026, 10, 5))
+        self.assertEqual(self.day("000753", self.FRIDAY), ("work", "Sales & Planning Morning (7AM-6PM)"))
+        self.assertEqual(next_week[1], ("rest", None))  # Tuesday off
+        self.assertEqual({shift for status, shift in next_week if status == "work"}, {"Sales & Planning Afternoon (11AM-10PM)"})
+        self.assertEqual(self.day("000753", date(2026, 10, 12)), ("work", "Sales & Planning Morning (7AM-6PM)"))  # and back again
+        self.assertEqual(this_week[4], ("work", "Sales & Planning Morning (7AM-6PM)"))
+
+    def test_faith_is_on_afternoon_this_week_with_friday_off_then_swaps_to_morning(self):
+        self.assertEqual(self.day("000982", self.FRIDAY), ("rest", None))  # today is her Friday off
+        self.assertEqual(self.day("000982", date(2026, 10, 3)), ("work", "Sales & Planning Afternoon (11AM-10PM)"))  # Saturday, still this week
+        next_week = self.week("000982", date(2026, 10, 5))
+        self.assertEqual(next_week[4], ("rest", None))
+        self.assertEqual({shift for status, shift in next_week if status == "work"}, {"Sales & Planning Morning (7AM-6PM)"})
+
+    def test_isaac_and_faith_are_always_on_opposite_shifts(self):
+        for offset in range(0, 56):
+            when = date(2026, 10, 5) + timedelta(days=offset)
+            isaac, faith = self.day("000753", when), self.day("000982", when)
+            if isaac[0] == "work" and faith[0] == "work":
+                self.assertNotEqual(isaac[1], faith[1], when)
+
+    def test_nobody_is_rostered_on_a_sunday(self):
+        for number in self.people:
+            self.assertEqual(self.day(number, date(2026, 10, 4)), ("rest", None))
+
+    def test_running_the_setup_again_changes_nothing(self):
+        from django.core.management import call_command
+
+        before = ShiftPlanAssignment.objects.count()
+        call_command("setup_sales_planning_shifts", "--start", "2026-10-02")
+        self.assertEqual(ShiftPlanAssignment.objects.count(), before)
+        self.assertEqual(ShiftPlan.objects.filter(name__startswith="Sales & Planning").count(), 4)
+
+    def test_history_before_the_start_date_is_not_rewritten(self):
+        self.assertEqual(self.day("000817", date(2026, 9, 30)), ("work", "Day Shift"))
+
+    def test_an_alternating_plan_needs_a_group(self):
+        plan = ShiftPlan.objects.get(name__contains="off Tuesday")
+        with self.assertRaisesMessage(ValueError, "Group"):
+            assign_plan([self.people["000753"]], plan, group="", start_date=date(2026, 10, 5))
+
+    def test_the_groups_can_be_swapped_for_an_alternating_plan(self):
+        plan = ShiftPlan.objects.get(name__contains="off Tuesday")
+        flip_rotation_week(plan)
+        self.assertEqual(day_group_for_week(plan, date(2026, 9, 28)), "B")

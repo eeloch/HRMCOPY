@@ -759,11 +759,13 @@ class ShiftPlanAdmin(admin.ModelAdmin):
     def shifts(self, obj):
         if obj.kind == "rotation":
             return f"Day: {obj.day_shift.name if obj.day_shift else '?'} / Night: {obj.night_shift.name if obj.night_shift else '?'}"
+        if obj.kind == "alternating":
+            return f"{obj.day_shift.name if obj.day_shift else '?'} <-> {obj.night_shift.name if obj.night_shift else '?'}"
         return obj.shift.name if obj.shift else "?"
 
     @admin.display(description="Working days")
     def days(self, obj):
-        return weekday_text(obj.working_weekdays) if obj.kind == "fixed" else "weekly rotation"
+        return weekday_text(obj.working_weekdays) if obj.kind in ("fixed", "alternating") else "weekly rotation"
 
     @admin.display(description="Anchor Monday", ordering="anchor_monday")
     def anchor(self, obj):

@@ -47,7 +47,7 @@ export function ShiftPlans({ onChanged }: { onChanged?: () => void }) {
   useEffect(() => { const timer = window.setTimeout(loadOnMount, 0); return () => window.clearTimeout(timer); }, []);
 
   const selected = overview?.results.find((plan) => String(plan.id) === form.plan);
-  const rotation = selected?.kind === "rotation";
+  const rotation = selected?.kind === "rotation" || selected?.kind === "alternating";
 
   function body(dryRun: boolean) {
     return {
@@ -134,10 +134,10 @@ export function ShiftPlans({ onChanged }: { onChanged?: () => void }) {
                 <div key={plan.id} className="rounded-2xl border border-slate-200 p-4">
                   <div className="flex items-start justify-between gap-3"><p className="font-bold text-slate-900">{plan.name}</p><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">{plan.members} people</span></div>
                   <p className="mt-1 text-sm text-slate-600">{plan.description}</p>
-                  {plan.kind === "rotation" && plan.this_week && (
+                  {(plan.kind === "rotation" || plan.kind === "alternating") && plan.this_week && (
                     <div className="mt-3 rounded-xl bg-slate-50 p-3 text-sm">
                       <p><b>Group A:</b> {plan.group_a} · <b>Group B:</b> {plan.group_b}</p>
-                      <p className="mt-1 text-slate-600">This week: <b>Group {plan.this_week.day_group}</b> on Day, Group {plan.this_week.day_group === "A" ? "B" : "A"} on Night. Next week (from {new Date(plan.this_week.next_monday).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}) they swap.</p>
+                      <p className="mt-1 text-slate-600">{plan.kind === "alternating" ? <>This week: <b>Group {plan.this_week.day_group}</b> works the first shift, Group {plan.this_week.day_group === "A" ? "B" : "A"} the second.</> : <>This week: <b>Group {plan.this_week.day_group}</b> on Day, Group {plan.this_week.day_group === "A" ? "B" : "A"} on Night.</>} Next week (from {new Date(plan.this_week.next_monday).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}) they swap.</p>
                       <button type="button" disabled={busy} onClick={() => void flip(plan)} className="mt-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700">Swap the groups</button>
                     </div>
                   )}

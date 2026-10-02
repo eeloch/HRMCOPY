@@ -209,7 +209,7 @@ def apply_roster_upload(file, *, dry_run=True, actor=""):
             if plan is None:
                 report.issues.append(RosterUploadIssue(position, employee_id, f'No active plan named "{plan_name}".'))
                 continue
-        if plan.kind == "rotation" and group not in ("A", "B"):
+        if plan.kind in ("rotation", "alternating") and group not in ("A", "B"):
             report.issues.append(RosterUploadIssue(position, employee_id, "A rotation plan needs Group A or B."))
             continue
         if plan.kind == "fixed":

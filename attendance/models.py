@@ -82,9 +82,13 @@ class ShiftPlan(models.Model):
                after, and so on; Group B is the opposite. In a Day week people work Monday to Saturday on Day and
                start the Night shift on Sunday 19:00; in a Night week they work Monday to Saturday nights and rest
                on Sunday (Sunday 07:00 to Monday 07:00), then they are back on Day.
+    alternating - two shifts that swap every week on the person's own working weekdays (so they can have their own
+               day off): day_shift is the first shift and night_shift the second. Group A works the first shift in
+               the anchor week and the second the week after; Group B is the opposite. E.g. Sales & Planning staff
+               alternating Morning and Afternoon.
     """
 
-    KIND_CHOICES = [("fixed", "Fixed shift"), ("rotation", "Weekly Day / Night rotation")]
+    KIND_CHOICES = [("fixed", "Fixed shift"), ("rotation", "Weekly Day / Night rotation"), ("alternating", "Weekly alternating shifts")]
 
     name = models.CharField(max_length=120, unique=True)
     kind = models.CharField(max_length=20, choices=KIND_CHOICES)

@@ -68,7 +68,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
   }, [load]);
 
   const selectedPlan = plans.find((p) => String(p.id) === form.plan);
-  const needsGroup = selectedPlan?.kind === "rotation";
+  const needsGroup = selectedPlan?.kind === "rotation" || selectedPlan?.kind === "alternating";
 
   function openModal() {
     setForm({ plan: plan ? String(plan.id) : "", group: plan?.group || "", start: new Date().toISOString().slice(0, 10) });
