@@ -1222,6 +1222,30 @@ class MealEntitlementBulkImportTests(APITestCase):
         self.assertEqual(self.current(self.existing).tickets_per_work_day, 2)
         self.assertEqual(response.data["meal_entitlements"], {"created": 0, "changed": 0, "unchanged": 0})
 
+    def test_a_big_sheet_can_be_imported_in_slices(self):
+        self.client.force_authenticate(self.privileged)
+        sheet = "employee_id,first_name,last_name,department,position,no_of_meals_per_day\n" + "".join(
+            f"BULK-SLICE-{n:03d},Slice,Person{n},Operations,Operator,1\n" for n in range(5)
+        )
+
+        totals = {"imported": 0}
+        offset = 0
+        slices = []
+        while True:
+            response = self.client.post("/api/employees/import/", {"file": self.upload(sheet), "row_offset": offset, "row_limit": 2}, format="multipart")
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+            slices.append(response.data["slice"])
+            totals["imported"] += response.data["summary"]["imported"]
+            offset += response.data["slice"]["processed"]
+            if offset >= response.data["slice"]["total"]:
+                break
+
+        self.assertEqual([s["processed"] for s in slices], [2, 2, 1])
+        self.assertEqual({s["total"] for s in slices}, {5})
+        self.assertEqual(totals["imported"], 5)
+        self.assertEqual(Employee.objects.filter(employee_id__startswith="BULK-SLICE-").count(), 5)
+        self.assertEqual(self.current(Employee.objects.get(employee_id="BULK-SLICE-004")).tickets_per_work_day, 1)
+
     def test_a_blank_meals_cell_never_erases_an_existing_allocation(self):
         self.client.force_authenticate(self.privileged)
         response = self.client.post("/api/employees/import/", {

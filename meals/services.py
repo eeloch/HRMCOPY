@@ -867,7 +867,7 @@ class MealService:
         return exception
 
 
-def apply_import_meal_entitlement(employee, tickets_per_day, *, actor=None, reason="Employee bulk import: NO OF MEALS PER DAY"):
+def apply_import_meal_entitlement(employee, tickets_per_day, *, actor=None, reason="Employee bulk import: NO OF MEALS PER DAY", refresh_terminals=True):
     """Set one employee's meal entitlement as the Bulk Import's NO OF MEALS PER DAY column says.
 
     Same safety rule as salary and accommodation on this same import: a blank or unreadable cell means "the sheet
@@ -875,6 +875,9 @@ def apply_import_meal_entitlement(employee, tickets_per_day, *, actor=None, reas
     for this column to erase someone's allocation by being empty (2026-09-23's salary wipe was exactly this mistake
     on a different column). A row is written only when the number in the sheet actually differs from what is
     already in force today.
+
+    A bulk caller passes refresh_terminals=False and runs meals.gating.reconcile once for everyone it changed,
+    instead of re-checking terminals person by person.
 
     Returns "created" (nobody had an entitlement yet), "changed", "unchanged", or None (nothing in the sheet to
     apply)."""
@@ -902,7 +905,8 @@ def apply_import_meal_entitlement(employee, tickets_per_day, *, actor=None, reas
         EmployeeMealEntitlement.objects.create(
             employee=employee, tickets_per_work_day=tickets_per_day, effective_from=today, reason=reason, set_by=actor,
         )
-    from .gating import refresh
+    if refresh_terminals:
+        from .gating import refresh
 
-    refresh(employee)  # switch them on/off at a meal terminal straight away if this changed what they're owed today
+        refresh(employee)  # switch them on/off at a meal terminal straight away if this changed what they're owed today
     return "created" if current is None else "changed"

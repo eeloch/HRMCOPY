@@ -301,44 +301,57 @@ export default function EmployeeImportPage() {
     let importSucceeded = false;
 
     try {
-      const body = new FormData();
+      // Sent in slices so a big sheet never runs into the server's request timeout.
+      const SLICE_SIZE = 100;
+      let offset = 0;
+      let total = 0;
+      let imported = 0;
+      let updated = 0;
+      let skipped = 0;
+      let mealsSet = 0;
+      const stay: Record<string, number> = {};
 
-      body.append(
-        "file",
-        file
-      );
+      do {
+        const body = new FormData();
 
-      body.append(
-        "update_existing",
-        updateExisting ? "true" : "false"
-      );
+        body.append("file", file);
+        body.append("update_existing", updateExisting ? "true" : "false");
+        body.append("skip_invalid", skipInvalid ? "true" : "false");
+        body.append("row_offset", String(offset));
+        body.append("row_limit", String(SLICE_SIZE));
 
-      body.append(
-        "skip_invalid",
-        skipInvalid ? "true" : "false"
-      );
+        const response = await apiFetch("/employees/import/", { method: "POST", body });
 
-      const response = await apiFetch(
-        "/employees/import/",
-        {
-          method: "POST",
-          body,
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          setError(
+            offset
+              ? `The import stopped after ${offset} of ${total} rows. Those rows are saved; run the import again to carry on - rows already done are left unchanged.`
+              : "Unable to import employees. Please try again."
+          );
+          return;
         }
-      );
 
-      const data = await response.json();
+        if (!response.ok) {
+          setError(data.detail || "Unable to import employees.");
+          return;
+        }
 
-      if (!response.ok) {
-        setError(
-          data.detail ||
-            "Unable to import employees."
-        );
-        return;
-      }
+        total = data.slice?.total ?? 0;
+        offset += data.slice?.processed ?? 0;
+        imported += data.summary?.imported ?? 0;
+        updated += data.summary?.updated ?? 0;
+        skipped += data.summary?.skipped ?? 0;
+        mealsSet += (data.meal_entitlements?.created ?? 0) + (data.meal_entitlements?.changed ?? 0);
+        for (const [key, value] of Object.entries(data.accommodation ?? {})) {
+          stay[key] = (stay[key] ?? 0) + (value as number);
+        }
+        setImportMessage(`Importing... ${Math.min(offset, total)} of ${total} rows done.`);
 
-      const imported = data.summary?.imported ?? 0;
-      const updated = data.summary?.updated ?? 0;
-      const skipped = data.summary?.skipped ?? 0;
+        if (!data.slice?.processed) break;
+      } while (offset < total);
 
       importSucceeded = true;
 
@@ -346,9 +359,9 @@ export default function EmployeeImportPage() {
       if (imported) parts.push(`${imported} new employee${imported === 1 ? "" : "s"} created`);
       if (updated) parts.push(`${updated} existing employee${updated === 1 ? "" : "s"} updated`);
       if (skipped) parts.push(`${skipped} row${skipped === 1 ? "" : "s"} skipped due to errors`);
+      if (mealsSet) parts.push(`meal entitlement set for ${mealsSet} employee${mealsSet === 1 ? "" : "s"}`);
 
-      const stay = data.accommodation;
-      if (stay) {
+      if (Object.keys(stay).length) {
         const placed = (stay.inside ?? 0) + (stay.inside_no_bed ?? 0);
         const accommodationParts = [];
         if (placed) accommodationParts.push(`${placed} placed in rooms`);

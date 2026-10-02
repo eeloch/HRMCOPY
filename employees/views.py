@@ -596,6 +596,17 @@ class EmployeeImportAPIView(APIView):
             "skip_invalid"
         ) in ("true", "1", "True", True)
 
+        # A big sheet is imported in slices (row_offset / row_limit) so no single request outruns the server's
+        # request timeout; without row_limit the whole sheet goes in one request, as before. Each slice is
+        # validated on its own, so people created by an earlier slice are never mistaken for duplicates.
+        try:
+            row_offset = max(int(request.data.get("row_offset") or 0), 0)
+            row_limit = int(request.data.get("row_limit") or 0) or None
+        except (TypeError, ValueError):
+            return Response({"detail": "row_offset and row_limit must be whole numbers."}, status=status.HTTP_400_BAD_REQUEST)
+        total_sheet_rows = len(rows)
+        rows = rows[row_offset:row_offset + row_limit] if row_limit else rows[row_offset:]
+
         results = validate_employee_rows(
             rows,
             update_existing=update_existing,
@@ -737,6 +748,7 @@ class EmployeeImportAPIView(APIView):
 
         accommodation = {"inside": 0, "inside_no_bed": 0, "unknown_room": 0, "gender_mismatch": 0, "outside": 0, "none": 0, "vacated": 0}
         meal_entitlements = {"created": 0, "changed": 0, "unchanged": 0}
+        meal_changed_ids = []
         for serializer in serializers:
             is_update = serializer.instance is not None
             employee = serializer.save()
@@ -749,9 +761,19 @@ class EmployeeImportAPIView(APIView):
             outcome = apply_import_placement(employee, placement, room_label, actor=request.user) if can_place_in_rooms else None
             if outcome:
                 accommodation[outcome] += 1
-            meal_outcome = apply_import_meal_entitlement(employee, meal_updates.get(id(serializer)), actor=request.user) if can_set_meal_entitlement else None
+            meal_outcome = apply_import_meal_entitlement(employee, meal_updates.get(id(serializer)), actor=request.user, refresh_terminals=False) if can_set_meal_entitlement else None
             if meal_outcome:
                 meal_entitlements[meal_outcome] += 1
+            if meal_outcome in ("created", "changed"):
+                meal_changed_ids.append(employee.pk)
+
+        if meal_changed_ids:
+            from meals.gating import reconcile
+
+            try:
+                reconcile(employees=meal_changed_ids)  # one pass: switch people on/off at the meal terminals now
+            except Exception:
+                pass
 
         incomplete_employees = [
             employee
@@ -777,6 +799,7 @@ class EmployeeImportAPIView(APIView):
                 "accommodation": accommodation,
                 "meal_entitlements": meal_entitlements,
                 "errors": skipped_rows,
+                "slice": {"offset": row_offset, "processed": len(rows), "total": total_sheet_rows},
             },
             status=status.HTTP_201_CREATED,
         )
