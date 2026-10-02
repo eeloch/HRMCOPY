@@ -325,3 +325,11 @@ if not DEBUG:
 # The automatic "No absence" / "No lateness" rewards only look at months from this one (YYYY-MM). Attendance before
 # the terminals went live (about 2026-09-23) is not a fair basis: on 2026-09-21 every employee shows as absent.
 ATTENDANCE_REWARDS_FIRST_MONTH = os.environ.get("DJANGO_ATTENDANCE_REWARDS_FIRST_MONTH", "2026-10")
+
+# Attendance exception rules. Before the go-live date the terminals were still being rolled out, so those days are not a
+# reliable record (2026-09-21: every employee shows absent). Lateness up to the allowance is waived by the ready-made
+# rule; lateness of more than the long-late minutes is a clear case.
+ATTENDANCE_GO_LIVE_DATE = os.environ.get("DJANGO_ATTENDANCE_GO_LIVE_DATE", "2026-09-23")
+ATTENDANCE_LATE_ALLOWANCE_MINUTES = int(os.environ.get("DJANGO_ATTENDANCE_LATE_ALLOWANCE_MINUTES", "15"))
+ATTENDANCE_LONG_LATE_MINUTES = int(os.environ.get("DJANGO_ATTENDANCE_LONG_LATE_MINUTES", "60"))
+

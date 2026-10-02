@@ -1,4 +1,10 @@
 from django.urls import path
+from .views.exception_review import (
+    ExceptionBulkDecisionAPIView,
+    ExceptionMatchingIdsAPIView,
+    ExceptionQueueAPIView,
+    ExceptionRulesAPIView,
+)
 from .views import (
     AttendanceExceptionListAPIView,
     AttendanceDashboardAPIView,
@@ -64,6 +70,11 @@ urlpatterns = [
         AttendanceExceptionListAPIView.as_view(),
         name="attendance-exceptions",
     ),
+
+    path("exceptions/queue/", ExceptionQueueAPIView.as_view(), name="attendance-exception-queue"),
+    path("exceptions/queue/ids/", ExceptionMatchingIdsAPIView.as_view(), name="attendance-exception-queue-ids"),
+    path("exceptions/rules/", ExceptionRulesAPIView.as_view(), name="attendance-exception-rules"),
+    path("exceptions/bulk-decision/", ExceptionBulkDecisionAPIView.as_view(), name="attendance-exception-bulk-decision"),
 
     path(
         "exceptions/pending/",
