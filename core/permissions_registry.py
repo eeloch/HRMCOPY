@@ -12,6 +12,7 @@ MANAGED_PERMISSIONS = [
     {"codename": "add_employee", "app_label": "employees", "label": "Add employees", "group": "Employees"},
     {"codename": "change_employee", "app_label": "employees", "label": "Change employee records and status", "group": "Employees"},
     {"codename": "view_salary", "app_label": "employees", "label": "View & set employee salary", "group": "Employees"},
+    {"codename": "view_employee_statement", "app_label": "employees", "label": "Generate an employee's monthly statement (attendance and charges - no salary)", "group": "Employees"},
     {"codename": "view_bank_details", "app_label": "employees", "label": "View & set employee bank details", "group": "Employees"},
     {"codename": "view_biometrics_overview", "app_label": "attendance", "label": "View biometrics overview (who is and is not enrolled)", "group": "Attendance"},
     {"codename": "manage_devices", "app_label": "attendance", "label": "Manage biometric devices", "group": "Attendance"},

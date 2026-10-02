@@ -195,6 +195,7 @@ class Employee(models.Model):
         permissions = [
             ("view_salary", "Can view and set employee basic salary"),
             ("view_bank_details", "Can view and set employee bank details"),
+            ("view_employee_statement", "Can generate an employee's monthly attendance and charges statement"),
         ]
 
     @property

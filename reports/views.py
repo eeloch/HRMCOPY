@@ -1,17 +1,21 @@
 from datetime import date
 
 from django.http import HttpResponse
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
 
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from audit.models import AuditSeverity
 from audit.services import AuditService
+from employees.models import Employee
 
 from .pptx_builder import build_weekly_report_pptx
 from .services import build_weekly_report
+from .statement import build_statement
 
 
 def _parse_week_start(request):
@@ -141,3 +145,40 @@ class WeeklyReportPresentationAPIView(APIView):
         filename = f"Week {data.week_number} HR Report.pptx"
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
+
+
+class CanGenerateEmployeeStatement(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.has_perm("employees.view_employee_statement")
+
+
+class EmployeeStatementAPIView(APIView):
+    """An employee's monthly attendance and charges, for HR to show or print. Never contains pay (see
+    reports/statement.py). Needs its own permission - it is not the same as viewing salary or payroll - and every
+    statement generated is written to the audit trail with who asked for whose."""
+
+    permission_classes = [IsAuthenticated, CanGenerateEmployeeStatement]
+
+    def get(self, request):
+        today = timezone.localdate()
+        try:
+            employee_id = int(request.query_params.get("employee"))
+            year = int(request.query_params.get("year") or today.year)
+            month = int(request.query_params.get("month") or today.month)
+        except (TypeError, ValueError):
+            return Response({"detail": "Choose an employee and a month."}, status=400)
+        employee = get_object_or_404(Employee.objects.select_related("department", "position"), pk=employee_id)
+        try:
+            statement = build_statement(employee, year, month, today=today)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=400)
+        AuditService.log(
+            event_type="reports.employee_statement_generated",
+            module="reports",
+            employee=employee,
+            actor=request.user,
+            title="Employee statement generated",
+            description=f"{request.user.get_username()} generated {employee.full_name}'s statement for {statement['period']['label']}.",
+            metadata={"employee_id": employee.pk, "year": year, "month": month},
+        )
+        return Response(statement)
