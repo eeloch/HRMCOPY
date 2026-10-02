@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import { AppCard, MetricCard, PageHeader, Section, StatusBadge } from "@/components/ui";
 import { AccommodationTracker } from "@/components/accommodation/AccommodationTracker";
+import { EmployeeStatement } from "@/components/statements/EmployeeStatement";
 import { apiFetch, getAccessToken, getCurrentUser, type CurrentUser } from "@/lib/api";
 
 type ShiftPlanInfo = { id: number; name: string; kind: string; group: string } | null;
@@ -90,7 +91,7 @@ function shiftPlanCell(employee: Employee): { label: string; sub: string; missin
 
 export default function EmployeesPage() {
   const router = useRouter();
-  const [tab, setTab] = useState<"directory" | "hires-exits" | "accommodation">("directory");
+  const [tab, setTab] = useState<"directory" | "hires-exits" | "accommodation" | "statement">("directory");
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [search, setSearch] = useState("");
@@ -110,6 +111,7 @@ export default function EmployeesPage() {
   const [accommodation, setAccommodation] = useState<AccommodationReport | null>(null);
   const [loadingAccommodation, setLoadingAccommodation] = useState(false);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const canSeeStatement = currentUser?.is_superuser === true || currentUser?.permissions.view_employee_statement === true;
 
   useEffect(() => {
     if (!getAccessToken()) {
@@ -121,7 +123,8 @@ export default function EmployeesPage() {
     void loadSummary();
     getCurrentUser().then(setCurrentUser).catch(() => {});
     const timer = window.setTimeout(() => {
-      if (new URLSearchParams(window.location.search).get("tab") === "accommodation") setTab("accommodation");
+      const requested = new URLSearchParams(window.location.search).get("tab");
+      if (requested === "accommodation" || requested === "statement") setTab(requested);
     }, 0);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -352,7 +355,7 @@ export default function EmployeesPage() {
         />
 
         <div className="mb-6 flex gap-2 border-b border-slate-200">
-          {([["directory", "Directory"], ["hires-exits", "New Hires & Exits"], ["accommodation", "Accommodation"]] as const).map(([value, label]) => (
+          {([["directory", "Directory"], ["hires-exits", "New Hires & Exits"], ["accommodation", "Accommodation"], ["statement", "Employee Statement"]] as const).filter(([value]) => value !== "statement" || canSeeStatement).map(([value, label]) => (
             <button
               key={value}
               type="button"
@@ -405,6 +408,8 @@ export default function EmployeesPage() {
             )}
           </Section>
         )}
+
+        {tab === "statement" && canSeeStatement && <EmployeeStatement />}
 
         {tab === "accommodation" && (
           <>
