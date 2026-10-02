@@ -1,0 +1,10 @@
+[Unit]
+Description=Rotic HRM - alert when a meal terminal goes offline
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=rotic
+Group=rotic
+EnvironmentFile=/opt/rotic_hrm/.env
+ExecStart=/opt/rotic_hrm/deploy/scripts/check_meal_terminals.sh

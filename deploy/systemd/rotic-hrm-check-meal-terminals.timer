@@ -1,0 +1,9 @@
+[Unit]
+Description=Run rotic-hrm-check-meal-terminals.service every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

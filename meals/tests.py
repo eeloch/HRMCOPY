@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
@@ -2606,3 +2606,49 @@ class MealExcessPendingIdsTests(TestCase):
         data = self.client.get("/api/meals/excess/pending-ids/?decisions=all&date_from=2026-09-06").json()
         self.assertEqual(data["ids"], [self.pending.pk])
         self.assertEqual(self.client.get("/api/meals/excess/pending-ids/?search=nobody").json()["ids"], [])
+
+
+class MealTerminalOfflineAlertTests(TestCase):
+    def setUp(self):
+        from meals.management.commands.check_meal_terminals import check
+
+        self.check = check
+        self.admin = get_user_model().objects.create_superuser(username="terminal-alert-admin", email="terminal-alert@example.com", password="password")
+        self.noon = timezone.make_aware(datetime(2026, 10, 1, 12, 0))
+        self.device = BiometricDevice.objects.create(name="Alert Meal Terminal", serial_number="ALERT001", location="Canteen", device_type="face", purpose="meal_ticket")
+
+    def alerts(self, event_type):
+        return Notification.objects.filter(event_type=event_type, recipient=self.admin)
+
+    def test_a_terminal_silent_for_over_three_minutes_alerts_once(self):
+        BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=self.noon - timedelta(minutes=10))
+
+        self.assertEqual(self.check(self.noon), ["offline: Alert Meal Terminal"])
+        self.assertEqual(self.check(self.noon + timedelta(minutes=1)), [])
+        self.assertEqual(self.alerts("meals.terminal_offline").count(), 1)
+
+    def test_a_brief_reconnect_gap_does_not_alert(self):
+        BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=self.noon - timedelta(minutes=1))
+
+        self.assertEqual(self.check(self.noon), [])
+
+    def test_a_connected_terminal_does_not_alert(self):
+        BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=True, last_sync_at=self.noon - timedelta(hours=2))
+
+        self.assertEqual(self.check(self.noon), [])
+
+    def test_no_alert_overnight(self):
+        BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=self.noon - timedelta(hours=9))
+
+        self.assertEqual(self.check(timezone.make_aware(datetime(2026, 10, 2, 2, 0))), [])
+
+    def test_coming_back_resolves_the_alert_and_says_so(self):
+        BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=self.noon - timedelta(minutes=10))
+        self.check(self.noon)
+        BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=True, last_sync_at=self.noon + timedelta(minutes=20))
+
+        self.assertEqual(self.check(self.noon + timedelta(minutes=20)), ["back online: Alert Meal Terminal"])
+        self.assertEqual(self.alerts("meals.terminal_back_online").count(), 1)
+
+        BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=self.noon + timedelta(minutes=30))
+        self.assertEqual(self.check(self.noon + timedelta(minutes=40)), ["offline: Alert Meal Terminal"])
