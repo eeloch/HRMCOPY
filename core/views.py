@@ -15,6 +15,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
+from core.models import must_change_password, set_must_change_password
 from core.permissions_registry import (
     MANAGED_PERMISSIONS,
     MANAGED_PERMISSION_CODENAMES,
@@ -85,6 +86,7 @@ class ChangePasswordAPIView(APIView):
             return Response({"detail": " ".join(error.messages)}, status=status.HTTP_400_BAD_REQUEST)
         user.set_password(new_password)
         user.save(update_fields=["password"])
+        set_must_change_password(user, False)
         return Response({"detail": "Your password has been changed."})
 
 
@@ -98,6 +100,7 @@ class CurrentUserAPIView(APIView):
                 "id": user.pk,
                 "username": user.get_username(),
                 "is_superuser": user.is_superuser,
+                "must_change_password": must_change_password(user),
                 "permissions": {
                     # Legacy meals-only keys, kept so existing pages that
                     # read these directly keep working, plus every managed
@@ -180,6 +183,7 @@ class UserAccountListCreateAPIView(APIView):
 
         password = _generate_password()
         user = get_user_model().objects.create_user(username=username, password=password, is_staff=False)
+        set_must_change_password(user, True)
         _apply_permissions(user, requested)
 
         return Response(
@@ -228,6 +232,7 @@ class UserAccountDetailAPIView(APIView):
             new_password = _generate_password()
             user.set_password(new_password)
             user.save(update_fields=["password"])
+            set_must_change_password(user, True)
             response_data["temporary_password"] = new_password
 
         return Response(response_data)

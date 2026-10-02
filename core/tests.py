@@ -111,7 +111,7 @@ class CurrentUserAPIViewTests(TestCase):
 
         self.assertEqual(
             set(response),
-            {"id", "username", "is_superuser", "permissions"},
+            {"id", "username", "is_superuser", "must_change_password", "permissions"},
         )
         self.assertNotIn("password", response)
         self.assertNotIn("email", response)
@@ -339,3 +339,56 @@ class ChangePasswordTests(TestCase):
         from rest_framework.test import APIClient
 
         self.assertEqual(APIClient().post(self.endpoint, {}, format="json").status_code, 401)
+
+
+class ForcedPasswordChangeTests(TestCase):
+    """A login that is still on its temporary password can only change it - the server refuses everything else."""
+
+    def setUp(self):
+        from core.models import set_must_change_password
+
+        self.superuser = get_user_model().objects.create_superuser(username="fpc-admin", email="fpc@example.com", password="Admin-Secret-5521")
+        self.admin_client = APIClient()
+        self.admin_client.force_authenticate(self.superuser)
+        self.set_must_change_password = set_must_change_password
+
+    def login(self, username, password):
+        client = APIClient()
+        response = client.post("/api/auth/login/", {"username": username, "password": password}, format="json")
+        self.assertEqual(response.status_code, 200)
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
+        return client
+
+    def test_a_new_account_must_change_its_temporary_password_before_anything_else(self):
+        created = self.admin_client.post("/api/auth/users/", {"username": "fpc-new", "permissions": []}, format="json")
+        self.assertEqual(created.status_code, 201)
+        client = self.login("fpc-new", created.data["temporary_password"])
+
+        self.assertTrue(client.get("/api/auth/me/").data["must_change_password"])
+        blocked = client.get("/api/leave/requests/")
+        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(blocked.json()["code"], "password_change_required")
+
+        changed = client.post("/api/auth/change-password/", {"current_password": created.data["temporary_password"], "new_password": "My-Own-Secret-7310"}, format="json")
+        self.assertEqual(changed.status_code, 200)
+        self.assertFalse(client.get("/api/auth/me/").data["must_change_password"])
+        self.assertEqual(client.get("/api/leave/requests/").status_code, 200)
+
+    def test_an_admin_reset_requires_a_new_change(self):
+        user = get_user_model().objects.create_user(username="fpc-reset", password="Old-Secret-8842")
+        reset = self.admin_client.patch(f"/api/auth/users/{user.pk}/", {"reset_password": True}, format="json")
+        self.assertEqual(reset.status_code, 200)
+        client = self.login("fpc-reset", reset.data["temporary_password"])
+        self.assertEqual(client.get("/api/leave/requests/").status_code, 403)
+
+    def test_an_account_not_flagged_is_unaffected(self):
+        get_user_model().objects.create_user(username="fpc-normal", password="Normal-Secret-3317")
+        client = self.login("fpc-normal", "Normal-Secret-3317")
+        self.assertFalse(client.get("/api/auth/me/").data["must_change_password"])
+        self.assertEqual(client.get("/api/leave/requests/").status_code, 200)
+
+    def test_signing_out_is_still_possible_while_the_change_is_pending(self):
+        user = get_user_model().objects.create_user(username="fpc-logout", password="Logout-Secret-6609")
+        self.set_must_change_password(user, True)
+        client = self.login("fpc-logout", "Logout-Secret-6609")
+        self.assertNotEqual(client.post("/api/auth/logout/", {}, format="json").status_code, 403)

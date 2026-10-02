@@ -208,7 +208,7 @@ SILENCED_SYSTEM_CHECKS = ["mail.E001"]
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "core.authentication.ForcedPasswordChangeJWTAuthentication",
     ),
 
     "DEFAULT_PERMISSION_CLASSES": (

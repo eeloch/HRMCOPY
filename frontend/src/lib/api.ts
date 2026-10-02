@@ -8,6 +8,7 @@ export type CurrentUser = {
   id: number;
   username: string;
   is_superuser: boolean;
+  must_change_password: boolean;
   permissions: {
     record_meal_operations: boolean;
     review_meal_excess: boolean;
@@ -302,6 +303,23 @@ export async function apiFetch(
           headers,
         }
       );
+  }
+
+
+  /*
+   * A login still on its temporary password can only change it: the server
+   * refuses everything else, so send the person to the change-password page.
+   */
+  if (
+    response.status === 403 &&
+    typeof window !== "undefined" &&
+    window.location.pathname !== "/account/password"
+  ) {
+    const body = await response.clone().json().catch(() => null);
+    if (body?.code === "password_change_required") {
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- plain function, no router here
+      window.location.href = "/account/password";
+    }
   }
 
 

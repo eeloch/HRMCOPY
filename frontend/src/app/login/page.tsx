@@ -10,6 +10,7 @@ import {
 } from "next/navigation";
 
 import {
+  getCurrentUser,
   login,
 } from "@/lib/api";
 
@@ -53,7 +54,13 @@ export default function LoginPage() {
         password
       );
 
-      router.push("/dashboard");
+      const user = await getCurrentUser().catch(() => null);
+
+      router.push(
+        user?.must_change_password
+          ? "/account/password"
+          : "/dashboard"
+      );
 
     } catch (err) {
 
