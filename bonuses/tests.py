@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from employees.models import Department, Employee
@@ -172,6 +172,7 @@ class EmployeeOfTheMonthTests(TestCase):
         self.assertEqual(client.post(f"/api/bonuses/{created.json()['id']}/approve/").json()["status"], "approved")
 
 
+@override_settings(ATTENDANCE_REWARDS_FIRST_MONTH="2026-09")
 class AttendanceRewardTests(TestCase):
     """The automatic "No absence" / "No lateness" rewards from the Disciplinary Action Policy."""
 
@@ -261,3 +262,11 @@ class AttendanceRewardTests(TestCase):
         call_command("propose_attendance_rewards", "--month", "2026-09", "--dry-run", stdout=out)
         self.assertIn("DRY RUN", out.getvalue())
         self.assertEqual(Bonus.objects.count(), 0)
+
+
+class AttendanceRewardStartMonthTests(TestCase):
+    def test_september_2026_is_before_the_attendance_system_was_fully_in_use(self):
+        from datetime import date
+
+        with self.assertRaisesMessage(ValueError, "start from October 2026"):
+            AttendanceRewardService.propose_for_month(2026, 9, today=date(2026, 10, 2))

@@ -321,3 +321,7 @@ if not DEBUG:
         SECURE_HSTS_SECONDS = 60 * 60 * 24 * 30
         SECURE_HSTS_INCLUDE_SUBDOMAINS = True
         SECURE_HSTS_PRELOAD = True
+
+# The automatic "No absence" / "No lateness" rewards only look at months from this one (YYYY-MM). Attendance before
+# the terminals went live (about 2026-09-23) is not a fair basis: on 2026-09-21 every employee shows as absent.
+ATTENDANCE_REWARDS_FIRST_MONTH = os.environ.get("DJANGO_ATTENDANCE_REWARDS_FIRST_MONTH", "2026-10")

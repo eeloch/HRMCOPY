@@ -2,6 +2,7 @@ import calendar
 from datetime import date
 from decimal import Decimal
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.db import IntegrityError, transaction
@@ -254,6 +255,9 @@ class AttendanceRewardService:
         from offences.models import RewardType
 
         today = today or timezone.localdate()
+        first_year, first_month = (int(part) for part in settings.ATTENDANCE_REWARDS_FIRST_MONTH.split("-"))
+        if (year, month) < (first_year, first_month):
+            raise ValueError(f"Attendance rewards start from {month_label(first_year, first_month)}; {month_label(year, month)} is before the attendance system was fully in use.")
         if date(year, month, calendar.monthrange(year, month)[1]) >= today:
             raise ValueError(f"{month_label(year, month)} has not finished yet.")
         earners = AttendanceRewardService.earners(year, month)
