@@ -744,3 +744,51 @@ class GroupLettersMeanMorningAndEveningTests(PlanTestCase):
         assign_plan([self.person], self.rotation, group=stored_group_for_label(self.rotation, "B", today), start_date=MONDAY)
         listed = self.client.get("/api/employees/?search=LET-1").json()["results"]
         self.assertEqual(listed[0]["shift_plan"]["group"], "B")
+
+
+class RecalculateAttendanceTests(PlanTestCase):
+    """People whose roster was corrected for past days get their attendance redone from the punches."""
+
+    def test_punches_are_reread_against_the_corrected_roster_and_old_test_decisions_are_discarded(self):
+        from datetime import datetime, time as dtime
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        from .models import AttendanceEvent, AttendanceException, DailyAttendance
+        from .services.processing import process_employee_attendance
+
+        today = timezone.localdate()
+        day = today - timedelta(days=2)
+        dept = Department.objects.create(name="Recalc Dept")
+        person = Employee.objects.create(employee_id="RC-1", first_name="Re", last_name="Calc", department=dept)
+        assign_plan([person], self.perm_night, start_date=day - timedelta(days=7))  # wrongly on Nights
+        stamp = lambda hour, minute: timezone.make_aware(datetime.combine(day, dtime(hour, minute)))  # noqa: E731
+        for number, moment in enumerate((stamp(6, 40), stamp(19, 5))):  # they really work Days
+            AttendanceEvent.objects.create(employee=person, timestamp=moment, external_event_id=f"rc-{number}")
+        process_employee_attendance(person, day)
+        wrong = DailyAttendance.objects.get(employee=person, date=day)
+        AttendanceException.objects.create(attendance=wrong, exception_type="late", status="approved", reviewed_by="September test review (quick rules)")
+        theirs = AttendanceException.objects.create(attendance=wrong, exception_type="missing_clock_out", status="held", reviewed_by="Someone Real")
+
+        assign_plan([person], self.perm_day, start_date=day)  # the roster upload: corrected from a past date
+        since = (timezone.now() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M")
+        call_command("recalculate_attendance", "--from", day.isoformat(), "--assigned-since", since)
+
+        fixed = DailyAttendance.objects.get(employee=person, date=day)
+        self.assertEqual((fixed.shift, fixed.status, fixed.late_minutes), (self.day, "present", 0))
+        self.assertFalse(AttendanceException.objects.filter(attendance=fixed, exception_type="late", reviewed_by__startswith="September test review").exists())
+        self.assertTrue(AttendanceException.objects.filter(pk=theirs.pk).exists())
+
+    def test_a_dry_run_saves_nothing_and_a_missing_who_is_refused(self):
+        from django.core.management import CommandError, call_command
+        from django.utils import timezone
+
+        with self.assertRaises(CommandError):
+            call_command("recalculate_attendance", "--from", (timezone.localdate() - timedelta(days=1)).isoformat())
+        dept = Department.objects.create(name="Recalc Dept 2")
+        person = Employee.objects.create(employee_id="RC-2", first_name="Re", last_name="Calc2", department=dept)
+        assign_plan([person], self.perm_day, start_date=timezone.localdate() - timedelta(days=3))
+        before = EmployeeRosterDay.objects.filter(employee=person).count()
+        call_command("recalculate_attendance", "--from", (timezone.localdate() - timedelta(days=1)).isoformat(), "--employees", "RC-2", "--dry-run")
+        self.assertEqual(EmployeeRosterDay.objects.filter(employee=person).count(), before)
