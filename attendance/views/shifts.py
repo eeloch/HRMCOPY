@@ -145,7 +145,7 @@ class ShiftPlanListAPIView(APIView):
         from django.utils import timezone
 
         from attendance.models import ShiftPlan, ShiftPlanAssignment
-        from attendance.services.shift_plans import day_group_for_week, monday_of
+        from attendance.services.shift_plans import day_group_for_week, label_week_monday, monday_of
 
         today = timezone.localdate()
         current = ShiftPlanAssignment.objects.filter(employee__status="active", start_date__lte=today).filter(Q(end_date__isnull=True) | Q(end_date__gte=today))
@@ -153,12 +153,14 @@ class ShiftPlanListAPIView(APIView):
         results = []
         for plan in ShiftPlan.objects.select_related("shift", "saturday_shift", "day_shift", "night_shift").order_by("id"):
             row = counts.get(plan.pk, {})
+            # Group A is the morning team this week and B the evening team, so the counts follow the week, not the stored team.
+            morning_team = day_group_for_week(plan, label_week_monday(today)) if plan.kind in ("rotation", "alternating") and plan.anchor_monday else "A"
             item = {"id": plan.pk, "name": plan.name, "kind": plan.kind, "description": plan.description, "active": plan.active,
-                    "members": row.get("total", 0), "group_a": row.get("a", 0), "group_b": row.get("b", 0),
+                    "members": row.get("total", 0), "group_a": row.get("a" if morning_team == "A" else "b", 0), "group_b": row.get("b" if morning_team == "A" else "a", 0),
                     "shift": plan.shift.name if plan.shift else None, "saturday_shift": plan.saturday_shift.name if plan.saturday_shift else None, "working_weekdays": plan.working_weekdays}
             if plan.kind in ("rotation", "alternating") and plan.anchor_monday:
                 monday = monday_of(today)
-                item["this_week"] = {"monday": monday, "day_group": day_group_for_week(plan, monday), "next_monday": monday + timedelta(days=7), "next_day_group": day_group_for_week(plan, monday + timedelta(days=7))}
+                item["this_week"] = {"monday": monday, "day_group": "A", "next_monday": monday + timedelta(days=7), "next_day_group": "A"}  # A is always the morning team
             results.append(item)
         from employees.models import Employee
 
@@ -168,7 +170,8 @@ class ShiftPlanListAPIView(APIView):
 
 class ShiftPlanAssignAPIView(APIView):
     """Put many people on a plan at once. Pick them by department and/or by the plan they are on now, or list their ids.
-    For a rotation choose group A, group B, or "split" to divide them evenly between the two."""
+    For a rotation choose group A (the morning team), group B (the evening team), or "split" to divide them evenly
+    between the two. A and B mean mornings and evenings in the week the start date falls in."""
 
     permission_classes = [IsAuthenticated, CanManageShifts]
 
@@ -213,11 +216,11 @@ class ShiftPlanAssignAPIView(APIView):
             try:
                 if plan.kind in ("rotation", "alternating") and group == "SPLIT":
                     group_a, group_b = split_groups(people)
-                    _, first = assign_plan(group_a, plan, group="A", start_date=start, actor=request.user.get_username(), day_off=day_off)
-                    _, second = assign_plan(group_b, plan, group="B", start_date=start, actor=request.user.get_username(), day_off=day_off) if group_b else (None, None)
+                    _, first = assign_plan(group_a, plan, group="A", start_date=start, actor=request.user.get_username(), day_off=day_off, by_label=True)
+                    _, second = assign_plan(group_b, plan, group="B", start_date=start, actor=request.user.get_username(), day_off=day_off, by_label=True) if group_b else (None, None)
                     summary = {"created": first.created + (second.created if second else 0), "updated": first.updated + (second.updated if second else 0)}
                 else:
-                    _, done = assign_plan(people, plan, group=group, start_date=start, actor=request.user.get_username(), day_off=day_off)
+                    _, done = assign_plan(people, plan, group=group, start_date=start, actor=request.user.get_username(), day_off=day_off, by_label=True)
                     summary = {"created": done.created, "updated": done.updated}
             except ValueError as error:
                 return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
@@ -294,7 +297,10 @@ class EmployeeShiftPlanAPIView(APIView):
         from django.db.models import Q
         from django.utils import timezone
 
+        from datetime import timedelta
+
         from attendance.models import EmployeeRosterDay, ShiftPlanAssignment
+        from attendance.services.shift_plans import group_label
         from employees.models import Employee
 
         employee = get_object_or_404(Employee, pk=employee_id)
@@ -313,7 +319,8 @@ class EmployeeShiftPlanAPIView(APIView):
                 "id": assignment.plan_id,
                 "name": assignment.plan.name,
                 "kind": assignment.plan.kind,
-                "group": assignment.group,
+                "group": group_label(assignment.plan, assignment.group, today),  # A = mornings this week, B = evenings
+                "group_next_week": group_label(assignment.plan, assignment.group, today + timedelta(days=7)),
                 "day_off": assignment.day_off,
                 "start_date": assignment.start_date,
             } if assignment else None,

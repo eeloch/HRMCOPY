@@ -304,11 +304,13 @@ class EmployeeSerializer(serializers.ModelSerializer):
         if not assignment:
             return None
 
+        from attendance.services.shift_plans import group_label
+
         return {
             "id": assignment.plan_id,
             "name": assignment.plan.name,
             "kind": assignment.plan.kind,
-            "group": assignment.group,
+            "group": group_label(assignment.plan, assignment.group),  # A = mornings this week, B = evenings
             "day_off": assignment.day_off,
         }
 

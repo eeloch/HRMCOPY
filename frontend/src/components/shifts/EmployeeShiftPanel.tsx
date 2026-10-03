@@ -10,7 +10,8 @@ type Props = {
   onAssignmentChanged: () => void;
 };
 
-type PlanSummary = { id: number; name: string; kind: string; group: string; day_off: number | null; start_date: string } | null;
+type PlanSummary = { id: number; name: string; kind: string; group: string; group_next_week?: string; day_off: number | null; start_date: string } | null;
+const groupName = (letter: string) => (letter === "A" ? "Group A (mornings)" : "Group B (evenings)");
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 type TodaySummary = { date: string; status: "work" | "rest"; shift: { name: string; start_time: string; end_time: string } | null } | null;
 type Plan = { id: number; name: string; kind: string };
@@ -131,7 +132,7 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
             {plan ? (
               <>
                 <p className="mt-1 text-lg font-bold text-slate-900">{plan.name}</p>
-                {plan.group && <p className="mt-1 text-sm text-slate-600">Group {plan.group}</p>}
+                {plan.group && <p className="mt-1 text-sm text-slate-600">This week: <span className="font-semibold">{groupName(plan.group)}</span>{plan.group_next_week ? <>. Next week: <span className="font-semibold">{groupName(plan.group_next_week)}</span></> : null}</p>}
                 {weeks && <p className="mt-1 text-sm text-slate-600">This week: <span className="font-semibold">{weeks.this_week.shift ?? "-"}</span>. Next week (from {formatDate(weeks.next_week.monday)}): <span className="font-semibold">{weeks.next_week.shift ?? "-"}</span>.</p>}
                 <p className="mt-1 text-sm text-slate-600">Weekly day off: <span className="font-semibold">{plan.day_off != null ? WEEKDAYS[plan.day_off] : "none set"}</span></p>
                 <p className="mt-1 text-sm text-slate-500">Effective from {formatDate(plan.start_date)}</p>
@@ -173,9 +174,10 @@ export function EmployeeShiftPanel({ employee, onAssignmentChanged }: Props) {
                 Group
                 <select value={form.group} onChange={(event) => setForm({ ...form, group: event.target.value })} className={inputClass}>
                   <option value="">Choose a group</option>
-                  <option value="A">Group A</option>
-                  <option value="B">Group B</option>
+                  <option value="A">Group A - mornings</option>
+                  <option value="B">Group B - evenings</option>
                 </select>
+                <span className="mt-1 block text-xs font-normal text-slate-500">A is the morning shift and B the evening shift in the week the plan starts. The person swaps letter by themselves every week.</span>
               </label>
             )}
             <label className="mt-4 block text-sm font-semibold text-slate-700">

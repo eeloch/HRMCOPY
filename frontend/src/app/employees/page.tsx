@@ -87,7 +87,7 @@ function shiftPlanCell(employee: Employee): { label: string; sub: string; missin
   if (!plan) return { label: "Not assigned", sub: "", missing: true };
   const off = plan.day_off != null ? ` · off ${DAY_NAMES[plan.day_off]}` : "";
   if (plan.kind === "rotation" || plan.kind === "alternating") {
-    return { label: plan.name, sub: `Group ${plan.group}${employee.current_shift ? ` · ${employee.current_shift.name} today` : ""}${off}`, missing: false };
+    return { label: plan.name, sub: `Group ${plan.group} (${plan.group === "A" ? "mornings" : "evenings"})${employee.current_shift ? ` · ${employee.current_shift.name} today` : ""}${off}`, missing: false };
   }
   return { label: plan.name, sub: `${employee.current_shift ? `${employee.current_shift.name}, ${employee.current_shift.start_time.slice(0, 5)}-${employee.current_shift.end_time.slice(0, 5)}` : ""}${off}`.replace(/^ · /, ""), missing: false };
 }

@@ -27,6 +27,30 @@ def day_group_for_week(plan, monday):
     return "A" if weeks % 2 == 0 else "B"
 
 
+def label_week_monday(on_date):
+    """The Monday of the week a date counts as for naming groups. A Sunday belongs to the week about to start: that
+    is when the night team's week begins and the morning team rests before its first Monday."""
+    return monday_of(on_date + timedelta(days=1)) if on_date.weekday() == 6 else monday_of(on_date)
+
+
+def group_label(plan, stored_group, on_date=None):
+    """The group letter people see: A is the morning (first-shift) team THIS week, B the evening (second-shift) team.
+    A person's letter changes by itself every week as their shift swaps. The stored group is only which of the two
+    teams they are in; this turns it into what the letter means on that date. "" when the plan has no groups."""
+    if plan.kind not in ("rotation", "alternating") or not stored_group or not plan.anchor_monday:
+        return ""
+    on_date = on_date or timezone.localdate()
+    return "A" if day_group_for_week(plan, label_week_monday(on_date)) == stored_group else "B"
+
+
+def stored_group_for_label(plan, label, on_date):
+    """The reverse of group_label: which stored team is the morning team (label A) or evening team (label B) in the
+    week `on_date` falls in - so that "A from Monday" starts someone on mornings that week."""
+    morning_team = day_group_for_week(plan, label_week_monday(on_date))
+    evening_team = "B" if morning_team == "A" else "A"
+    return morning_team if label == "A" else evening_team
+
+
 def planned_day(plan, group, day, day_off=None):
     """What a plan says about one date: (status, shift). `day_off` is the person's own weekly day off (0 = Monday),
     which is a rest day whatever the plan says."""
@@ -121,9 +145,11 @@ def split_groups(people):
 KEEP = object()  # assign_plan: carry the person's existing day off over to the new plan
 
 
-def assign_plan(employees, plan, *, group="", start_date=None, actor="", day_off=KEEP):
+def assign_plan(employees, plan, *, group="", start_date=None, actor="", day_off=KEEP, by_label=False):
     """Put these people on a plan from start_date. A person's earlier assignment is closed the day before, and the
-    generated roster from start_date on is rewritten to follow the new plan (manual days are kept)."""
+    generated roster from start_date on is rewritten to follow the new plan (manual days are kept).
+    `group` is the stored team, unless by_label=True: then "A" means the morning team and "B" the evening team in the
+    week start_date falls in (this is how people choose it on the screens)."""
     if plan.kind in ("rotation", "alternating") and group not in ("A", "B"):
         raise ValueError("Choose Group A or Group B for a rotation plan.")
     if plan.kind in ("rotation", "alternating") and not plan.anchor_monday:
@@ -135,6 +161,8 @@ def assign_plan(employees, plan, *, group="", start_date=None, actor="", day_off
     if day_off is not KEEP and day_off is not None and not (isinstance(day_off, int) and 0 <= day_off <= 6):
         raise ValueError("The day off must be a weekday from Monday (0) to Sunday (6).")
     start_date = start_date or timezone.localdate()
+    if by_label and plan.kind in ("rotation", "alternating"):
+        group = stored_group_for_label(plan, group, start_date)
     created = []
     with transaction.atomic():
         for employee in employees:

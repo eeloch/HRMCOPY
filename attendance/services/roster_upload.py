@@ -18,7 +18,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from attendance.models import ShiftPlan, ShiftPlanAssignment
-from attendance.services.shift_plans import assign_plan
+from attendance.services.shift_plans import assign_plan, group_label, stored_group_for_label
 from core.spreadsheets import append_text_row
 from employees.models import Employee
 
@@ -71,7 +71,7 @@ def build_template_workbook():
             employee.full_name,
             employee.department.name if employee.department else "",
             assignment.plan.name if assignment else "",
-            assignment.group if assignment else "",
+            group_label(assignment.plan, assignment.group) if assignment else "",
             "",
             "",
             "",
@@ -220,7 +220,7 @@ def apply_roster_upload(file, *, dry_run=True, actor=""):
             report.issues.append(RosterUploadIssue(position, employee_id, str(error)))
             continue
         existing = current.get(employee.pk)
-        already_current = existing is not None and existing.plan_id == plan.pk and existing.group == group
+        already_current = existing is not None and existing.plan_id == plan.pk and existing.group == (stored_group_for_label(plan, group, start) if group else "")
         if already_current:
             report.unchanged += 1
             continue  # already exactly this plan and group: nothing to do, whatever start date was given
@@ -229,7 +229,7 @@ def apply_roster_upload(file, *, dry_run=True, actor=""):
     def describe(key):
         plan_id, group, start = key
         plan = plans_by_name_by_id.get(plan_id)
-        label = plan.name + (f" (Group {group})" if group else "")
+        label = plan.name + (f" (Group {group}: {'mornings' if group == 'A' else 'evenings'})" if group else "")
         return f"{label} from {start.isoformat()}"
 
     plans_by_name_by_id = {plan.pk: plan for plan in plans_by_name.values()}
@@ -239,6 +239,6 @@ def apply_roster_upload(file, *, dry_run=True, actor=""):
     if not dry_run:
         with transaction.atomic():
             for (plan_id, group, start), people in buckets.items():
-                assign_plan(people, plans_by_name_by_id[plan_id], group=group, start_date=start, actor=actor)
+                assign_plan(people, plans_by_name_by_id[plan_id], group=group, start_date=start, actor=actor, by_label=True)
 
     return report

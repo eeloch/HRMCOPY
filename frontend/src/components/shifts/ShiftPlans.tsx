@@ -137,9 +137,9 @@ export function ShiftPlans({ onChanged }: { onChanged?: () => void }) {
                   <p className="mt-1 text-sm text-slate-600">{plan.description}</p>
                   {(plan.kind === "rotation" || plan.kind === "alternating") && plan.this_week && (
                     <div className="mt-3 rounded-xl bg-slate-50 p-3 text-sm">
-                      <p><b>Group A:</b> {plan.group_a} · <b>Group B:</b> {plan.group_b}</p>
-                      <p className="mt-1 text-slate-600">{plan.kind === "alternating" ? <>This week: <b>Group {plan.this_week.day_group}</b> works the first shift, Group {plan.this_week.day_group === "A" ? "B" : "A"} the second.</> : <>This week: <b>Group {plan.this_week.day_group}</b> on Day, Group {plan.this_week.day_group === "A" ? "B" : "A"} on Night.</>} Next week (from {new Date(plan.this_week.next_monday).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}) they swap.</p>
-                      <button type="button" disabled={busy} onClick={() => void flip(plan)} className="mt-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700">Swap the groups</button>
+                      <p><b>Group A (mornings this week):</b> {plan.group_a} · <b>Group B (evenings this week):</b> {plan.group_b}</p>
+                      <p className="mt-1 text-slate-600">Group A is always the morning (first) shift and Group B the evening (second) shift. Next week (from {new Date(plan.this_week.next_monday).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}) everyone swaps letter by themselves.</p>
+                      <button type="button" disabled={busy} onClick={() => void flip(plan)} className="mt-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700">Correct the rotation: swap who is on Day and Night from next week</button>
                     </div>
                   )}
                 </div>
@@ -150,7 +150,7 @@ export function ShiftPlans({ onChanged }: { onChanged?: () => void }) {
               <p className="font-semibold text-slate-900">Assign people to a plan</p>
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <label className="text-sm font-semibold text-slate-700">Plan<select value={form.plan} onChange={(event) => { setForm({ ...form, plan: event.target.value }); setPreview(null); }} className={inputClass}><option value="">Choose a plan</option>{overview.results.map((plan) => <option key={plan.id} value={plan.id}>{plan.name}</option>)}</select></label>
-                {rotation && <label className="text-sm font-semibold text-slate-700">Group<select value={form.group} onChange={(event) => { setForm({ ...form, group: event.target.value }); setPreview(null); }} className={inputClass}><option value="split">Split evenly between A and B</option><option value="A">All in Group A</option><option value="B">All in Group B</option></select></label>}
+                {rotation && <label className="text-sm font-semibold text-slate-700">Group<select value={form.group} onChange={(event) => { setForm({ ...form, group: event.target.value }); setPreview(null); }} className={inputClass}><option value="split">Split evenly between mornings (A) and evenings (B)</option><option value="A">All in Group A - mornings</option><option value="B">All in Group B - evenings</option></select></label>}
                 <label className="text-sm font-semibold text-slate-700">Weekly day off<select value={form.dayOff} onChange={(event) => setForm({ ...form, dayOff: event.target.value })} className={inputClass}><option value="keep">Keep each person&apos;s current day off</option><option value="none">No fixed day off</option>{["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((name, index) => <option key={name} value={index}>{name}</option>)}</select></label>
                 <label className="text-sm font-semibold text-slate-700">Starting from<input type="date" value={form.start} onChange={(event) => setForm({ ...form, start: event.target.value })} className={inputClass} /></label>
               </div>

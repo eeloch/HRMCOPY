@@ -8,7 +8,7 @@ from rest_framework.test import APIClient
 from employees.models import Department, Employee
 
 from .models import EmployeeRosterDay, RosterDaySource, Shift, ShiftPlan, ShiftPlanAssignment
-from .services.shift_plans import assign_plan, day_group_for_week, extend_rosters, flip_rotation_week, planned_day, set_day_off
+from .services.shift_plans import assign_plan, day_group_for_week, extend_rosters, flip_rotation_week, group_label, label_week_monday, planned_day, set_day_off, stored_group_for_label
 
 MONDAY = date(2026, 9, 21)  # a Monday: Group A starts on Day this week
 
@@ -170,8 +170,11 @@ class ShiftPlanApiTests(PlanTestCase):
 
         self.client.post("/api/attendance/shift-plans/assign/", {"plan": self.rotation.pk, "group": "A", "department_ids": [self.dept.pk], "start_date": MONDAY.isoformat()}, format="json")
         data = self.client.get(f"/api/attendance/shift-plans/for-employee/{person.pk}/").json()
+        from django.utils import timezone
+
         self.assertEqual(data["plan"]["name"], self.rotation.name)
-        self.assertEqual(data["plan"]["group"], "A")
+        # "A" means the morning team THIS week; the person's letter follows the week by itself
+        self.assertEqual(data["plan"]["group"], group_label(self.rotation, "A", timezone.localdate()))
         # today's actual roster shift is included too, not just the plan
         self.assertIn(data["today"]["status"], ("work", "rest"))
 
@@ -677,3 +680,67 @@ class RealignRotationTests(PlanTestCase):
         self.assertEqual(ShiftPlan.objects.get(pk=self.rotation.pk).anchor_monday, before)
         with self.assertRaises(CommandError):
             call_command("realign_rotation", "--from", (self.today + timedelta(days=3)).isoformat())
+
+
+class GroupLettersMeanMorningAndEveningTests(PlanTestCase):
+    """Group A always means the morning (Day) team and Group B the evening (Night) team of the week - not a fixed team."""
+
+    def setUp(self):
+        super().setUp()
+        self.dept = Department.objects.create(name="Letters Dept")
+        self.person = Employee.objects.create(employee_id="LET-1", first_name="Let", last_name="Ter", department=self.dept)
+        self.client = APIClient()
+        manager = get_user_model().objects.create_user(username="letters-manager", password="pw")
+        manager.user_permissions.add(Permission.objects.get(codename="manage_shifts"))
+        self.client.force_authenticate(manager)
+
+    def roster(self, when):
+        row = EmployeeRosterDay.objects.get(employee=self.person, date=when)
+        return row.shift.name if row.shift else None
+
+    def test_a_is_the_morning_team_of_every_week_and_b_the_evening_team(self):
+        for weeks in range(0, 8):
+            monday = MONDAY + timedelta(weeks=weeks)
+            morning_team = stored_group_for_label(self.rotation, "A", monday)
+            self.assertEqual(planned_day(self.rotation, morning_team, monday + timedelta(days=1))[1], self.day)
+            evening_team = stored_group_for_label(self.rotation, "B", monday)
+            self.assertEqual(planned_day(self.rotation, evening_team, monday + timedelta(days=1))[1], self.night)
+            self.assertNotEqual(morning_team, evening_team)
+
+    def test_the_same_person_swaps_letter_every_week_by_themselves(self):
+        assign_plan([self.person], self.rotation, group="A", start_date=MONDAY, by_label=True)
+        stored = ShiftPlanAssignment.objects.get(employee=self.person).group
+        letters = [group_label(self.rotation, stored, MONDAY + timedelta(weeks=weeks, days=2)) for weeks in range(6)]
+        self.assertEqual(letters, ["A", "B", "A", "B", "A", "B"])
+
+    def test_choosing_a_when_assigning_means_mornings_that_week_and_b_means_evenings(self):
+        for label, shift in (("A", self.day), ("B", self.night)):
+            employee = Employee.objects.create(employee_id=f"LET-{label}", first_name=label, last_name="Pick", department=self.dept)
+            self.client.post("/api/attendance/shift-plans/assign/", {"plan": self.rotation.pk, "group": label, "employee_ids": [employee.pk], "start_date": (MONDAY + timedelta(days=14)).isoformat()}, format="json")
+            row = EmployeeRosterDay.objects.get(employee=employee, date=MONDAY + timedelta(days=15))  # the Tuesday of that week
+            self.assertEqual(row.shift, shift)
+
+    def test_a_sunday_counts_as_the_week_that_is_about_to_start(self):
+        sunday = MONDAY + timedelta(days=6)
+        self.assertEqual(label_week_monday(sunday), MONDAY + timedelta(days=7))
+        self.assertEqual(label_week_monday(MONDAY + timedelta(days=5)), MONDAY)
+
+    def test_the_plan_list_counts_follow_the_week_not_the_stored_team(self):
+        from django.utils import timezone
+
+        today = timezone.localdate()
+        morning, evening = stored_group_for_label(self.rotation, "A", today), stored_group_for_label(self.rotation, "B", today)
+        people = [Employee.objects.create(employee_id=f"CNT-{n}", first_name="C", last_name=str(n), department=self.dept) for n in range(3)]
+        assign_plan(people[:2], self.rotation, group=morning, start_date=MONDAY)
+        assign_plan(people[2:], self.rotation, group=evening, start_date=MONDAY)
+        entry = next(item for item in self.client.get("/api/attendance/shift-plans/").json()["results"] if item["id"] == self.rotation.pk)
+        self.assertEqual((entry["group_a"], entry["group_b"]), (2, 1))  # A = this week's mornings
+        self.assertEqual(entry["this_week"]["day_group"], "A")
+
+    def test_the_employee_directory_shows_the_letter_for_this_week(self):
+        from django.utils import timezone
+
+        today = timezone.localdate()
+        assign_plan([self.person], self.rotation, group=stored_group_for_label(self.rotation, "B", today), start_date=MONDAY)
+        listed = self.client.get("/api/employees/?search=LET-1").json()["results"]
+        self.assertEqual(listed[0]["shift_plan"]["group"], "B")

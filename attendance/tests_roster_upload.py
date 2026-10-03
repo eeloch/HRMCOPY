@@ -4,6 +4,7 @@ from datetime import date, time
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.test import TestCase
+from django.utils import timezone
 from openpyxl import Workbook, load_workbook
 from rest_framework.test import APIClient
 
@@ -11,6 +12,7 @@ from employees.models import Department, Employee
 
 from .models import ShiftPlan, ShiftPlanAssignment
 from .services.roster_upload import apply_roster_upload, build_template_workbook
+from .services.shift_plans import group_label, stored_group_for_label
 
 
 def make_upload(rows):
@@ -48,7 +50,7 @@ class RosterUploadServiceTests(TestCase):
         by_id = {row[0]: row for row in rows[1:]}
         self.assertEqual(set(by_id), {"E001", "E002"})
         self.assertEqual(by_id["E001"][3], "Extrusion Rotation")  # Current Plan
-        self.assertEqual(by_id["E001"][4], "A")  # Current Group
+        self.assertEqual(by_id["E001"][4], group_label(self.rotation, "A"))  # Current Group: A means mornings THIS week, so it follows the week
         self.assertIsNone(by_id["E002"][3])  # Bob has no plan yet (blank cell)
 
     def test_plan_name_dropdown_survives_a_comma_in_the_name(self):
@@ -85,7 +87,9 @@ class RosterUploadServiceTests(TestCase):
         apply_roster_upload(upload, dry_run=False)
         assignment = ShiftPlanAssignment.objects.get(employee=self.bob)
         self.assertEqual(assignment.plan, self.rotation)
-        self.assertEqual(assignment.group, "B")
+        # "B" means the evening team in the week the assignment starts (today), whichever stored team that is
+        self.assertEqual(assignment.group, stored_group_for_label(self.rotation, "B", timezone.localdate()))
+        self.assertEqual(group_label(self.rotation, assignment.group), "B")
 
     def test_rotation_plan_without_group_is_an_issue(self):
         upload = make_upload([["E002", "", "", "", "", "Extrusion Rotation", "", ""]])
@@ -109,7 +113,7 @@ class RosterUploadServiceTests(TestCase):
         self.assertEqual(report.changes, 1)
         assignment = ShiftPlanAssignment.objects.get(employee=self.bob)
         self.assertEqual(assignment.plan, self.rotation)
-        self.assertEqual(assignment.group, "B")
+        self.assertEqual(group_label(self.rotation, assignment.group), "B")
 
     def test_blank_plan_name_with_a_group_and_two_rotation_plans_is_an_issue(self):
         ShiftPlan.objects.create(name="Second Rotation", kind="rotation", day_shift=self.day, night_shift=self.night, anchor_monday=date(2026, 9, 21))
@@ -122,9 +126,11 @@ class RosterUploadServiceTests(TestCase):
     def test_a_row_that_already_matches_the_current_assignment_is_left_alone(self):
         """A spreadsheet that fills every row (mirroring Current Plan/Group back into Plan Name/Group, as HR
         filling a template top to bottom naturally does) must not fragment assignment history for people who
-        aren't actually changing, even if it gives a different start date."""
+        aren't actually changing. Group A/B mean mornings/evenings in the week of the row's start date, so the
+        sheet that mirrors the person's letter for THAT week changes nothing, whatever start date it gives."""
         ShiftPlanAssignment.objects.create(employee=self.bob, plan=self.rotation, group="B", start_date=date(2026, 9, 1))
-        upload = make_upload([["E002", "", "", "", "", "Extrusion Rotation", "B", "2026-10-15"]])
+        letter_that_week = group_label(self.rotation, "B", date(2026, 10, 15))
+        upload = make_upload([["E002", "", "", "", "", "Extrusion Rotation", letter_that_week, "2026-10-15"]])
         report = apply_roster_upload(upload, dry_run=False)
         self.assertEqual(report.changes, 0)
         self.assertEqual(report.unchanged, 1)
@@ -154,6 +160,21 @@ class RosterUploadServiceTests(TestCase):
         self.assertEqual(report.changes, 2)
         self.assertEqual(len(report.by_plan), 1)
         self.assertEqual(ShiftPlanAssignment.objects.filter(plan=self.perm_day).count(), 2)
+
+
+    def test_a_sheet_that_mirrors_todays_letter_with_no_start_date_changes_nothing(self):
+        ShiftPlanAssignment.objects.create(employee=self.bob, plan=self.rotation, group="B", start_date=date(2026, 9, 1))
+        upload = make_upload([["E002", "", "", "", "", "Extrusion Rotation", group_label(self.rotation, "B"), ""]])
+        report = apply_roster_upload(upload, dry_run=False)
+        self.assertEqual((report.changes, report.unchanged), (0, 1))
+
+    def test_a_different_letter_moves_the_person_to_the_other_shift(self):
+        ShiftPlanAssignment.objects.create(employee=self.bob, plan=self.rotation, group="B", start_date=date(2026, 9, 1))
+        other = "A" if group_label(self.rotation, "B") == "B" else "B"
+        upload = make_upload([["E002", "", "", "", "", "Extrusion Rotation", other, ""]])
+        report = apply_roster_upload(upload, dry_run=False)
+        self.assertEqual(report.changes, 1)
+        self.assertEqual(group_label(self.rotation, ShiftPlanAssignment.objects.get(employee=self.bob, end_date__isnull=True).group), other)
 
 
 class RosterUploadAPITests(TestCase):
@@ -197,3 +218,4 @@ class RosterUploadAPITests(TestCase):
         upload = make_upload([["E001", "", "", "", "", "Permanent Day", "", ""]])
         response = self.client.post("/api/attendance/shift-roster/upload/", {"file": upload}, format="multipart")
         self.assertEqual(response.status_code, 403)
+
