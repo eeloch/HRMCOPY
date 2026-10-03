@@ -1,8 +1,10 @@
+from io import StringIO
 from datetime import date, time, timedelta
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from employees.models import Department, Employee
@@ -792,3 +794,94 @@ class RecalculateAttendanceTests(PlanTestCase):
         before = EmployeeRosterDay.objects.filter(employee=person).count()
         call_command("recalculate_attendance", "--from", (timezone.localdate() - timedelta(days=1)).isoformat(), "--employees", "RC-2", "--dry-run")
         self.assertEqual(EmployeeRosterDay.objects.filter(employee=person).count(), before)
+
+
+class MeltingFlexibleAndPermanentPlansTests(PlanTestCase):
+    """The four plans from the 3 Oct roster: Melting, Flexible, Permanent 8-7 and Permanent 7-6."""
+
+    def setUp(self):
+        super().setUp()
+        self.rotation.name = "Rotating Day / Night (weekly)"
+        self.rotation.save()
+
+    def test_the_command_creates_the_four_plans_once(self):
+        from django.core.management import call_command
+
+        call_command("setup_melting_and_permanent_shifts", stdout=StringIO())
+        call_command("setup_melting_and_permanent_shifts", stdout=StringIO())
+        names = set(ShiftPlan.objects.values_list("name", flat=True))
+        for name in ("Melting Shift Plan (Mon-Sat Day/Night)", "Flexible Shift (no fixed hours)", "Permanent Shift (8AM-7PM)", "Permanent Shift (7AM-6PM)"):
+            self.assertIn(name, names)
+        self.assertEqual(ShiftPlan.objects.filter(name__startswith="Permanent Shift").count(), 2)
+        self.assertEqual(Shift.objects.filter(name="Flexible (no fixed hours)", is_flexible=True).count(), 1)
+
+    def test_melting_works_monday_to_saturday_only_and_swaps_weekly(self):
+        from django.core.management import call_command
+
+        call_command("setup_melting_and_permanent_shifts", stdout=StringIO())
+        melting = ShiftPlan.objects.get(name__startswith="Melting")
+        day_week = self.names(self.week(melting, "A", MONDAY))
+        night_week = self.names(self.week(melting, "B", MONDAY))
+        self.assertEqual(day_week, ["W:Day Shift"] * 6 + ["R"])
+        self.assertEqual(night_week, ["W:Night Shift"] * 6 + ["R"])  # last shift Saturday night; Sunday is rest
+        self.assertEqual(self.names(self.week(melting, "A", MONDAY + timedelta(days=7))), night_week)  # next week they swap
+
+    def test_permanent_shift_times(self):
+        from django.core.management import call_command
+
+        call_command("setup_melting_and_permanent_shifts", stdout=StringIO())
+        long_day = ShiftPlan.objects.get(name="Permanent Shift (8AM-7PM)").shift
+        early = ShiftPlan.objects.get(name="Permanent Shift (7AM-6PM)").shift
+        self.assertEqual((long_day.start_time.strftime("%H:%M"), long_day.end_time.strftime("%H:%M")), ("08:00", "19:00"))
+        self.assertEqual((early.start_time.strftime("%H:%M"), early.end_time.strftime("%H:%M")), ("07:00", "18:00"))
+
+    def _flexible_person(self, number):
+        from django.core.management import call_command
+
+        call_command("setup_melting_and_permanent_shifts", stdout=StringIO())
+        dept = Department.objects.create(name=f"Flex {number}")
+        person = Employee.objects.create(employee_id=number, first_name="Flex", last_name=number, department=dept)
+        day = timezone.localdate() - timedelta(days=3)
+        while day.weekday() == 6:  # a working day (Monday to Saturday)
+            day -= timedelta(days=1)
+        assign_plan([person], ShiftPlan.objects.get(name__startswith="Flexible"), start_date=day - timedelta(days=7))
+        return person, day
+
+    def _punch(self, person, day, hour, minute, tag):
+        from datetime import datetime, time as dtime
+
+        from .models import AttendanceEvent
+
+        AttendanceEvent.objects.create(employee=person, timestamp=timezone.make_aware(datetime.combine(day, dtime(hour, minute))), external_event_id=f"{person.employee_id}-{tag}")
+
+    def test_a_flexible_day_is_never_late_early_or_overtime(self):
+        from .models import AttendanceException, DailyAttendance
+        from .services.processing import process_employee_attendance
+
+        person, day = self._flexible_person("FX-1")
+        self._punch(person, day, 13, 40, "a")  # arrives mid-afternoon: not late, there is no start time
+        self._punch(person, day, 15, 5, "b")  # and leaves early: not early, there is no closing time
+        process_employee_attendance(person, day)
+        record = DailyAttendance.objects.get(employee=person, date=day)
+        self.assertEqual((record.status, record.late_minutes, record.early_departure_minutes, record.overtime_minutes), ("present", 0, 0, 0))
+        self.assertEqual(record.worked_minutes, 85)
+        self.assertFalse(AttendanceException.objects.filter(attendance=record).exists())
+
+    def test_a_flexible_day_without_punches_is_an_absence_of_one_normal_day(self):
+        from .models import AttendanceException, DailyAttendance
+        from .services.processing import process_employee_attendance
+
+        person, day = self._flexible_person("FX-2")
+        process_employee_attendance(person, day)
+        record = DailyAttendance.objects.get(employee=person, date=day)
+        self.assertEqual(record.status, "absent")
+        self.assertEqual(AttendanceException.objects.get(attendance=record, exception_type="absence").minutes_affected, 720)
+
+    def test_punches_of_the_next_day_do_not_leak_into_a_flexible_day(self):
+        from .models import DailyAttendance
+        from .services.processing import process_employee_attendance
+
+        person, day = self._flexible_person("FX-3")
+        self._punch(person, day + timedelta(days=1), 1, 30, "n")  # 1:30 the next morning belongs to the next day
+        process_employee_attendance(person, day)
+        self.assertEqual(DailyAttendance.objects.get(employee=person, date=day).status, "absent")

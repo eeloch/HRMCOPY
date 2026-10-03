@@ -14,6 +14,7 @@ from audit.services import AuditService
 
 
 CAPTURE_WINDOW_HOURS = 3
+FLEXIBLE_DAY_MINUTES = 720  # an absence on a flexible day costs one normal 12-hour day
 PENDING_EXCEPTION_STATUS = "pending"
 
 
@@ -145,14 +146,16 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
         return None
 
     scheduled_start, scheduled_end = shift_schedule(shift, work_date)
+    # A flexible shift is the calendar day itself, so punches of the neighbouring days must not leak in.
+    window = timedelta(0) if shift.is_flexible else timedelta(hours=CAPTURE_WINDOW_HOURS)
     events = AttendanceEvent.objects.filter(
         employee=employee,
-        timestamp__gte=scheduled_start - timedelta(hours=CAPTURE_WINDOW_HOURS),
-        timestamp__lte=scheduled_end + timedelta(hours=CAPTURE_WINDOW_HOURS),
+        timestamp__gte=scheduled_start - window,
+        timestamp__lte=scheduled_end + window,
     ).order_by("timestamp")
 
     has_leave = employee.pk in (leave_ids if leave_ids is not None else set(approved_leave_employee_ids(work_date)))
-    shift_open = now < scheduled_end + timedelta(hours=CAPTURE_WINDOW_HOURS)
+    shift_open = now < scheduled_end + window
 
     # Leave stays an operational overlay. Do not create an absence row or punch
     # facts for a leave-only shift; existing facts remain untouched when no events exist.
@@ -252,13 +255,18 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
             missing_clock_in = False
             missing_clock_out = False
 
+        if shift.is_flexible:  # no resumption or closing time: nothing to be late for, nothing to leave early
+            attendance.late_minutes = attendance.early_departure_minutes = attendance.overtime_minutes = 0
+            if attendance.status == "late":
+                attendance.status = "present"
+
         attendance.save()
 
         _sync_exception(
             attendance,
             "absence",
             applies=attendance.status == "absent",
-            minutes=int((scheduled_end - scheduled_start).total_seconds() // 60),
+            minutes=FLEXIBLE_DAY_MINUTES if shift.is_flexible else int((scheduled_end - scheduled_start).total_seconds() // 60),
         )
         _sync_exception(
             attendance,

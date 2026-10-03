@@ -26,6 +26,12 @@ class Shift(models.Model):
         default=False,
     )
 
+    # No resumption or closing time (some security heads): the whole day is the shift. Whoever punches that day is
+    # present - never late, never leaving early, no overtime - and nobody is absent unless they never punched.
+    is_flexible = models.BooleanField(
+        default=False,
+    )
+
     active = models.BooleanField(
         default=True,
     )
@@ -34,6 +40,8 @@ class Shift(models.Model):
         def clock(value):  # a time, or the raw "07:00" string on an instance that was just created from one
             return value.strftime("%H:%M") if hasattr(value, "strftime") else str(value)[:5]
 
+        if self.is_flexible:
+            return f"{self.name} (flexible hours)"
         return f"{self.name} ({clock(self.start_time)}-{clock(self.end_time)}{', overnight' if self.is_overnight else ''})"
 
 
