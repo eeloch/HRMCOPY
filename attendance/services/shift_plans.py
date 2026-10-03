@@ -74,7 +74,7 @@ def sync_rosters(assignments, start, end):
         return summary
     employee_ids = {a.employee_id for a in assignments}
     existing = {(r.employee_id, r.date): r for r in EmployeeRosterDay.objects.filter(employee_id__in=employee_ids, date__range=(start, end))}
-    to_create, to_update = [], []
+    to_create, replaced = [], []  # replaced: (id of the row to rewrite, its new version)
     for assignment in assignments:
         first = max(start, assignment.start_date)
         last = min(end, assignment.end_date) if assignment.end_date else end
@@ -88,15 +88,18 @@ def sync_rosters(assignments, start, end):
             elif row.source in PROTECTED_SOURCES:
                 summary.kept += 1
             elif row.status != status or row.shift_id != (shift.pk if shift else None) or row.notes != note:
-                row.status, row.shift, row.notes = status, shift, note
-                to_update.append(row)
+                replaced.append((row.pk, EmployeeRosterDay(employee_id=assignment.employee_id, date=day, status=status, shift=shift, source=RosterDaySource.GENERATED, notes=note)))
             else:
                 summary.kept += 1
             day += timedelta(days=1)
+    # Rewriting a row is a delete and insert of the same day, done in bulk: nothing refers to a roster row, and
+    # bulk_update on tens of thousands of rows (a rotation swap rewrites most of them) takes far too long here.
     with transaction.atomic():
-        EmployeeRosterDay.objects.bulk_create(to_create, batch_size=2000)
-        EmployeeRosterDay.objects.bulk_update(to_update, ["status", "shift", "notes", "updated_at"], batch_size=2000)
-    summary.created, summary.updated = len(to_create), len(to_update)
+        ids = [row_id for row_id, _ in replaced]
+        for chunk_start in range(0, len(ids), 1000):
+            EmployeeRosterDay.objects.filter(pk__in=ids[chunk_start:chunk_start + 1000]).delete()
+        EmployeeRosterDay.objects.bulk_create(to_create + [fresh for _, fresh in replaced], batch_size=2000)
+    summary.created, summary.updated = len(to_create), len(replaced)
     return summary
 
 
