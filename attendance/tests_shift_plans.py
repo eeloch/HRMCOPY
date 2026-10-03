@@ -602,3 +602,78 @@ class SwapRotationGroupsTests(PlanTestCase):
         self.assertEqual(ok.status_code, 200)
         self.rotation.refresh_from_db()
         self.assertEqual(self.rotation.anchor_monday, MONDAY + timedelta(days=7))
+
+
+class RealignRotationTests(PlanTestCase):
+    """A rotation that ran the wrong way round is corrected from a past date and attendance is recalculated."""
+
+    def setUp(self):
+        super().setUp()
+        from django.utils import timezone
+
+        self.dept = Department.objects.create(name="Realign Dept")
+        self.person = Employee.objects.create(employee_id="RA-1", first_name="Re", last_name="Align", department=self.dept)
+        # today is somewhere in a week; use a reference week so that group A is wrongly on Night this week
+        self.today = timezone.localdate()
+        monday = self.today - timedelta(days=self.today.weekday())
+        # group A is on Night this week, i.e. the anchor week was last week
+        ShiftPlan.objects.filter(pk=self.rotation.pk).update(anchor_monday=monday - timedelta(days=7))
+        self.rotation.refresh_from_db()
+        self.monday = monday
+        assign_plan([self.person], self.rotation, group="A", start_date=monday - timedelta(days=14))
+
+    def test_the_roster_swaps_from_the_date_and_attendance_is_recalculated_from_the_punches(self):
+        from datetime import datetime, time as dtime
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        from .models import AttendanceEvent, DailyAttendance
+
+        tuesday = self.monday + timedelta(days=1)
+        if tuesday > self.today:
+            self.skipTest("the test needs a Tuesday that has already happened this week")
+        stamp = lambda day, hour, minute: timezone.make_aware(datetime.combine(day, dtime(hour, minute)))  # noqa: E731
+        # They really worked the Day shift: in at 06:40, out at 19:05. The wrong roster (Night) cannot make sense of that.
+        for number, moment in enumerate((stamp(tuesday, 6, 40), stamp(tuesday, 19, 5))):
+            AttendanceEvent.objects.create(employee=self.person, timestamp=moment, external_event_id=f"ra-{number}")
+        from .services.processing import process_employee_attendance
+
+        process_employee_attendance(self.person, tuesday)
+        wrong = DailyAttendance.objects.get(employee=self.person, date=tuesday)
+        self.assertEqual(wrong.shift, self.night)
+        self.assertNotEqual((wrong.status, wrong.late_minutes), ("present", 0))  # the wrong roster misreads the punches
+
+        self.assertEqual(EmployeeRosterDay.objects.get(employee=self.person, date=tuesday).shift, self.night)
+        call_command("realign_rotation", "--from", self.monday.isoformat())
+
+        self.assertEqual(EmployeeRosterDay.objects.get(employee=self.person, date=tuesday).shift, self.day)
+        self.rotation.refresh_from_db()
+        self.assertEqual(self.rotation.anchor_monday, self.monday)
+        fixed = DailyAttendance.objects.get(employee=self.person, date=tuesday)
+        self.assertEqual((fixed.shift, fixed.status, fixed.late_minutes), (self.day, "present", 0))
+        self.assertEqual((timezone.localtime(fixed.actual_clock_in).strftime("%H:%M"), timezone.localtime(fixed.actual_clock_out).strftime("%H:%M")), ("06:40", "19:05"))
+
+    def test_only_the_named_reviewers_decisions_on_the_old_roster_are_removed(self):
+        from django.core.management import call_command
+
+        from .models import AttendanceException, DailyAttendance
+
+        tuesday = self.monday + timedelta(days=1)
+        if tuesday > self.today:
+            self.skipTest("the test needs a Tuesday that has already happened this week")
+        attendance = DailyAttendance.objects.create(employee=self.person, date=tuesday, shift=self.night, status="absent")
+        mine = AttendanceException.objects.create(attendance=attendance, exception_type="absence", status="waived", reviewed_by="September test review (quick rules)")
+        theirs = AttendanceException.objects.create(attendance=attendance, exception_type="late", status="approved", reviewed_by="Real Reviewer")
+        call_command("realign_rotation", "--from", self.monday.isoformat())
+        self.assertFalse(AttendanceException.objects.filter(pk=mine.pk).exists())
+        self.assertTrue(AttendanceException.objects.filter(pk=theirs.pk).exists())
+
+    def test_a_dry_run_changes_nothing_and_a_future_date_is_refused(self):
+        from django.core.management import CommandError, call_command
+
+        before = ShiftPlan.objects.get(pk=self.rotation.pk).anchor_monday
+        call_command("realign_rotation", "--from", self.monday.isoformat(), "--dry-run")
+        self.assertEqual(ShiftPlan.objects.get(pk=self.rotation.pk).anchor_monday, before)
+        with self.assertRaises(CommandError):
+            call_command("realign_rotation", "--from", (self.today + timedelta(days=3)).isoformat())
