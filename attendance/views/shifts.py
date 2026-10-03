@@ -233,11 +233,14 @@ class ShiftPlanFlipAPIView(APIView):
         from attendance.models import ShiftPlan
         from attendance.services.shift_plans import flip_rotation_week
 
+        from datetime import date
+
         plan = get_object_or_404(ShiftPlan, pk=plan_id)
         try:
-            summary = flip_rotation_week(plan)
+            start = date.fromisoformat(request.data["start_date"]) if request.data.get("start_date") else None
+            summary = flip_rotation_week(plan, from_date=start)
         except ValueError as error:
-            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": str(error) if "rotation" in str(error) else "The start date is not valid."}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"roster_days_changed": summary.updated + summary.created})
 
 

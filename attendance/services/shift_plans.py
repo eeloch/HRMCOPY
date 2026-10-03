@@ -165,13 +165,25 @@ def extend_rosters(today=None, horizon_days=HORIZON_DAYS):
     return sync_rosters(assignments, today, end)
 
 
-def flip_rotation_week(plan):
-    """Swap which group is on Day: moves the reference week on by one. For when the plan started the wrong way round."""
+def next_shift_week_start(today=None):
+    """The date a new shift week begins: the Sunday (the night shift that starts a night week begins on Sunday)
+    that has not started yet. Swapping groups from here lets this week finish as it was worked, so nobody is moved
+    from a night shift straight onto a day shift."""
+    today = today or timezone.localdate()
+    sunday = monday_of(today) + timedelta(days=6)
+    return sunday if sunday >= today else sunday + timedelta(days=7)
+
+
+def flip_rotation_week(plan, from_date=None):
+    """Swap which group is on Day: moves the reference week on by one, so from `from_date` Group A does what Group B
+    was going to do and the other way round. Default: the start of the next shift week. Days before it are left as
+    they were worked. The weekly alternation then carries on by itself. For when the plan started the wrong way round."""
     if plan.kind not in ("rotation", "alternating"):
         raise ValueError("Only a rotation plan has groups to swap.")
+    start = from_date or next_shift_week_start()
     plan.anchor_monday = plan.anchor_monday + timedelta(days=7)
     plan.save(update_fields=["anchor_monday"])
-    return extend_rosters()
+    return extend_rosters(today=start)
 
 
 def clear_false_absences_on_rest_days(employees, start, end, *, actor=""):

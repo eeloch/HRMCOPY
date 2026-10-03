@@ -541,3 +541,64 @@ class WeekShiftsLineTests(PlanTestCase):
         off = self.person("WK-O")
         assign_plan([off], self.rotation, group="A", start_date=self.monday, day_off=0)  # Monday off
         self.assertEqual(self.weeks(off)["this_week"]["shift"], "Day")
+
+
+class SwapRotationGroupsTests(PlanTestCase):
+    """Swapping the groups starts at the next shift week, so nobody goes from a night shift straight onto a day shift."""
+
+    def setUp(self):
+        super().setUp()
+        self.dept = Department.objects.create(name="Swap Dept")
+        self.a = Employee.objects.create(employee_id="SW-A", first_name="A", last_name="Group", department=self.dept)
+        self.b = Employee.objects.create(employee_id="SW-B", first_name="B", last_name="Group", department=self.dept)
+        # a Saturday inside a week where Group A is on Night (the week after the anchor week)
+        self.saturday = MONDAY + timedelta(days=7 + 5)
+        ShiftPlan.objects.filter(pk=self.rotation.pk).update(anchor_monday=MONDAY)
+        assign_plan([self.a], self.rotation, group="A", start_date=MONDAY)
+        assign_plan([self.b], self.rotation, group="B", start_date=MONDAY)
+
+    def shift(self, employee, when):
+        row = EmployeeRosterDay.objects.get(employee=employee, date=when)
+        return (row.status, row.shift.name if row.shift else None)
+
+    def test_the_next_shift_week_starts_on_the_coming_sunday(self):
+        from .services.shift_plans import next_shift_week_start
+
+        self.assertEqual(next_shift_week_start(date(2026, 10, 3)), date(2026, 10, 4))   # Saturday -> tomorrow
+        self.assertEqual(next_shift_week_start(date(2026, 10, 5)), date(2026, 10, 11))  # Monday -> the Sunday after the week
+        self.assertEqual(next_shift_week_start(date(2026, 10, 4)), date(2026, 10, 4))   # a Sunday -> that night
+
+    def test_the_swap_leaves_this_week_alone_and_flips_the_next(self):
+        from .services.shift_plans import monday_of
+
+        this_monday = monday_of(date(2026, 10, 1))  # anchor week 2: week 2 after MONDAY=Sep 21 is Oct 5? use explicit dates below
+        saturday, sunday, monday = date(2026, 10, 3), date(2026, 10, 4), date(2026, 10, 5)
+        before = {name: (self.shift(emp, saturday), self.shift(emp, sunday), self.shift(emp, monday)) for name, emp in (("a", self.a), ("b", self.b))}
+        flip_rotation_week(self.rotation, from_date=sunday)
+        after = {name: (self.shift(emp, saturday), self.shift(emp, sunday), self.shift(emp, monday)) for name, emp in (("a", self.a), ("b", self.b))}
+        self.assertEqual(before["a"][0], after["a"][0])  # Saturday untouched
+        self.assertEqual(before["b"][0], after["b"][0])
+        self.assertEqual(after["a"][2], before["b"][2])  # from Monday each group works what the other was going to
+        self.assertEqual(after["b"][2], before["a"][2])
+        self.assertEqual(after["a"][1], before["b"][1])  # and Sunday night starts the new week
+        self.assertIsNotNone(this_monday)
+
+    def test_swapping_twice_puts_everything_back(self):
+        snapshot = lambda: [(row.date, row.shift_id, row.status) for row in EmployeeRosterDay.objects.filter(employee=self.a, date__gte=date(2026, 10, 4), date__lt=date(2027, 1, 1)).order_by("date")]  # noqa: E731
+        before = snapshot()
+        flip_rotation_week(self.rotation, from_date=date(2026, 10, 4))
+        self.assertNotEqual(snapshot(), before)
+        flip_rotation_week(self.rotation, from_date=date(2026, 10, 4))
+        self.assertEqual(snapshot(), before)
+
+    def test_the_api_swaps_from_a_chosen_date_and_refuses_a_bad_one(self):
+        user = get_user_model().objects.create_user(username="swap-manager", password="pw")
+        user.user_permissions.add(Permission.objects.get(codename="manage_shifts"))
+        client = APIClient()
+        client.force_authenticate(user)
+        bad = client.post(f"/api/attendance/shift-plans/{self.rotation.pk}/flip-week/", {"start_date": "not-a-date"}, format="json")
+        self.assertEqual(bad.status_code, 400)
+        ok = client.post(f"/api/attendance/shift-plans/{self.rotation.pk}/flip-week/", {"start_date": "2026-10-04"}, format="json")
+        self.assertEqual(ok.status_code, 200)
+        self.rotation.refresh_from_db()
+        self.assertEqual(self.rotation.anchor_monday, MONDAY + timedelta(days=7))
