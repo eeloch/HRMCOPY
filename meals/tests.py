@@ -2654,3 +2654,110 @@ class MealTerminalOfflineAlertTests(TestCase):
 
         BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=self.noon + timedelta(minutes=30))
         self.assertEqual(self.check(self.noon + timedelta(minutes=40)), ["offline: Alert Meal Terminal"])
+
+
+class LateEntitlementBalancingTests(TestCase):
+    """New starters scan before their entitlement and shift are entered: those tickets are recorded as excess
+    against zero. Accept must balance them against the entitlement entered afterwards instead of charging."""
+
+    def setUp(self):
+        self.day = date(2026, 10, 2)
+        self.employee = Employee.objects.create(employee_id="000777", first_name="New", last_name="Starter")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=date(2026, 9, 1))
+        MealDevice.objects.create(name="Canteen", serial_number="MEAL777", active=True)
+        BiometricIdentity.objects.create(employee=self.employee, system="device", source_identifier="MEAL777", external_user_id="777")
+        self.shift = Shift.objects.create(name="Late Entitlement Day", start_time="07:00", end_time="19:00", is_overnight=False)
+        self.reviewer = get_user_model().objects.create_user(username="late-reviewer", password="pw")
+        self.reviewer.user_permissions.add(Permission.objects.get(codename="review_meal_excess"), Permission.objects.get(codename="record_meal_operations"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.reviewer)
+
+    def scan(self, event_id, hour):
+        collection, _ = MealService.ingest(
+            system="device", source_identifier="MEAL777", device_serial_number="MEAL777", external_user_id="777",
+            external_event_id=event_id, timestamp=timezone.make_aware(datetime(2026, 10, 2, hour, 0)),
+        )
+        collection.refresh_from_db()
+        return collection
+
+    def put_on_shift(self):
+        EmployeeRosterDay.objects.update_or_create(employee=self.employee, date=self.day, defaults={"status": RosterDayStatus.WORK, "shift": self.shift})
+
+    def entitle(self, tickets=1, effective_from=None):
+        return EmployeeMealEntitlement.objects.create(employee=self.employee, tickets_per_work_day=tickets, effective_from=effective_from or self.day, reason="entered after induction")
+
+    def test_accept_balances_a_ticket_the_late_entitlement_covers_and_charges_the_extra(self):
+        self.put_on_shift()  # on the roster but nothing entitled yet
+        first, second = self.scan("a", 12), self.scan("b", 13)
+        self.assertEqual((first.entitlement_snapshot, second.entitlement_snapshot), (0, 0))
+
+        self.entitle(1, effective_from=self.day)  # entered afterwards, backdated to the day
+        MealService.approve(first.excess_exception, None, self.reviewer, "")
+        MealService.approve(second.excess_exception, None, self.reviewer, "")
+
+        first.refresh_from_db(); second.refresh_from_db()
+        self.assertEqual((first.status, first.excess_exception_id), (MealCollectionStatus.WITHIN, None))
+        self.assertEqual(second.excess_exception.status, MealExcessStatus.APPROVED)  # the second meal is a real extra
+        self.assertEqual(second.excess_exception.proposed_deduction, Decimal("700.00"))
+        self.assertEqual(MealExcessException.objects.filter(employee=self.employee, status=MealExcessStatus.CANCELLED).count(), 1)
+
+    def test_a_first_entitlement_entered_late_and_starting_after_the_scan_also_balances(self):
+        self.put_on_shift()
+        ticket = self.scan("a", 12)
+        self.entitle(1, effective_from=self.day + timedelta(days=3))  # "from Monday", entered after the scan
+
+        MealService.approve(ticket.excess_exception, None, self.reviewer, "")
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status, MealCollectionStatus.WITHIN)
+        self.assertFalse(MealExcessException.objects.filter(employee=self.employee, status__in=[MealExcessStatus.APPROVED, MealExcessStatus.DEDUCTED]).exists())
+
+    def test_shift_allocated_after_the_scan_counts_too(self):
+        self.entitle(1, effective_from=self.day - timedelta(days=1))  # entitlement was there, the shift was not
+        ticket = self.scan("a", 12)
+        self.assertEqual(ticket.status, MealCollectionStatus.UNSCHEDULED)
+        self.put_on_shift()
+
+        MealService.approve(ticket.excess_exception, None, self.reviewer, "")
+
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status, MealCollectionStatus.WITHIN)
+
+    def test_an_entitlement_set_up_before_the_scan_for_a_later_start_still_charges(self):
+        self.put_on_shift()
+        self.entitle(1, effective_from=self.day + timedelta(days=5))  # deliberately not entitled yet - entered BEFORE the scan
+        ticket = self.scan("a", 12)
+
+        MealService.approve(ticket.excess_exception, None, self.reviewer, "")
+
+        ticket.excess_exception.refresh_from_db()
+        self.assertEqual(ticket.excess_exception.status, MealExcessStatus.APPROVED)
+
+    def test_an_entitlement_starting_far_after_the_scan_still_charges(self):
+        self.put_on_shift()
+        ticket = self.scan("a", 12)
+        self.entitle(1, effective_from=self.day + timedelta(days=60))
+
+        MealService.approve(ticket.excess_exception, None, self.reviewer, "")
+
+        ticket.excess_exception.refresh_from_db()
+        self.assertEqual(ticket.excess_exception.status, MealExcessStatus.APPROVED)
+
+    def test_still_no_shift_means_the_ticket_is_charged_as_before(self):
+        ticket = self.scan("a", 12)
+        self.entitle(1, effective_from=self.day)
+
+        MealService.approve(ticket.excess_exception, None, self.reviewer, "")
+
+        ticket.excess_exception.refresh_from_db()
+        self.assertEqual(ticket.excess_exception.status, MealExcessStatus.APPROVED)
+
+    def test_the_accept_endpoints_report_what_was_balanced(self):
+        self.put_on_shift()
+        ticket = self.scan("a", 12)
+        self.entitle(1, effective_from=self.day)
+
+        response = self.client.post("/api/meals/excess/bulk-decision/", {"action": "accept", "ids": [ticket.excess_exception_id]}, format="json")
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual((response.json()["succeeded"], response.json()["balanced"]), ([ticket.excess_exception_id], [ticket.excess_exception_id]))

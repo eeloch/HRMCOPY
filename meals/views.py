@@ -325,6 +325,7 @@ class MealExcessApproveAPIView(APIView):
                 "proposed_deduction": (
                     exception.proposed_deduction
                 ),
+                "balanced_tickets": getattr(exception, "balanced_tickets", 0),
             }
         )   
 
@@ -536,7 +537,7 @@ class MealExcessBulkDecisionAPIView(APIView):
         reason = str(request.data.get("reason", "")).strip()
         exceptions = {x.pk: x for x in MealExcessException.objects.select_related("employee").filter(pk__in=ids)}
 
-        succeeded, failed = [], []
+        succeeded, failed, balanced = [], [], []
         for raw_id in ids:
             try:
                 item_id = int(raw_id)
@@ -550,6 +551,8 @@ class MealExcessBulkDecisionAPIView(APIView):
             try:
                 if action == "accept":
                     MealService.approve(exception, None, request.user, "")
+                    if getattr(exception, "balanced_tickets", 0):
+                        balanced.append(item_id)
                 elif action == "waive":
                     MealService.cancel(exception, request.user, reason, notify=False)
                 else:
@@ -565,7 +568,7 @@ class MealExcessBulkDecisionAPIView(APIView):
             for user in get_user_model().objects.filter(is_superuser=True):
                 NotificationService.create(recipient=user, event_type=event_type, title=title, message=message, severity="warning", related_url="/meals")
 
-        return Response({"succeeded": succeeded, "failed": failed})
+        return Response({"succeeded": succeeded, "failed": failed, "balanced": balanced})
 
 
 MAX_PENDING_IDS = 5000

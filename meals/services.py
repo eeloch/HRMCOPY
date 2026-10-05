@@ -738,6 +738,64 @@ class MealService:
         refresh(collection.employee_id)  # a voided ticket may free one: switch them back on at the terminal
         return collection
 
+    LATE_ENTITLEMENT_GRACE_DAYS = 14
+
+    @classmethod
+    def late_entitlement(cls, exception):
+        """What this person is entitled to on the excess's work date NOW, when that is more than the system knew
+        when the ticket was collected - the new-starter case: the scan happened while the entitlement (or the
+        shift allocation) had not been entered yet, so the ticket was recorded as an excess against zero.
+
+        Counts only when the roster now says they work that day, and only when the entitlement is one the system
+        did not have then: a rule applies from its own effective dates, except that a person's very first
+        entitlement, entered after the ticket was collected and starting within a fortnight of it, is taken to
+        cover the days before it (it was just entered late). 0 means nothing to balance against."""
+        employee, work_date = exception.employee, exception.work_date
+        roster = EmployeeRosterDay.objects.filter(employee=employee, date=work_date).first()
+        if roster is None or roster.status != RosterDayStatus.WORK:
+            return 0
+        base = cls.approved_entitlement(employee, work_date)
+        if base == 0:
+            first = EmployeeMealEntitlement.objects.filter(employee=employee).order_by("effective_from", "id").first()
+            if (
+                first is not None
+                and first.created_at > exception.created_at
+                and 0 < (first.effective_from - work_date).days <= cls.LATE_ENTITLEMENT_GRACE_DAYS
+                and not EmployeeMealEntitlement.objects.filter(employee=employee, effective_from__lte=work_date).exists()
+            ):
+                base = first.tickets_per_work_day
+        return max(base - cls.absence_penalty_reduction(employee, work_date), 0)
+
+    @classmethod
+    def balance_against_late_entitlement(cls, exception, actor):
+        """Clear the tickets of this excess that the person's entitlement, entered late, covers: no charge, no
+        deduction. Whatever is still beyond the entitlement stays an excess (and Accept charges it). Returns how
+        many tickets were balanced."""
+        entitlement = cls.late_entitlement(exception)
+        if entitlement <= exception.entitlement_snapshot:
+            return 0
+        tickets = list(MealCollection.objects.select_for_update().filter(excess_exception=exception, voided_at__isnull=True).order_by("sequence_number"))
+        covered = [ticket for ticket in tickets if ticket.sequence_number <= entitlement]
+        if not covered:
+            return 0
+        for ticket in covered:
+            ticket.status, ticket.entitlement_snapshot, ticket.excess_exception = MealCollectionStatus.WITHIN, entitlement, None
+            ticket.save(update_fields=["status", "entitlement_snapshot", "excess_exception"])
+        remaining = len(tickets) - len(covered)
+        note = f"Balanced against the entitlement added later ({entitlement} per day): no deduction."
+        if remaining == 0:
+            exception.status, exception.reviewer, exception.reviewed_at, exception.comment = MealExcessStatus.CANCELLED, actor, timezone.now(), note
+            exception.save()
+        else:
+            exception.entitlement_snapshot, exception.excess_quantity = entitlement, remaining
+            exception.proposed_deduction = Decimal(remaining) * exception.rate_snapshot
+            exception.save()
+        AuditService.log(event_type="meals.excess_balanced", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.SUCCESS, title="Meal excess balanced against late entitlement", description=f"{len(covered)} ticket(s) on {exception.work_date} fall within the entitlement entered afterwards; no deduction.", metadata={"exception": exception.pk, "entitlement": entitlement, "tickets_balanced": [t.pk for t in covered], "tickets_still_excess": remaining})
+        from .gating import refresh
+
+        refresh(exception.employee_id)
+        return len(covered)
+
     @staticmethod
     @transaction.atomic
     def approve(exception, period, actor, comment=""):
@@ -753,6 +811,12 @@ class MealService:
             raise ValueError(
                 "This meal excess has already been decided."
             )
+
+        # The entitlement (or shift) may have been entered after the ticket was collected: balance that first, so
+        # Accept never charges someone for a meal they are entitled to.
+        exception.balanced_tickets = MealService.balance_against_late_entitlement(exception, actor)
+        if exception.status != MealExcessStatus.PENDING:
+            return exception
 
         period = period or PayrollPeriod.objects.filter(year=exception.work_date.year, month=exception.work_date.month).first()
         payroll = None
