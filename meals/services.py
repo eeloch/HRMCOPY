@@ -774,13 +774,17 @@ class MealService:
         entitlement = cls.late_entitlement(exception)
         if entitlement <= exception.entitlement_snapshot:
             return 0
-        tickets = list(MealCollection.objects.select_for_update().filter(excess_exception=exception, voided_at__isnull=True).order_by("sequence_number"))
-        covered = [ticket for ticket in tickets if ticket.sequence_number <= entitlement]
+        # A ticket's place is its rank among the day's valid tickets: one declined or voided earlier no longer counts,
+        # so the next ticket may now be the person's first (it still carries the number it was given at the time).
+        day_tickets = list(MealCollection.objects.select_for_update().filter(employee=exception.employee, work_date=exception.work_date, voided_at__isnull=True).order_by("event__timestamp", "id"))
+        rank = {ticket.pk: place for place, ticket in enumerate(day_tickets, start=1)}
+        tickets = [ticket for ticket in day_tickets if ticket.excess_exception_id == exception.pk]
+        covered = [ticket for ticket in tickets if rank[ticket.pk] <= entitlement]
         if not covered:
             return 0
         for ticket in covered:
-            ticket.status, ticket.entitlement_snapshot, ticket.excess_exception = MealCollectionStatus.WITHIN, entitlement, None
-            ticket.save(update_fields=["status", "entitlement_snapshot", "excess_exception"])
+            ticket.status, ticket.entitlement_snapshot, ticket.excess_exception, ticket.sequence_number = MealCollectionStatus.WITHIN, entitlement, None, rank[ticket.pk]
+            ticket.save(update_fields=["status", "entitlement_snapshot", "excess_exception", "sequence_number"])
         remaining = len(tickets) - len(covered)
         note = f"Balanced against the entitlement added later ({entitlement} per day): no deduction."
         if remaining == 0:

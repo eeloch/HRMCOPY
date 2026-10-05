@@ -2761,3 +2761,29 @@ class LateEntitlementBalancingTests(TestCase):
 
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual((response.json()["succeeded"], response.json()["balanced"]), ([ticket.excess_exception_id], [ticket.excess_exception_id]))
+
+    def test_a_ticket_whose_earlier_scan_was_declined_is_the_persons_first_and_is_balanced(self):
+        """Production, 5 Oct: ticket 1 declined and voided as a new-starter scan error; ticket 2 still carries
+        number 2 although it is now the only valid ticket."""
+        self.put_on_shift()
+        first, second = self.scan("a", 12), self.scan("b", 13)
+        MealService.decline(first.excess_exception, self.reviewer, "new employee scanning error")
+        self.entitle(1, effective_from=self.day)
+
+        MealService.approve(second.excess_exception, None, self.reviewer, "")
+
+        second.refresh_from_db()
+        self.assertEqual((second.status, second.sequence_number, second.excess_exception_id), (MealCollectionStatus.WITHIN, 1, None))
+        self.assertFalse(MealExcessException.objects.filter(employee=self.employee, status__in=[MealExcessStatus.APPROVED, MealExcessStatus.DEDUCTED]).exists())
+
+    def test_two_valid_tickets_against_one_late_entitlement_balance_only_the_first(self):
+        self.put_on_shift()
+        first, second = self.scan("a", 12), self.scan("b", 13)
+        self.entitle(1, effective_from=self.day)
+
+        MealService.approve(second.excess_exception, None, self.reviewer, "")  # the later meal is the extra one
+        MealService.approve(first.excess_exception, None, self.reviewer, "")
+
+        first.refresh_from_db(); second.refresh_from_db()
+        self.assertEqual(second.excess_exception.status, MealExcessStatus.APPROVED)
+        self.assertEqual((first.status, first.excess_exception_id), (MealCollectionStatus.WITHIN, None))
