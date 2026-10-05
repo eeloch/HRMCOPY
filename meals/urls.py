@@ -20,6 +20,8 @@ from .views import (
     MealTicketRateListCreateAPIView,
     MealVendorPaymentListCreateAPIView,
     MealVendorPeriodAPIView,
+    MealVendorClaimCreateAPIView,
+    MealVendorClaimDetailAPIView,
     MealVendorSummaryAPIView,
 )
 
@@ -106,6 +108,8 @@ urlpatterns = [
         MealVendorSummaryAPIView.as_view(),
         name="meal-vendor-summary",
     ),
+    path("vendor/claims/", MealVendorClaimCreateAPIView.as_view(), name="meal-vendor-claims"),
+    path("vendor/claims/<int:pk>/", MealVendorClaimDetailAPIView.as_view(), name="meal-vendor-claim-detail"),
     path(
         "vendor/payments/",
         MealVendorPaymentListCreateAPIView.as_view(),

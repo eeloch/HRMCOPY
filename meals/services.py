@@ -990,3 +990,39 @@ def apply_import_meal_entitlement(employee, tickets_per_day, *, actor=None, reas
 
         refresh(employee)  # switch them on/off at a meal terminal straight away if this changed what they're owed today
     return "created" if current is None else "changed"
+
+
+def allocate_vendor_claim(claim):
+    """Spread a vendor claim over the days it covers, in step with the tickets issued each day, so a week's claim
+    shows correctly whether you look by week, month or day.
+
+    A claim can never be paid for more tickets than were issued: any excess is reported, not allocated.
+    Returns {"days": {date: {"issued", "issued_amount", "claimed", "claimed_amount"}}, "issued", "claimed", "over_claimed"}."""
+    from django.db.models import Count, Sum
+
+    rows = {
+        row["work_date"]: row
+        for row in MealCollection.objects.filter(work_date__gte=claim.date_from, work_date__lte=claim.date_to, voided_at__isnull=True)
+        .values("work_date").annotate(n=Count("id"), amount=Sum("rate_snapshot"))
+    }
+    issued = sum(row["n"] for row in rows.values())
+    payable = min(claim.quantity, issued)
+    shares = {}
+    if issued:
+        floors = {day: payable * row["n"] // issued for day, row in rows.items()}
+        leftover = payable - sum(floors.values())
+        by_remainder = sorted(rows, key=lambda day: ((payable * rows[day]["n"]) % issued, day), reverse=True)
+        for day in by_remainder[:leftover]:
+            floors[day] += 1
+        shares = floors
+    days = {}
+    for day, row in rows.items():
+        claimed = shares.get(day, 0)
+        days[day] = {
+            "issued": row["n"],
+            "issued_amount": row["amount"] or Decimal("0"),
+            "claimed": claimed,
+            "claimed_amount": (row["amount"] or Decimal("0")) * claimed / row["n"],
+        }
+    return {"days": days, "issued": issued, "claimed": payable, "over_claimed": max(claim.quantity - issued, 0)}
+

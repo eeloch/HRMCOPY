@@ -2879,3 +2879,69 @@ class VendorSummaryTests(TestCase):
     def test_a_bad_range_is_refused(self):
         self.assertEqual(self.summary(date_from="2026-10-10", date_to="2026-10-01").status_code, 400)
         self.assertEqual(self.summary(group_by="decade").status_code, 400)
+
+
+class VendorClaimTests(VendorSummaryTests):
+    """Issued vs claimed: staff scan to be issued a ticket, but the vendor is paid for the tickets it claimed."""
+
+    def claim(self, date_from, date_to, quantity, user=None):
+        self.client.force_authenticate(user or self.user(f"claimer-{date_from}-{quantity}", "record_meal_vendor_payments"))
+        return self.client.post("/api/meals/vendor/claims/", {"date_from": date_from, "date_to": date_to, "quantity": quantity, "reference": "INV-1"}, format="json")
+
+    def week(self, key="2026-09-28", **params):
+        params = {"date_from": "2026-09-28", "date_to": "2026-10-11", **params}
+        return {b["key"]: b for b in self.summary(**params).json()["buckets"]}[key]
+
+    def test_a_weekly_claim_below_the_issued_count_is_what_is_owed(self):
+        self.assertEqual(self.claim("2026-09-28", "2026-10-04", 1).status_code, 201)  # 2 issued that week, 1 claimed
+        bucket = self.week()
+        self.assertEqual((bucket["tickets"], bucket["claimed"], bucket["unclaimed"], bucket["awaiting_claim"], float(bucket["owed"]), bucket["claim_status"]), (2, 1, 1, 0, 700.0, "claimed"))
+        data = self.summary(date_from="2026-09-28", date_to="2026-10-11").json()
+        self.assertEqual((data["totals"]["tickets"], data["totals"]["claimed"], data["totals"]["unclaimed"], float(data["totals"]["owed"])), (3, 1, 1, 1400.0))  # the next week is owed as issued
+
+    def test_days_with_no_claim_yet_are_owed_as_issued_and_flagged(self):
+        bucket = self.week("2026-10-05")
+        self.assertEqual((bucket["tickets"], bucket["claimed"], bucket["awaiting_claim"], float(bucket["owed"]), bucket["claim_status"]), (1, 0, 1, 700.0, "none"))
+
+    def test_a_claim_covering_part_of_a_week_makes_it_partial(self):
+        self.claim("2026-09-28", "2026-09-30", 1)  # covers the Monday only (1 issued)
+        bucket = self.week()
+        self.assertEqual((bucket["claimed"], bucket["unclaimed"], bucket["awaiting_claim"], bucket["claim_status"]), (1, 0, 1, "partial"))
+
+    def test_a_weekly_claim_shows_correctly_by_month_and_by_day(self):
+        self.claim("2026-09-28", "2026-10-04", 1)
+        months = {b["key"]: b for b in self.summary(date_from="2026-09-01", date_to="2026-10-31", group_by="month").json()["buckets"]}
+        self.assertEqual(months["2026-09-01"]["claimed"] + months["2026-10-01"]["claimed"], 1)
+        days = self.summary(date_from="2026-09-28", date_to="2026-10-05", group_by="day").json()["buckets"]
+        self.assertEqual(sum(day["claimed"] for day in days), 1)
+
+    def test_a_claim_cannot_make_the_vendor_paid_for_more_than_was_issued(self):
+        response = self.claim("2026-09-28", "2026-10-04", 5)  # vendor claims 5 of the 2 issued
+        self.assertEqual(response.status_code, 201)
+        bucket = self.week()
+        self.assertEqual((bucket["claimed"], float(bucket["owed"])), (2, 1400.0))
+        claim = self.summary(date_from="2026-09-28", date_to="2026-10-11").json()["claims"][0]
+        self.assertEqual((claim["quantity"], claim["issued"], claim["payable"], claim["over_claimed"]), (5, 2, 2, 3))
+
+    def test_overlapping_future_and_unauthorised_claims_are_refused(self):
+        self.claim("2026-09-28", "2026-10-04", 2)
+        self.assertEqual(self.claim("2026-10-04", "2026-10-06", 1).status_code, 400)  # overlaps the first
+        self.assertEqual(self.claim("2026-10-20", "2026-10-21", 1).status_code, 400)  # not happened yet
+        self.assertEqual(self.claim("2026-10-05", "2026-10-04", 1).status_code, 400)  # backwards
+        self.client.force_authenticate(self.viewer)  # may look, may not enter
+        self.assertEqual(self.client.post("/api/meals/vendor/claims/", {"date_from": "2026-10-05", "date_to": "2026-10-05", "quantity": 1}, format="json").status_code, 403)
+
+    def test_a_wrong_claim_can_be_deleted_and_the_days_are_owed_as_issued_again(self):
+        claim_id = self.claim("2026-09-28", "2026-10-04", 1).json()["id"]
+        self.assertEqual(self.client.delete(f"/api/meals/vendor/claims/{claim_id}/").status_code, 204)
+        bucket = self.week()
+        self.assertEqual((bucket["claimed"], bucket["awaiting_claim"], float(bucket["owed"])), (0, 2, 1400.0))
+
+    def test_the_allocation_adds_up_exactly(self):
+        from meals.models import MealVendorClaim
+        from meals.services import allocate_vendor_claim
+
+        claim = MealVendorClaim.objects.create(date_from=date(2026, 9, 28), date_to=date(2026, 10, 5), quantity=2)  # 3 issued over 3 days, 2 claimed
+        allocation = allocate_vendor_claim(claim)
+        self.assertEqual((allocation["issued"], allocation["claimed"]), (3, 2))
+        self.assertEqual(sum(day["claimed"] for day in allocation["days"].values()), 2)

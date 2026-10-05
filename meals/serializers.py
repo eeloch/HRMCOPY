@@ -7,6 +7,7 @@ from .models import (
     MealDevice,
     MealEntitlementRule,
     MealTicketRate,
+    MealVendorClaim,
     MealVendorPayment,
 )
 
@@ -193,4 +194,26 @@ class MealVendorPaymentSerializer(serializers.ModelSerializer):
             from payroll.models import PayrollPeriod
 
             attrs["payroll_period"] = PayrollPeriod.objects.filter(year=attrs["payment_date"].year, month=attrs["payment_date"].month).first()
+        return attrs
+
+
+class MealVendorClaimSerializer(serializers.ModelSerializer):
+    recorded_by_name = serializers.CharField(source="recorded_by.get_full_name", read_only=True, default="")
+
+    class Meta:
+        model = MealVendorClaim
+        fields = ("id", "date_from", "date_to", "quantity", "reference", "notes", "recorded_by", "recorded_by_name", "created_at")
+        read_only_fields = ("recorded_by", "created_at")
+
+    def validate(self, attrs):
+        from django.utils import timezone
+
+        date_from, date_to = attrs["date_from"], attrs["date_to"]
+        if date_to < date_from:
+            raise serializers.ValidationError({"date_to": "The last day cannot be before the first."})
+        if date_to > timezone.localdate():
+            raise serializers.ValidationError({"date_to": "Tickets can only be claimed for days that have happened."})
+        overlapping = MealVendorClaim.objects.filter(date_from__lte=date_to, date_to__gte=date_from).first()
+        if overlapping:
+            raise serializers.ValidationError({"date_from": f"These dates overlap a claim already entered ({overlapping.date_from} to {overlapping.date_to}, {overlapping.quantity} tickets). Delete it first if it was wrong."})
         return attrs

@@ -19,6 +19,7 @@ from .models import (
     MealEntitlementRule,
     MealExcessException,
     MealTicketRate,
+    MealVendorClaim,
     MealVendorPayment,
 )
 from .serializers import (
@@ -26,9 +27,12 @@ from .serializers import (
     MealDeviceSerializer,
     MealEntitlementRuleSerializer,
     MealTicketRateSerializer,
+    MealVendorClaimSerializer,
     MealVendorPaymentSerializer,
 )
-from .services import MealService
+from decimal import Decimal
+
+from .services import MealService, allocate_vendor_claim
 from payroll.models import PayrollPeriod
 
 CARD_VERIFICATION_MODE = 3  # confirmed 2026-09-23: matches meals/bridge.py's CARD_VERIFICATION_MODE
@@ -261,9 +265,10 @@ def _vendor_bucket(day, group_by):
 class MealVendorSummaryAPIView(APIView):
     """What the vendor is owed and has been paid, over any date range, grouped by week, month or day.
 
-    Tickets count by the day they were collected (voided ones never count). A payment counts on the first day it
-    says it covers, or on its payment date when it covers nothing in particular - so a week's payment settles
-    that week's tickets whenever it is actually paid."""
+    Tickets are issued when staff scan (voided ones never count) but the vendor is paid for the ones it actually
+    CLAIMED: a claim is a count for any dates (a day's tally or a week's invoice) and is spread over those days.
+    Days with no claim yet are owed as issued and flagged, so nothing silently drops out. A payment counts on the
+    first day it says it covers, or on its payment date when it covers nothing in particular."""
 
     permission_classes = [IsAuthenticated, CanViewVendorPayments]
 
@@ -273,11 +278,8 @@ class MealVendorSummaryAPIView(APIView):
         if group_by not in VENDOR_GROUPINGS:
             return Response({"detail": "group_by must be week, month or day."}, status=400)
         today = timezone.localdate()
-        try:
-            date_to = _date_param(params.get("date_to")) or today
-            date_from = _date_param(params.get("date_from")) or _vendor_bucket(date_to - timedelta(days=7 * 7), "week")[0]
-        except ValueError:
-            return Response({"detail": "Dates must be YYYY-MM-DD."}, status=400)
+        date_to = _date_param(params.get("date_to")) or today
+        date_from = _date_param(params.get("date_from")) or _vendor_bucket(date_to - timedelta(days=7 * 7), "week")[0]
         if date_from > date_to:
             return Response({"detail": "The start date is after the end date."}, status=400)
         if (date_to - date_from).days > MAX_VENDOR_RANGE_DAYS:
@@ -289,23 +291,49 @@ class MealVendorSummaryAPIView(APIView):
             start, end = _vendor_bucket(day, group_by)
             key = start.isoformat()
             if key not in buckets:
-                buckets[key] = {"key": key, "start": max(start, date_from).isoformat(), "end": min(end, date_to).isoformat(), "tickets": 0, "owed": 0, "paid": 0}
+                buckets[key] = {"key": key, "start": max(start, date_from).isoformat(), "end": min(end, date_to).isoformat(),
+                                "tickets": 0, "claimed": 0, "unclaimed": 0, "awaiting_claim": 0, "owed": Decimal("0"), "paid": Decimal("0"), "_covered_tickets": 0}
             return buckets[key]
 
-        # every period in the range shows, even one with nothing in it
         cursor = date_from
-        while cursor <= date_to:
+        while cursor <= date_to:  # every period in the range shows, even one with nothing in it
             bucket_for(cursor)
             cursor = _vendor_bucket(cursor, group_by)[1] + timedelta(days=1)
 
-        rows = (
-            MealCollection.objects.filter(work_date__gte=date_from, work_date__lte=date_to, voided_at__isnull=True)
-            .values("work_date").annotate(tickets=Count("id"), owed=Sum("rate_snapshot"))
-        )
-        for row in rows:
-            bucket = bucket_for(row["work_date"])
-            bucket["tickets"] += row["tickets"]
-            bucket["owed"] += row["owed"] or 0
+        issued_by_day = {
+            row["work_date"]: row
+            for row in MealCollection.objects.filter(work_date__gte=date_from, work_date__lte=date_to, voided_at__isnull=True)
+            .values("work_date").annotate(n=Count("id"), amount=Sum("rate_snapshot"))
+        }
+        claims = list(MealVendorClaim.objects.select_related("recorded_by").filter(date_from__lte=date_to, date_to__gte=date_from))
+        covered_days = set()
+        claims_out = []
+        for claim in claims:
+            allocation = allocate_vendor_claim(claim)
+            for day, values in allocation["days"].items():
+                if not date_from <= day <= date_to:
+                    continue
+                covered_days.add(day)
+                bucket = bucket_for(day)
+                bucket["claimed"] += values["claimed"]
+                bucket["unclaimed"] += values["issued"] - values["claimed"]
+                bucket["_covered_tickets"] += values["issued"]
+                bucket["owed"] += values["claimed_amount"]
+            row = MealVendorClaimSerializer(claim).data
+            row.update({"issued": allocation["issued"], "payable": allocation["claimed"], "unclaimed": allocation["issued"] - allocation["claimed"], "over_claimed": allocation["over_claimed"]})
+            claims_out.append(row)
+            # days of the claim with no tickets at all still count as covered
+            day = max(claim.date_from, date_from)
+            while day <= min(claim.date_to, date_to):
+                covered_days.add(day)
+                day += timedelta(days=1)
+
+        for day, row in issued_by_day.items():
+            bucket = bucket_for(day)
+            bucket["tickets"] += row["n"]
+            if day not in covered_days:  # nobody has told us what was claimed for this day yet: owed as issued
+                bucket["awaiting_claim"] += row["n"]
+                bucket["owed"] += row["amount"] or 0
 
         payments = []
         for payment in MealVendorPayment.objects.select_related("recorded_by").order_by("-payment_date", "-id"):
@@ -317,11 +345,33 @@ class MealVendorSummaryAPIView(APIView):
 
         rows_out = sorted(buckets.values(), key=lambda bucket: bucket["key"], reverse=True)
         for bucket in rows_out:
+            bucket.pop("_covered_tickets")
             bucket["balance"] = bucket["owed"] - bucket["paid"]
-        totals = {"tickets": sum(b["tickets"] for b in rows_out), "owed": sum(b["owed"] for b in rows_out), "paid": sum(b["paid"] for b in rows_out)}
+            bucket["claim_status"] = "" if bucket["tickets"] == 0 else "none" if bucket["awaiting_claim"] == bucket["tickets"] else "partial" if bucket["awaiting_claim"] else "claimed"
+        totals = {key: sum(b[key] for b in rows_out) for key in ("tickets", "claimed", "unclaimed", "awaiting_claim", "owed", "paid")}
         totals["balance"] = totals["owed"] - totals["paid"]
-        return Response({"date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "group_by": group_by, "totals": totals, "buckets": rows_out, "payments": MealVendorPaymentSerializer(payments, many=True).data})
+        return Response({"date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "group_by": group_by, "totals": totals, "buckets": rows_out,
+                         "claims": sorted(claims_out, key=lambda c: (c["date_from"], c["id"]), reverse=True), "payments": MealVendorPaymentSerializer(payments, many=True).data})
 
+
+class MealVendorClaimCreateAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanRecordVendorPayments]
+
+    def post(self, request):
+        serializer = MealVendorClaimSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        claim = serializer.save(recorded_by=request.user)
+        return Response(MealVendorClaimSerializer(claim).data, status=201)
+
+
+class MealVendorClaimDetailAPIView(APIView):
+    """Remove a claim that was entered wrongly (then enter the right one)."""
+
+    permission_classes = [IsAuthenticated, CanRecordVendorPayments]
+
+    def delete(self, request, pk):
+        get_object_or_404(MealVendorClaim, pk=pk).delete()
+        return Response(status=204)
 
 class MealDeviceListAPIView(APIView):
     """Read-only: devices are registered on the Biometric Devices page

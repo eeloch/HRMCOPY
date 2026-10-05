@@ -240,6 +240,25 @@ class MealVendorPayment(models.Model):
     def __str__(self):
         return f"{self.payroll_period or self.payment_date} - N {self.amount:,.2f}"
 
+class MealVendorClaim(models.Model):
+    """How many of the tickets issued on these days the vendor actually claimed (redeemed) - a day's tally or a
+    whole week's invoice. Tickets are issued when staff scan; only claimed ones are paid for."""
+
+    date_from = models.DateField()
+    date_to = models.DateField()
+    quantity = models.PositiveIntegerField()
+    reference = models.CharField(max_length=150, blank=True)
+    notes = models.TextField(blank=True)
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="meal_vendor_claims_recorded")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-date_from", "-id"]
+
+    def __str__(self):
+        return f"{self.quantity} claimed {self.date_from} to {self.date_to}"
+
+
 class MealTerminalUserState(models.Model):
     """Whether a person is currently switched on at a meal terminal, as last confirmed by the terminal.
     Only people covered by MEAL_GATING_EMPLOYEE_IDS ever appear here."""
