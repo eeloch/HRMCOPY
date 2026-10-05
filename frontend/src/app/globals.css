@@ -1,6 +1,9 @@
 @import "tailwindcss";
 
 :root {
+  /* The app is light-only: its cards and tables have fixed light backgrounds, so a dark-mode computer must not
+     switch the default text to near-white (it showed up as faint, unreadable text). */
+  color-scheme: light;
   --background: #ffffff;
   --foreground: #171717;
 }
@@ -10,13 +13,6 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
