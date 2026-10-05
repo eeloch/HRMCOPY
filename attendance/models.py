@@ -248,6 +248,7 @@ class BiometricDevice(models.Model):
         permissions = [
             ("manage_devices", "Can register and manage biometric devices"),
             ("view_biometrics_overview", "Can view who is and is not enrolled on biometric devices"),
+            ("enroll_biometric_users", "Can enrol people on, and remove people from, biometric devices"),
         ]
 
     def __str__(self):

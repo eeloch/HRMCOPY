@@ -46,12 +46,20 @@ class CanManageDevices(BasePermission):
         return request.user.has_perm("attendance.manage_devices")
 
 
+class CanEnrollBiometricUsers(BasePermission):
+    """Putting a person on a terminal (or taking them off) is separate from managing the terminals themselves."""
+
+    def has_permission(self, request, view):
+        return request.user.has_perm("attendance.enroll_biometric_users")
+
+
 class CanViewBiometricsOverview(BasePermission):
     """Seeing who is enrolled is a lighter right than managing the terminals, so it has its own permission;
     anyone who can manage devices can see it too."""
 
     def has_permission(self, request, view):
-        return request.user.has_perm("attendance.view_biometrics_overview") or request.user.has_perm("attendance.manage_devices")
+        user = request.user
+        return user.has_perm("attendance.view_biometrics_overview") or user.has_perm("attendance.manage_devices") or user.has_perm("attendance.enroll_biometric_users")
 
 
 class BiometricDeviceListCreateAPIView(APIView):
@@ -111,16 +119,17 @@ class DeviceCommandListCreateAPIView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def get_permissions(self):
-        if self.request.method == "POST":
-            return [IsAuthenticated(), CanManageDevices()]
-        return super().get_permissions()
-
     def get(self, request, device_id):
         commands = DeviceCommand.objects.filter(device_id=device_id).order_by("-created_at")[:20]
         return Response({"results": DeviceCommandSerializer(commands, many=True).data})
 
     def post(self, request, device_id):
+        # Enrolling and removing a person is its own right; refreshing a terminal's list is device management.
+        command_type = request.data.get("command_type")
+        needed = CanEnrollBiometricUsers if command_type in ("enroll_user", "delete_user") else CanManageDevices
+        if not needed().has_permission(request, self):
+            what = "enrol or remove people on devices" if needed is CanEnrollBiometricUsers else "manage devices"
+            return Response({"detail": f"You do not have permission to {what}."}, status=status.HTTP_403_FORBIDDEN)
         try:
             device = BiometricDevice.objects.get(pk=device_id)
         except BiometricDevice.DoesNotExist:
@@ -136,7 +145,6 @@ class DeviceCommandListCreateAPIView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        command_type = request.data.get("command_type")
         if command_type == "refresh_enrolled_ids":
             payload = {}
         elif command_type in ("enroll_user", "delete_user"):

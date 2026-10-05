@@ -23,7 +23,8 @@ class BiometricDeviceAPITests(TestCase):
             password="test-password",
         )
         self.manager.user_permissions.add(
-            Permission.objects.get(codename="manage_devices")
+            Permission.objects.get(codename="manage_devices"),
+            Permission.objects.get(codename="enroll_biometric_users"),  # these tests enrol and remove people too
         )
         self.viewer = get_user_model().objects.create_user(
             username="device-viewer",
@@ -430,7 +431,7 @@ class DeviceCommandAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.manager = get_user_model().objects.create_user(username="device-manager-2", password="test-password")
-        self.manager.user_permissions.add(Permission.objects.get(codename="manage_devices"))
+        self.manager.user_permissions.add(Permission.objects.get(codename="manage_devices"), Permission.objects.get(codename="enroll_biometric_users"))
         self.viewer = get_user_model().objects.create_user(username="device-viewer-2", password="test-password")
         self.device = BiometricDevice.objects.create(
             name="Main Entrance", serial_number="AYTK14145399", location="Factory gate", device_type="factory",
@@ -1032,7 +1033,7 @@ class InactiveStaffTests(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.manager = get_user_model().objects.create_user(username="inactive-manager", password="test-password")
-        self.manager.user_permissions.add(Permission.objects.get(codename="manage_devices"))
+        self.manager.user_permissions.add(Permission.objects.get(codename="manage_devices"), Permission.objects.get(codename="enroll_biometric_users"))
         self.viewer = get_user_model().objects.create_user(username="inactive-viewer", password="test-password")
         self.a = BiometricDevice.objects.create(name="Terminal A", serial_number="AYTK14145399", location="x", device_type="factory", is_online=True)
         self.b = BiometricDevice.objects.create(name="Terminal B", serial_number="AYTK14145402", location="x", device_type="factory", is_online=True)
@@ -1390,3 +1391,59 @@ class SlotCloneResyncsMealGatingTests(TransactionTestCase):
         self.assertEqual(job.status, "acked")
         switch = DeviceCommand.objects.get(command_type="set_user_enabled", device=self.meal)
         self.assertEqual((switch.payload["enrollid"], switch.payload["enabled"]), (904, False))
+
+
+class EnrolPermissionIsSeparateTests(TestCase):
+    """Putting a person on a terminal is not the same right as managing the terminals."""
+
+    def setUp(self):
+        self.device = BiometricDevice.objects.create(name="Gate", serial_number="AYTK00000001", location="x", device_type="factory", is_online=True)
+        self.person = Employee.objects.create(employee_id="000500", first_name="Ada", last_name="Okafor")
+        self.manager = self.user("only-manager", "manage_devices")
+        self.enroller = self.user("only-enroller", "enroll_biometric_users")
+
+    def user(self, name, *codenames):
+        user = get_user_model().objects.create_user(username=name, password="pw")
+        for codename in codenames:
+            user.user_permissions.add(Permission.objects.get(codename=codename))
+        return user
+
+    def post(self, user, command_type, **extra):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client.post(f"/api/attendance/devices/{self.device.pk}/commands/", {"command_type": command_type, **extra}, format="json")
+
+    def test_a_device_manager_without_the_enrol_right_cannot_enrol_or_remove_people(self):
+        self.assertEqual(self.post(self.manager, "enroll_user", employee=self.person.pk).status_code, 403)
+        self.assertEqual(self.post(self.manager, "delete_user", employee=self.person.pk).status_code, 403)
+
+    def test_an_enroller_can_enrol_but_not_manage_the_devices(self):
+        self.assertEqual(self.post(self.enroller, "enroll_user", employee=self.person.pk).status_code, 201)
+        self.assertEqual(self.post(self.enroller, "refresh_enrolled_ids").status_code, 403)
+        client = APIClient()
+        client.force_authenticate(self.enroller)
+        self.assertEqual(client.post("/api/attendance/devices/", {"name": "New", "serial_number": "AYTK00000002", "location": "x", "device_type": "factory"}, format="json").status_code, 403)
+        self.assertEqual(client.post("/api/attendance/devices/sync-all/", {}, format="json").status_code, 403)
+
+    def test_a_device_manager_can_still_refresh_a_terminals_list(self):
+        self.assertEqual(self.post(self.manager, "refresh_enrolled_ids").status_code, 201)
+
+    def test_an_enroller_can_see_who_is_enrolled(self):
+        client = APIClient()
+        client.force_authenticate(self.enroller)
+        self.assertEqual(client.get("/api/attendance/biometrics-overview/").status_code, 200)
+
+    def test_the_migration_gave_current_device_managers_the_new_right(self):
+        """Whoever could manage devices keeps being able to enrol until someone unticks it."""
+        from importlib import import_module
+
+        from django.apps import apps as live_apps
+        from django.contrib.auth.models import Group
+
+        group = Group.objects.create(name="Device team")
+        group.permissions.add(Permission.objects.get(codename="manage_devices"))
+        direct = self.user("direct-manager", "manage_devices")
+        import_module("attendance.migrations.0022_grant_enroll_to_device_managers").grant(live_apps, None)
+        self.assertTrue(Permission.objects.get(codename="enroll_biometric_users") in direct.user_permissions.all())
+        self.assertTrue(group.permissions.filter(codename="enroll_biometric_users").exists())
+

@@ -18,6 +18,7 @@ export type CurrentUser = {
     view_salary: boolean;
     view_biometrics_overview: boolean;
     manage_devices: boolean;
+    enroll_biometric_users: boolean;
     manage_shifts: boolean;
     manage_roster: boolean;
     review_attendanceexception: boolean;
