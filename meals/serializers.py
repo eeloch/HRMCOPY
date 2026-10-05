@@ -167,6 +167,8 @@ class MealVendorPaymentSerializer(serializers.ModelSerializer):
             "payroll_period",
             "amount",
             "payment_date",
+            "covers_from",
+            "covers_to",
             "reference",
             "notes",
             "recorded_by",
@@ -174,8 +176,21 @@ class MealVendorPaymentSerializer(serializers.ModelSerializer):
             "created_at",
         )
         read_only_fields = ("recorded_by", "created_at")
+        extra_kwargs = {"payroll_period": {"required": False, "allow_null": True}}
 
     def validate_amount(self, value):
         if value <= 0:
             raise serializers.ValidationError("The payment amount must be greater than zero.")
         return value
+
+    def validate(self, attrs):
+        covers_from, covers_to = attrs.get("covers_from"), attrs.get("covers_to")
+        if bool(covers_from) != bool(covers_to):
+            raise serializers.ValidationError({"covers_to": "Give both the first and the last day the payment covers, or neither."})
+        if covers_from and covers_to < covers_from:
+            raise serializers.ValidationError({"covers_to": "The last day covered cannot be before the first."})
+        if attrs.get("payroll_period") is None and attrs.get("payment_date"):
+            from payroll.models import PayrollPeriod
+
+            attrs["payroll_period"] = PayrollPeriod.objects.filter(year=attrs["payment_date"].year, month=attrs["payment_date"].month).first()
+        return attrs

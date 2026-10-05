@@ -2787,3 +2787,95 @@ class LateEntitlementBalancingTests(TestCase):
         first.refresh_from_db(); second.refresh_from_db()
         self.assertEqual(second.excess_exception.status, MealExcessStatus.APPROVED)
         self.assertEqual((first.status, first.excess_exception_id), (MealCollectionStatus.WITHIN, None))
+
+
+    def test_the_review_list_flags_cases_that_accept_will_clear(self):
+        self.put_on_shift()
+        ticket = self.scan("a", 12)
+        rows = self.client.get("/api/meals/operations/").json()["exceptions"]
+        self.assertEqual([row["balances_on_accept"] for row in rows], [False])  # nothing entered late yet
+
+        self.entitle(1, effective_from=self.day)
+        rows = self.client.get("/api/meals/operations/").json()["exceptions"]
+        self.assertEqual([row["balances_on_accept"] for row in rows], [True])
+
+
+class VendorSummaryTests(TestCase):
+    """The vendor view by week, month or day over any date range, with its own permissions."""
+
+    def setUp(self):
+        self.employee = Employee.objects.create(employee_id="000888", first_name="Vendor", last_name="Test")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=date(2026, 9, 1))
+        MealDevice.objects.create(name="Canteen", serial_number="MEAL888", active=True)
+        BiometricIdentity.objects.create(employee=self.employee, system="device", source_identifier="MEAL888", external_user_id="888")
+        shift = Shift.objects.create(name="Vendor Test Day", start_time="07:00", end_time="19:00", is_overnight=False)
+        EmployeeMealEntitlement.objects.create(employee=self.employee, tickets_per_work_day=1, effective_from=date(2026, 9, 1), reason="test")
+        for number, day in enumerate((date(2026, 9, 28), date(2026, 10, 2), date(2026, 10, 5))):  # a Monday, the Friday, the next Monday
+            EmployeeRosterDay.objects.create(employee=self.employee, date=day, status=RosterDayStatus.WORK, shift=shift)
+            MealService.ingest(system="device", source_identifier="MEAL888", device_serial_number="MEAL888", external_user_id="888", external_event_id=f"v{number}", timestamp=timezone.make_aware(datetime(day.year, day.month, day.day, 12, 0)))
+        self.viewer = self.user("vendor-viewer", "view_meal_vendor_payments")
+        self.client = APIClient()
+        self.client.force_authenticate(self.viewer)
+
+    def user(self, name, *codenames):
+        user = get_user_model().objects.create_user(username=name, password="pw")
+        for codename in codenames:
+            user.user_permissions.add(Permission.objects.get(codename=codename))
+        return user
+
+    def summary(self, **params):
+        query = "&".join(f"{key}={value}" for key, value in params.items())
+        return self.client.get(f"/api/meals/vendor/summary/?{query}")
+
+    def test_weeks_run_monday_to_sunday_and_each_shows_tickets_and_amount(self):
+        data = self.summary(date_from="2026-09-28", date_to="2026-10-11", group_by="week").json()
+        weeks = {bucket["key"]: bucket for bucket in data["buckets"]}
+        self.assertEqual(set(weeks), {"2026-09-28", "2026-10-05"})
+        self.assertEqual((weeks["2026-09-28"]["tickets"], float(weeks["2026-09-28"]["owed"])), (2, 1400.0))
+        self.assertEqual((weeks["2026-10-05"]["tickets"], float(weeks["2026-10-05"]["owed"])), (1, 700.0))
+        self.assertEqual((data["totals"]["tickets"], float(data["totals"]["owed"])), (3, 2100.0))
+
+    def test_months_and_days_group_the_same_tickets(self):
+        months = {b["key"]: b["tickets"] for b in self.summary(date_from="2026-09-01", date_to="2026-10-31", group_by="month").json()["buckets"]}
+        self.assertEqual(months, {"2026-09-01": 1, "2026-10-01": 2})
+        days = self.summary(date_from="2026-09-28", date_to="2026-10-05", group_by="day").json()["buckets"]
+        self.assertEqual((len(days), sum(day["tickets"] for day in days)), (8, 3))
+
+    def test_a_range_cutting_a_week_only_counts_the_days_in_it(self):
+        data = self.summary(date_from="2026-10-01", date_to="2026-10-02", group_by="week").json()
+        self.assertEqual([(b["tickets"], b["start"], b["end"]) for b in data["buckets"]], [(1, "2026-10-01", "2026-10-02")])
+
+    def test_a_voided_ticket_is_not_owed(self):
+        ticket = MealCollection.objects.get(work_date=date(2026, 10, 2))
+        MealService.void_collection(ticket, self.viewer, "test scan")
+        self.assertEqual(self.summary(date_from="2026-09-28", date_to="2026-10-11").json()["totals"]["tickets"], 2)
+
+    def test_a_payment_settles_the_week_it_covers_whenever_it_was_paid(self):
+        recorder = self.user("vendor-recorder", "record_meal_vendor_payments")
+        self.client.force_authenticate(recorder)
+        response = self.client.post("/api/meals/vendor/payments/", {"amount": "1400.00", "payment_date": "2026-10-08", "covers_from": "2026-09-28", "covers_to": "2026-10-04", "reference": "TRF-1"}, format="json")
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertIsNone(response.json()["payroll_period"])  # no payroll period exists for October: the date is enough
+
+        weeks = {b["key"]: b for b in self.summary(date_from="2026-09-28", date_to="2026-10-11").json()["buckets"]}
+        self.assertEqual((float(weeks["2026-09-28"]["paid"]), float(weeks["2026-09-28"]["balance"])), (1400.0, 0.0))
+        self.assertEqual((float(weeks["2026-10-05"]["paid"]), float(weeks["2026-10-05"]["balance"])), (0.0, 700.0))
+
+    def test_a_payment_without_cover_dates_counts_on_its_payment_date(self):
+        self.client.force_authenticate(self.user("vendor-recorder2", "record_meal_vendor_payments"))
+        self.client.post("/api/meals/vendor/payments/", {"amount": "700.00", "payment_date": "2026-10-06"}, format="json")
+        weeks = {b["key"]: b for b in self.summary(date_from="2026-09-28", date_to="2026-10-11").json()["buckets"]}
+        self.assertEqual(float(weeks["2026-10-05"]["paid"]), 700.0)
+
+    def test_viewing_needs_only_the_vendor_permission_and_recording_needs_its_own(self):
+        self.assertEqual(self.summary().status_code, 200)
+        denied = self.client.post("/api/meals/vendor/payments/", {"amount": "100.00", "payment_date": "2026-10-06"}, format="json")
+        self.assertEqual(denied.status_code, 403)
+        self.client.force_authenticate(self.user("nobody"))
+        self.assertEqual(self.summary().status_code, 403)
+        self.client.force_authenticate(self.user("old-reviewer", "review_meal_excess"))  # anyone who could see it before still can
+        self.assertEqual(self.summary().status_code, 200)
+
+    def test_a_bad_range_is_refused(self):
+        self.assertEqual(self.summary(date_from="2026-10-10", date_to="2026-10-01").status_code, 400)
+        self.assertEqual(self.summary(group_by="decade").status_code, 400)

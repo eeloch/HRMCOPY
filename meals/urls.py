@@ -20,6 +20,7 @@ from .views import (
     MealTicketRateListCreateAPIView,
     MealVendorPaymentListCreateAPIView,
     MealVendorPeriodAPIView,
+    MealVendorSummaryAPIView,
 )
 
 urlpatterns = [
@@ -100,6 +101,11 @@ urlpatterns = [
     ),
     path("extra-authorizations/", MealExtraAuthorizationListCreateAPIView.as_view(), name="meal-extra-authorizations"),
     path("extra-authorizations/<int:pk>/cancel/", MealExtraAuthorizationCancelAPIView.as_view(), name="meal-extra-authorization-cancel"),
+    path(
+        "vendor/summary/",
+        MealVendorSummaryAPIView.as_view(),
+        name="meal-vendor-summary",
+    ),
     path(
         "vendor/payments/",
         MealVendorPaymentListCreateAPIView.as_view(),

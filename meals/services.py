@@ -767,19 +767,31 @@ class MealService:
         return max(base - cls.absence_penalty_reduction(employee, work_date), 0)
 
     @classmethod
+    def _late_cover(cls, exception, lock=False):
+        """(entitlement now, the day's valid tickets in order, rank by ticket id, this excess's tickets the late
+        entitlement covers). A ticket's place is its rank among the day's valid tickets: one declined or voided
+        earlier no longer counts, so the next may now be the person's first (it keeps the number it was given)."""
+        entitlement = cls.late_entitlement(exception)
+        if entitlement <= exception.entitlement_snapshot:
+            return entitlement, [], {}, []
+        queryset = MealCollection.objects.filter(employee=exception.employee, work_date=exception.work_date, voided_at__isnull=True).order_by("event__timestamp", "id")
+        day_tickets = list(queryset.select_for_update() if lock else queryset)
+        rank = {ticket.pk: place for place, ticket in enumerate(day_tickets, start=1)}
+        covered = [ticket for ticket in day_tickets if ticket.excess_exception_id == exception.pk and rank[ticket.pk] <= entitlement]
+        return entitlement, day_tickets, rank, covered
+
+    @classmethod
+    def would_balance(cls, exception):
+        """True when Accept would clear (at least part of) this excess instead of charging it."""
+        return exception.status == MealExcessStatus.PENDING and bool(cls._late_cover(exception)[3])
+
+    @classmethod
     def balance_against_late_entitlement(cls, exception, actor):
         """Clear the tickets of this excess that the person's entitlement, entered late, covers: no charge, no
         deduction. Whatever is still beyond the entitlement stays an excess (and Accept charges it). Returns how
         many tickets were balanced."""
-        entitlement = cls.late_entitlement(exception)
-        if entitlement <= exception.entitlement_snapshot:
-            return 0
-        # A ticket's place is its rank among the day's valid tickets: one declined or voided earlier no longer counts,
-        # so the next ticket may now be the person's first (it still carries the number it was given at the time).
-        day_tickets = list(MealCollection.objects.select_for_update().filter(employee=exception.employee, work_date=exception.work_date, voided_at__isnull=True).order_by("event__timestamp", "id"))
-        rank = {ticket.pk: place for place, ticket in enumerate(day_tickets, start=1)}
+        entitlement, day_tickets, rank, covered = cls._late_cover(exception, lock=True)
         tickets = [ticket for ticket in day_tickets if ticket.excess_exception_id == exception.pk]
-        covered = [ticket for ticket in tickets if rank[ticket.pk] <= entitlement]
         if not covered:
             return 0
         for ticket in covered:

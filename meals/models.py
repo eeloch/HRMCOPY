@@ -218,9 +218,13 @@ class MealAbsencePenalty(models.Model):
 
 
 class MealVendorPayment(models.Model):
-    payroll_period = models.ForeignKey(PayrollPeriod, on_delete=models.PROTECT, related_name="meal_vendor_payments")
+    # Blank when no payroll period exists yet for the month of the payment: the vendor view works from dates.
+    payroll_period = models.ForeignKey(PayrollPeriod, on_delete=models.PROTECT, null=True, blank=True, related_name="meal_vendor_payments")
     amount = models.DecimalField(max_digits=14, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
     payment_date = models.DateField()
+    # The days of tickets this payment settles (a week's, say). Blank means it counts on its payment date.
+    covers_from = models.DateField(null=True, blank=True)
+    covers_to = models.DateField(null=True, blank=True)
     reference = models.CharField(max_length=150, blank=True)
     notes = models.TextField(blank=True)
     recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="meal_vendor_payments_recorded")
@@ -228,9 +232,13 @@ class MealVendorPayment(models.Model):
 
     class Meta:
         ordering = ["-payment_date", "-id"]
+        permissions = [
+            ("view_meal_vendor_payments", "Can view meal vendor payments"),
+            ("record_meal_vendor_payments", "Can record meal vendor payments"),
+        ]
 
     def __str__(self):
-        return f"{self.payroll_period} - N {self.amount:,.2f}"
+        return f"{self.payroll_period or self.payment_date} - N {self.amount:,.2f}"
 
 class MealTerminalUserState(models.Model):
     """Whether a person is currently switched on at a meal terminal, as last confirmed by the terminal.

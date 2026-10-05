@@ -7,13 +7,13 @@ import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import { MetricCard, PageHeader, Section, StatusBadge } from "@/components/ui";
 import { ExtraTicketAuthorizations } from "@/components/meals/ExtraTicketAuthorizations";
-import { Chips, DateRangeFilter, Panel, ScrollArea, SearchBox, TabBar, rangeFor, type DateRange } from "@/components/meals/MealsUi";
+import { Chips, DateRangeFilter, Panel, ScrollArea, SearchBox, TabBar, isoDate, rangeFor, type DateRange } from "@/components/meals/MealsUi";
 import { apiFetch, getAccessToken, getCurrentUser, type CurrentUser } from "@/lib/api";
 
 type Collection = { id: number; employee_number: string; employee_name: string; work_date: string; timestamp: string; device: string; entitlement: number; sequence: number; rate: string; status: string; voided: boolean; void_reason: string; excess_id: number | null; excess_status: string | null };
 type OperationsSummary = { today_collections: number; today_within_entitlement: number; today_excess: number; pending_review: number };
 type RangeSummary = { collections: number; within_entitlement: number; excess: number; voided: number };
-type Exception = { id: number; employee_number: string; employee_name: string; work_date: string; entitlement: number; collected_quantity: number; excess_quantity: number; proposed_deduction: string; status: string; card_verified: boolean; comment: string };
+type Exception = { balances_on_accept?: boolean; id: number; employee_number: string; employee_name: string; work_date: string; entitlement: number; collected_quantity: number; excess_quantity: number; proposed_deduction: string; status: string; card_verified: boolean; comment: string };
 type Period = { id: number; year: number; month: number; status: string };
 type Device = { id: number; name: string; serial_number: string; active: boolean };
 type Rate = { id: number; amount: string; effective_from: string; effective_to: string | null; active: boolean };
@@ -21,8 +21,10 @@ type Entitlement = { id: number; employee: number; employee_name: string; ticket
 type Employee = { id: number; employee_id: string; full_name: string };
 type Rule = { id: number; employment_type: string; employment_category: string; position: number | null; position_name: string; minimum_months_of_service: number | null; tickets_per_work_day: number; priority: number; description: string; active: boolean };
 type PositionOption = { id: number; name: string; department_name: string };
-type VendorPayment = { id: number; payroll_period: number; amount: string; payment_date: string; reference: string; notes: string; recorded_by_name: string; created_at: string };
-type VendorPeriodData = { payroll_period: number; tickets_issued: number; amount_owed: string; total_paid: string; balance: string; payments: VendorPayment[] };
+type VendorPayment = { id: number; payroll_period: number | null; amount: string; payment_date: string; covers_from: string | null; covers_to: string | null; reference: string; notes: string; recorded_by_name: string; created_at: string };
+type VendorBucket = { key: string; start: string; end: string; tickets: number; owed: string; paid: string; balance: string };
+type VendorSummary = { date_from: string; date_to: string; group_by: VendorGroup; totals: { tickets: number; owed: string; paid: string; balance: string }; buckets: VendorBucket[]; payments: VendorPayment[] };
+type VendorGroup = "week" | "month" | "day";
 type Tab = "review" | "collections" | "vendor" | "setup";
 type DecisionFilter = "pending" | "decided" | "all";
 type CollectionStatusFilter = "all" | "within" | "excess" | "voided";
@@ -35,7 +37,7 @@ const dateTime = (value: string) => new Date(value).toLocaleString("en-NG", { da
 const rateInitial = () => ({ amount: "", effective_from: "", effective_to: "" });
 const entitlementInitial = () => ({ employee: "", tickets_per_work_day: "", effective_from: "", effective_to: "", reason: "", is_exceptional_override: false });
 const ruleInitial = () => ({ employment_type: "", employment_category: "", position: "", minimum_months_of_service: "", tickets_per_work_day: "", priority: "100", description: "" });
-const vendorPaymentInitial = () => ({ amount: "", payment_date: "", reference: "", notes: "" });
+const vendorPaymentInitial = () => ({ amount: "", payment_date: "", covers_from: "", covers_to: "", reference: "", notes: "" });
 const employmentTypeOptions = [["permanent", "Permanent"], ["contract", "Contract"], ["casual", "Casual"], ["intern", "Intern"], ["nysc", "NYSC"], ["expatriate", "Expatriate"]];
 const employmentCategoryOptions = [["staff", "Staff"], ["management", "Management"], ["executive", "Executive"]];
 const PAGE_SIZE = 50;
@@ -57,6 +59,45 @@ function queryString(values: Record<string, string>) {
   const params = new URLSearchParams();
   Object.entries(values).forEach(([key, value]) => { if (value) params.set(key, value); });
   return params.toString();
+}
+
+function vendorPreset(key: "thisWeek" | "lastWeek" | "fourWeeks" | "thisMonth" | "lastMonth" | "threeMonths"): DateRange {
+  const now = new Date();
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7));
+  const plus = (base: Date, days: number) => new Date(base.getFullYear(), base.getMonth(), base.getDate() + days);
+  if (key === "thisWeek") return { from: isoDate(monday), to: isoDate(now) };
+  if (key === "lastWeek") return { from: isoDate(plus(monday, -7)), to: isoDate(plus(monday, -1)) };
+  if (key === "fourWeeks") return { from: isoDate(plus(monday, -21)), to: isoDate(now) };
+  if (key === "thisMonth") return { from: isoDate(new Date(now.getFullYear(), now.getMonth(), 1)), to: isoDate(now) };
+  if (key === "lastMonth") return { from: isoDate(new Date(now.getFullYear(), now.getMonth() - 1, 1)), to: isoDate(new Date(now.getFullYear(), now.getMonth(), 0)) };
+  return { from: isoDate(new Date(now.getFullYear(), now.getMonth() - 2, 1)), to: isoDate(now) };
+}
+
+function bucketLabel(bucket: { start: string; end: string }, group: VendorGroup) {
+  if (group === "day") return day(bucket.start);
+  if (group === "month") return new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(new Date(`${bucket.start}T00:00:00`));
+  return `${day(bucket.start)} - ${day(bucket.end)}`;
+}
+
+const vendorPresets: Array<["thisWeek" | "lastWeek" | "fourWeeks" | "thisMonth" | "lastMonth" | "threeMonths", string]> = [["thisWeek", "This week"], ["lastWeek", "Last week"], ["fourWeeks", "Last 4 weeks"], ["thisMonth", "This month"], ["lastMonth", "Last month"], ["threeMonths", "Last 3 months"]];
+
+function VendorRangeFilter({ value, onChange }: { value: DateRange; onChange: (range: DateRange) => void }) {
+  const chip = "rounded-full border px-3 py-1.5 text-xs font-semibold transition";
+  const field = "rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500";
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {vendorPresets.map(([key, label]) => {
+        const preset = vendorPreset(key);
+        const active = preset.from === value.from && preset.to === value.to;
+        return <button key={key} type="button" onClick={() => onChange(preset)} className={`${chip} ${active ? "border-blue-600 bg-blue-600 text-white" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}>{label}</button>;
+      })}
+      <span className="ml-1 flex items-center gap-1.5 text-xs text-slate-500">
+        <input type="date" aria-label="From date" value={value.from} max={value.to || undefined} onChange={(event) => onChange({ ...value, from: event.target.value })} className={field} />
+        to
+        <input type="date" aria-label="To date" value={value.to} min={value.from || undefined} onChange={(event) => onChange({ ...value, to: event.target.value })} className={field} />
+      </span>
+    </div>
+  );
 }
 
 export default function MealsPage() {
@@ -96,7 +137,6 @@ export default function MealsPage() {
   const [collectionStatus, setCollectionStatus] = useState<CollectionStatusFilter>("all");
   const [collectionPage, setCollectionPage] = useState(1);
   // Setup and vendor data
-  const [periods, setPeriods] = useState<Period[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [rates, setRates] = useState<Rate[]>([]);
   const [entitlements, setEntitlements] = useState<Entitlement[]>([]);
@@ -118,13 +158,17 @@ export default function MealsPage() {
   const [voidReason, setVoidReason] = useState("");
   const [rateForm, setRateForm] = useState(rateInitial);
   const [entitlementForm, setEntitlementForm] = useState(entitlementInitial);
-  const [vendorPeriodId, setVendorPeriodId] = useState("");
-  const [vendorData, setVendorData] = useState<VendorPeriodData | null>(null);
+  const [vendorRange, setVendorRange] = useState<DateRange>(() => vendorPreset("fourWeeks"));
+  const [vendorGroup, setVendorGroup] = useState<VendorGroup>("week");
+  const [vendorSummary, setVendorSummary] = useState<VendorSummary | null>(null);
   const [loadingVendor, setLoadingVendor] = useState(false);
   const [vendorPaymentForm, setVendorPaymentForm] = useState(vendorPaymentInitial);
-  const canAccess = currentUser !== null && Object.values(currentUser.permissions).some(Boolean);
   const canReview = currentUser?.permissions.review_meal_excess === true;
   const canConfigure = currentUser?.permissions.manage_meal_configuration === true;
+  const canOperate = currentUser !== null && (currentUser.permissions.record_meal_operations === true || canReview || canConfigure);
+  const canVendor = canOperate || currentUser?.permissions.view_meal_vendor_payments === true || currentUser?.permissions.record_meal_vendor_payments === true;
+  const canRecordVendor = currentUser?.permissions.record_meal_vendor_payments === true || canConfigure;
+  const canAccess = canVendor;
 
   const reviewFilters = useMemo(() => ({ decisions: decisionFilter, date_from: reviewRange.from, date_to: reviewRange.to, search: reviewSearch.trim() }), [decisionFilter, reviewRange, reviewSearch]);
   const reviewQuery = useMemo(() => queryString({ ...reviewFilters, page_size: "1", exceptions_page: String(exceptionsPage), exceptions_page_size: String(REVIEW_PAGE_SIZE) }), [reviewFilters, exceptionsPage]);
@@ -163,17 +207,16 @@ export default function MealsPage() {
     try {
       const user = await getCurrentUser();
       setCurrentUser(user);
-      if (!Object.values(user.permissions).some(Boolean)) return;
-      const [periodsResponse, devicesResponse, ratesResponse, entitlementsResponse, rulesResponse] = await Promise.all([
-        apiFetch("/payroll/periods/"), apiFetch("/meals/devices/"), apiFetch("/meals/rates/"), apiFetch("/meals/entitlements/"), apiFetch("/meals/rules/"),
+      const operates = user.permissions.record_meal_operations === true || user.permissions.review_meal_excess === true || user.permissions.manage_meal_configuration === true;
+      if (!operates && !user.permissions.view_meal_vendor_payments && !user.permissions.record_meal_vendor_payments) return;
+      if (!operates) { setTab("vendor"); setReady(true); return; } // vendor figures only: nothing else to load
+      const [devicesResponse, ratesResponse, entitlementsResponse, rulesResponse] = await Promise.all([
+        apiFetch("/meals/devices/"), apiFetch("/meals/rates/"), apiFetch("/meals/entitlements/"), apiFetch("/meals/rules/"),
       ]);
       const required = [[devicesResponse, "Unable to load Meal devices."], [ratesResponse, "Unable to load meal ticket rates."], [entitlementsResponse, "Unable to load meal entitlements."], [rulesResponse, "Unable to load meal entitlement rules."]] as const;
       for (const [response, fallback] of required) if (!response.ok) throw new Error(apiMessage(await response.json().catch(() => null), fallback));
       const [deviceData, rateData, entitlementData, ruleData] = await Promise.all([devicesResponse.json(), ratesResponse.json(), entitlementsResponse.json(), rulesResponse.json()]);
       setDevices(deviceData.results || []); setRates(rateData.results || []); setEntitlements(entitlementData.results || []); setRules(ruleData.results || []);
-      const periodResults: Period[] = periodsResponse.ok ? (await periodsResponse.json()).results || [] : [];
-      setPeriods(periodResults);
-      setVendorPeriodId((current) => current || (periodResults[0] ? String(periodResults[0].id) : ""));
       if (user.permissions.manage_meal_configuration) {
         const [employeeResponse, positionResponse] = await Promise.all([apiFetch("/employees/"), apiFetch("/employees/positions/")]);
         if (!employeeResponse.ok) throw new Error(apiMessage(await employeeResponse.json().catch(() => null), "Unable to load employees for meal entitlements."));
@@ -184,20 +227,19 @@ export default function MealsPage() {
     } catch (loadError) { fail(loadError, "Unable to load Meals."); } finally { setLoading(false); }
   }
 
-  async function loadVendorData(periodId: string, silent = false) {
-    if (!periodId) { setVendorData(null); return; }
+  async function loadVendorSummary(silent = false) {
     if (!silent) setLoadingVendor(true);
     try {
-      const response = await apiFetch(`/meals/vendor/${periodId}/`);
+      const response = await apiFetch(`/meals/vendor/summary/?${queryString({ date_from: vendorRange.from, date_to: vendorRange.to, group_by: vendorGroup })}`);
       if (!response.ok) throw new Error(apiMessage(await response.json().catch(() => null), "Unable to load vendor payment data."));
-      setVendorData(await response.json());
+      setVendorSummary(await response.json());
     } catch (vendorError) {
       setError(vendorError instanceof Error ? vendorError.message : "Unable to load vendor payment data.");
     } finally { setLoadingVendor(false); }
   }
   async function refreshAll() {
-    await Promise.all([loadReview(reviewQuery), loadCollections(collectionsQuery), load(true)]);
-    if (vendorPeriodId) await loadVendorData(vendorPeriodId, true);
+    if (canOperate) await Promise.all([loadReview(reviewQuery), loadCollections(collectionsQuery), load(true)]);
+    if (canVendor && tab === "vendor") await loadVendorSummary(true);
   }
 
   const loadOnMount = useEffectEvent(() => { void load(); });
@@ -209,24 +251,24 @@ export default function MealsPage() {
 
   const runReview = useEffectEvent((query: string) => { void loadReview(query); });
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !canOperate) return;
     const timer = window.setTimeout(() => runReview(reviewQuery), 250);
     return () => window.clearTimeout(timer);
-  }, [ready, reviewQuery]);
+  }, [ready, canOperate, reviewQuery]);
 
   const runCollections = useEffectEvent((query: string) => { void loadCollections(query); });
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !canOperate) return;
     const timer = window.setTimeout(() => runCollections(collectionsQuery), 250);
     return () => window.clearTimeout(timer);
-  }, [ready, collectionsQuery]);
+  }, [ready, canOperate, collectionsQuery]);
 
-  const runVendor = useEffectEvent((periodId: string) => { void loadVendorData(periodId); });
+  const runVendor = useEffectEvent(() => { void loadVendorSummary(); });
   useEffect(() => {
-    if (!vendorPeriodId) return;
-    const timer = window.setTimeout(() => runVendor(vendorPeriodId), 0);
+    if (!ready || !canVendor || tab !== "vendor") return;
+    const timer = window.setTimeout(runVendor, 0);
     return () => window.clearTimeout(timer);
-  }, [vendorPeriodId]);
+  }, [ready, canVendor, tab, vendorRange, vendorGroup]);
 
   const handleQuickReviewKey = useEffectEvent((event: KeyboardEvent) => {
     const target = event.target as HTMLElement | null;
@@ -246,19 +288,19 @@ export default function MealsPage() {
     return () => window.removeEventListener("keydown", handleQuickReviewKey);
   }, [quickReviewOpen]);
 
-  async function request(path: string, method: "POST" | "PATCH", body: unknown, success: string) {
+  async function request(path: string, method: "POST" | "PATCH", body: unknown, success: string | ((data: Record<string, unknown> | null) => string)) {
     setActing(true); setError("");
     try {
       const response = await apiFetch(path, { method, body: JSON.stringify(body) });
       const data = await response.json().catch(() => null);
       if (!response.ok) throw new Error(apiMessage(data, "The Meals request could not be completed."));
-      setFeedback(success); await refreshAll(); return true;
+      setFeedback(typeof success === "function" ? success(data) : success); await refreshAll(); return true;
     } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "The Meals request could not be completed."); return false; }
     finally { setActing(false); }
   }
 
   async function approve(item: { id: number; work_date: string }) {
-    await request(`/meals/excess/${item.id}/approve/`, "POST", {}, "Excess accepted - it comes out of that month's pay.");
+    await request(`/meals/excess/${item.id}/approve/`, "POST", {}, (data) => data && Number(data.balanced_tickets) > 0 ? "Balanced against the entitlement entered later - nothing is charged." : "Excess accepted - it comes out of that month's pay.");
   }
   async function cancel() {
     if (cancelId === null) return;
@@ -382,9 +424,24 @@ export default function MealsPage() {
   }
   async function createVendorPayment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!vendorPeriodId) return;
-    const body = { payroll_period: Number(vendorPeriodId), amount: Number(vendorPaymentForm.amount), payment_date: vendorPaymentForm.payment_date, reference: vendorPaymentForm.reference, notes: vendorPaymentForm.notes };
-    if (await request("/meals/vendor/payments/", "POST", body, "Vendor payment recorded.")) { setVendorPaymentForm(vendorPaymentInitial()); await loadVendorData(vendorPeriodId); }
+    const form = vendorPaymentForm;
+    const body = { amount: Number(form.amount), payment_date: form.payment_date, covers_from: form.covers_from || null, covers_to: form.covers_to || null, reference: form.reference, notes: form.notes };
+    if (await request("/meals/vendor/payments/", "POST", body, "Vendor payment recorded.")) setVendorPaymentForm(vendorPaymentInitial());
+  }
+  function payBucket(bucket: VendorBucket) {
+    const owing = Number(bucket.balance);
+    setVendorPaymentForm({ ...vendorPaymentInitial(), amount: owing > 0 ? String(owing) : "", payment_date: isoDate(new Date()), covers_from: bucket.start, covers_to: bucket.end });
+    window.setTimeout(() => document.getElementById("vendor-payment-form")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+  }
+  function exportVendorCsv() {
+    if (!vendorSummary) return;
+    const rows: Array<Array<string | number>> = [["Period", "Tickets", "Amount owed", "Paid", "Balance"], ...vendorSummary.buckets.map((bucket) => [bucketLabel(bucket, vendorSummary.group_by), bucket.tickets, bucket.owed, bucket.paid, bucket.balance]), ["Total", vendorSummary.totals.tickets, vendorSummary.totals.owed, vendorSummary.totals.paid, vendorSummary.totals.balance]];
+    const csv = rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    link.download = `vendor-payments-${vendorSummary.date_from}-to-${vendorSummary.date_to}.csv`;
+    link.click();
+    URL.revokeObjectURL(link.href);
   }
 
   const excessOutcome: Record<string, string> = { approved: "Accepted - deducted when payroll is generated", deducted: "Accepted - deducted from pay", cancelled: "Waived - no deduction", declined: "Declined - not billed" };
@@ -424,8 +481,8 @@ export default function MealsPage() {
     <PageHeader title="Meals" description="Monitor collections, review excesses, and maintain approved Meal configuration." actions={<div className="flex gap-2"><button type="button" onClick={() => router.push("/meals/live")} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700">Live Screen</button><button type="button" onClick={() => void refreshAll()} disabled={loading} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 disabled:opacity-50">Refresh</button></div>} />
     {feedback && <p className="mb-6 flex items-start justify-between gap-4 rounded-xl bg-emerald-50 p-4 text-sm text-emerald-800"><span>{feedback}</span><button type="button" onClick={() => setFeedback("")} className="font-semibold">Dismiss</button></p>}{error && <p className="mb-6 rounded-xl bg-red-50 p-4 text-sm text-red-700">{error}</p>}
     {loading ? <div className="h-64 animate-pulse rounded-2xl bg-slate-200" /> : !canAccess ? <Section title="Meals Access" subtitle="Your account does not have a Meals capability."><p className="p-8 text-sm text-slate-600">Ask an administrator to grant a Meals permission if you need access to operations or configuration.</p></Section> : <>
-      <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><MetricCard title="Collections Today" value={summary?.today_collections ?? 0} subtitle="Meal scans today (voided excluded)" accentColor="#2563eb" /><MetricCard title="Within Entitlement Today" value={summary?.today_within_entitlement ?? 0} subtitle="Accepted collections today" accentColor="#059669" /><MetricCard title="Excess Today" value={summary?.today_excess ?? 0} subtitle="Not entitled today (over entitlement or off day)" accentColor="#dc2626" /><MetricCard title="Pending Review" value={summary?.pending_review ?? 0} subtitle="Awaiting decision - includes unresolved cases from earlier days" accentColor="#d97706" /></div>
-      <TabBar<Tab> value={tab} onChange={setTab} tabs={[["review", "Needs a decision", summary?.pending_review ?? null], ["collections", "Collections", null], ["vendor", "Vendor payments", null], ["setup", "Setup", null]]} />
+      {canOperate && <div className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><MetricCard title="Collections Today" value={summary?.today_collections ?? 0} subtitle="Meal scans today (voided excluded)" accentColor="#2563eb" /><MetricCard title="Within Entitlement Today" value={summary?.today_within_entitlement ?? 0} subtitle="Accepted collections today" accentColor="#059669" /><MetricCard title="Excess Today" value={summary?.today_excess ?? 0} subtitle="Not entitled today (over entitlement or off day)" accentColor="#dc2626" /><MetricCard title="Pending Review" value={summary?.pending_review ?? 0} subtitle="Awaiting decision - includes unresolved cases from earlier days" accentColor="#d97706" /></div>}
+      <TabBar<Tab> value={tab} onChange={setTab} tabs={canOperate ? [["review", "Needs a decision", summary?.pending_review ?? null], ["collections", "Collections", null], ["vendor", "Vendor payments", null], ["setup", "Setup", null]] : [["vendor", "Vendor payments", null]]} />
 
       {tab === "review" && <>
         <Section title="Needs a decision" subtitle="Extra tickets nobody authorised in advance. Accept: charge the employee in that month's payroll. Waive: no deduction, the company still pays the vendor. Decline: reject the ticket - the vendor isn't billed and nothing is deducted." actions={canReview && <button type="button" disabled={acting} onClick={openQuickReview} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">⚡ Quick Review</button>}>
@@ -445,7 +502,7 @@ export default function MealsPage() {
             {bulkProgress && <div className="border-t border-blue-200 px-5 py-2 text-xs text-blue-800">Processing {bulkProgress.done} of {bulkProgress.total}...</div>}
           </div>}
           {canOfferSelectAllMatching && <div className="border-b border-amber-200 bg-amber-50 px-5 py-2 text-xs text-amber-900">All {pendingRows.length} on this page are selected. <button type="button" onClick={() => setSelectAllMatching(true)} className="font-semibold underline">Select all {exceptionsTotal} matching this filter instead</button></div>}
-          {exceptions.length ? <><ScrollArea maxHeight="55vh"><table className="w-full min-w-[900px] text-left"><thead className="text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>{canReview && <th className="w-10 px-4 py-3"><input type="checkbox" aria-label="Select all waiting decisions on this page" checked={allSelected} disabled={!pendingRows.length} onChange={(event) => { setSelectAllMatching(false); setSelected(event.target.checked ? pendingRows.map((item) => item.id) : []); }} /></th>}<th className="px-4 py-3">Employee</th><th className="px-4 py-3">Work Date</th><th className="px-4 py-3">Entitlement</th><th className="px-4 py-3">Collected</th><th className="px-4 py-3">Excess</th><th className="px-4 py-3">Deduction</th><th className="px-4 py-3">Status</th>{canReview && <th className="px-4 py-3">Actions</th>}</tr></thead><tbody className="divide-y divide-slate-100">{exceptions.map((item) => <tr key={item.id} className={selected.includes(item.id) || selectAllMatching ? "bg-blue-50/60" : ""}>{canReview && <td className="px-4 py-3">{item.status === "pending" && <input type="checkbox" aria-label={`Select ${item.employee_name}`} checked={selected.includes(item.id) || selectAllMatching} disabled={selectAllMatching} onChange={(event) => setSelected((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} />}</td>}<td className="px-4 py-3 font-medium">{item.employee_name}<span className="block text-xs font-normal text-slate-500">{item.employee_number}</span>{item.card_verified && <span className="mt-1 inline-block rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700">Card scan - gating bypassed</span>}</td><td className="px-4 py-3 text-sm text-slate-600">{day(item.work_date)}</td><td className="px-4 py-3">{item.entitlement}</td><td className="px-4 py-3">{item.collected_quantity}</td><td className="px-4 py-3">{item.excess_quantity}</td><td className="px-4 py-3 font-semibold">{money(item.proposed_deduction)}</td><td className="px-4 py-3"><StatusBadge status={item.status} />{item.status !== "pending" && item.comment && <span className="mt-1 block max-w-[14rem] text-xs text-slate-500">{item.comment}</span>}</td>{canReview && <td className="px-4 py-3">{item.status === "pending" ? <div className="flex gap-2"><button type="button" disabled={acting} onClick={() => void approve(item)} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Accept</button><button type="button" disabled={acting} onClick={() => setCancelId(item.id)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700">Waive</button><button type="button" disabled={acting} onClick={() => setDeclineId(item.id)} className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700">Decline</button></div> : <span className="text-xs text-slate-500">{excessOutcome[item.status] || item.status}</span>}</td>}</tr>)}</tbody></table></ScrollArea>
+          {exceptions.length ? <><ScrollArea maxHeight="55vh"><table className="w-full min-w-[900px] text-left"><thead className="text-xs font-semibold uppercase tracking-wide text-slate-500"><tr>{canReview && <th className="w-10 px-4 py-3"><input type="checkbox" aria-label="Select all waiting decisions on this page" checked={allSelected} disabled={!pendingRows.length} onChange={(event) => { setSelectAllMatching(false); setSelected(event.target.checked ? pendingRows.map((item) => item.id) : []); }} /></th>}<th className="px-4 py-3">Employee</th><th className="px-4 py-3">Work Date</th><th className="px-4 py-3">Entitlement</th><th className="px-4 py-3">Collected</th><th className="px-4 py-3">Excess</th><th className="px-4 py-3">Deduction</th><th className="px-4 py-3">Status</th>{canReview && <th className="px-4 py-3">Actions</th>}</tr></thead><tbody className="divide-y divide-slate-100">{exceptions.map((item) => <tr key={item.id} className={selected.includes(item.id) || selectAllMatching ? "bg-blue-50/60" : ""}>{canReview && <td className="px-4 py-3">{item.status === "pending" && <input type="checkbox" aria-label={`Select ${item.employee_name}`} checked={selected.includes(item.id) || selectAllMatching} disabled={selectAllMatching} onChange={(event) => setSelected((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} />}</td>}<td className="px-4 py-3 font-medium">{item.employee_name}<span className="block text-xs font-normal text-slate-500">{item.employee_number}</span>{item.card_verified && <span className="mt-1 inline-block rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-xs font-semibold text-red-700">Card scan - gating bypassed</span>}</td><td className="px-4 py-3 text-sm text-slate-600">{day(item.work_date)}</td><td className="px-4 py-3">{item.entitlement}</td><td className="px-4 py-3">{item.collected_quantity}</td><td className="px-4 py-3">{item.excess_quantity}</td><td className="px-4 py-3 font-semibold">{money(item.proposed_deduction)}</td><td className="px-4 py-3"><StatusBadge status={item.status} />{item.status === "pending" && item.balances_on_accept && <span className="mt-1 block max-w-[14rem] text-xs font-semibold text-emerald-700">Entitlement now covers this - Accept clears it, no charge</span>}{item.status !== "pending" && item.comment && <span className="mt-1 block max-w-[14rem] text-xs text-slate-500">{item.comment}</span>}</td>{canReview && <td className="px-4 py-3">{item.status === "pending" ? <div className="flex gap-2"><button type="button" disabled={acting} onClick={() => void approve(item)} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">Accept</button><button type="button" disabled={acting} onClick={() => setCancelId(item.id)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700">Waive</button><button type="button" disabled={acting} onClick={() => setDeclineId(item.id)} className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700">Decline</button></div> : <span className="text-xs text-slate-500">{excessOutcome[item.status] || item.status}</span>}</td>}</tr>)}</tbody></table></ScrollArea>
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3 text-sm text-slate-600"><span>{exceptionsTotal ? `Showing ${(exceptionsPage - 1) * REVIEW_PAGE_SIZE + 1}-${Math.min(exceptionsPage * REVIEW_PAGE_SIZE, exceptionsTotal)} of ${exceptionsTotal}` : "Nothing to show"}</span><span className="flex items-center gap-2"><button type="button" disabled={exceptionsPage <= 1} onClick={() => setExceptionsPage((p) => Math.max(1, p - 1))} className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold disabled:opacity-40">Previous</button><span>Page {exceptionsPage} of {exceptionsPages}</span><button type="button" disabled={exceptionsPage >= exceptionsPages} onClick={() => setExceptionsPage((p) => Math.min(exceptionsPages, p + 1))} className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold disabled:opacity-40">Next</button></span></div>
           </> : <p className="p-8 text-center text-sm text-slate-500">{decisionFilter === "pending" ? "Nothing is waiting for a decision for these filters." : "No cases for these filters."}</p>}
         </Section>
@@ -462,12 +519,17 @@ export default function MealsPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-3 text-sm text-slate-600"><span>{collectionsTotal ? `Showing ${showingFrom}-${showingTo} of ${collectionsTotal}` : "Nothing to show"}</span><span className="flex items-center gap-2"><button type="button" disabled={collectionPage <= 1} onClick={() => setCollectionPage((page) => Math.max(1, page - 1))} className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold disabled:opacity-40">Previous</button><span>Page {collectionPage} of {pages}</span><button type="button" disabled={collectionPage >= pages} onClick={() => setCollectionPage((page) => Math.min(pages, page + 1))} className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold disabled:opacity-40">Next</button></span></div>
       </Section>}
 
-      {tab === "vendor" && <Section title="Vendor Payments" subtitle="Tickets issued vs. amount owed and paid, per payroll period.">
-        <div className="border-b border-slate-200 p-5"><label className="block text-sm font-semibold text-slate-700">Payroll Period</label><select value={vendorPeriodId} onChange={(event) => setVendorPeriodId(event.target.value)} className={`${inputClass} mt-2 max-w-xs`}><option value="">Select period</option>{periods.map((period) => <option key={period.id} value={period.id}>{period.month}/{period.year}</option>)}</select></div>
-        {loadingVendor || !vendorData ? <p className="p-10 text-center text-sm text-slate-500">{vendorPeriodId ? "Loading vendor data..." : "Select a payroll period."}</p> : <>
-          <div className="grid gap-4 border-b border-slate-200 p-5 sm:grid-cols-4"><MetricCard title="Tickets Issued" value={vendorData.tickets_issued} subtitle="This period" accentColor="#2563eb" /><MetricCard title="Amount Owed" value={money(vendorData.amount_owed)} subtitle="Tickets x rate at collection" accentColor="#d97706" /><MetricCard title="Total Paid" value={money(vendorData.total_paid)} subtitle="Recorded payments" accentColor="#059669" /><MetricCard title="Balance" value={money(vendorData.balance)} subtitle="Owed minus paid" accentColor="#dc2626" /></div>
-          {canConfigure && <form onSubmit={createVendorPayment} className="grid gap-3 border-b border-slate-200 p-5 md:grid-cols-4"><input required type="number" min="0.01" step="0.01" value={vendorPaymentForm.amount} onChange={(event) => setVendorPaymentForm({ ...vendorPaymentForm, amount: event.target.value })} placeholder="Amount paid (NGN)" className={inputClass} /><input required type="date" value={vendorPaymentForm.payment_date} onChange={(event) => setVendorPaymentForm({ ...vendorPaymentForm, payment_date: event.target.value })} className={inputClass} /><input value={vendorPaymentForm.reference} onChange={(event) => setVendorPaymentForm({ ...vendorPaymentForm, reference: event.target.value })} placeholder="Reference" className={inputClass} /><button disabled={acting} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white">Record Payment</button><textarea value={vendorPaymentForm.notes} onChange={(event) => setVendorPaymentForm({ ...vendorPaymentForm, notes: event.target.value })} placeholder="Notes (optional)" className={`${inputClass} md:col-span-4 min-h-16`} /></form>}
-          {vendorData.payments.length ? <ScrollArea maxHeight="45vh"><table className="w-full min-w-[750px] text-left"><thead className="text-xs font-semibold uppercase text-slate-500"><tr><th className="px-5 py-3">Amount</th><th className="px-5 py-3">Payment Date</th><th className="px-5 py-3">Reference</th><th className="px-5 py-3">Recorded By</th><th className="px-5 py-3">Notes</th></tr></thead><tbody className="divide-y divide-slate-100">{vendorData.payments.map((payment) => <tr key={payment.id}><td className="px-5 py-3 font-semibold">{money(payment.amount)}</td><td className="px-5 py-3 text-sm text-slate-600">{day(payment.payment_date)}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.reference || "-"}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.recorded_by_name || "-"}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.notes || "-"}</td></tr>)}</tbody></table></ScrollArea> : <Empty message="No vendor payments recorded for this period." />}
+      {tab === "vendor" && <Section title="Vendor Payments" subtitle="What the vendor is owed and has been paid, by week, month or day, for any dates. Tickets count on the day they were collected; a payment counts on the days it covers." actions={vendorSummary && <button type="button" onClick={exportVendorCsv} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700">Download CSV</button>}>
+        <div className="space-y-3 border-b border-slate-200 p-4">
+          <div className="flex flex-wrap items-center gap-3"><span className="text-sm font-semibold text-slate-700">Group by</span><Chips<VendorGroup> options={[["week", "Weeks"], ["month", "Months"], ["day", "Days"]]} value={vendorGroup} onChange={setVendorGroup} /></div>
+          <VendorRangeFilter value={vendorRange} onChange={setVendorRange} />
+        </div>
+        {!vendorSummary ? <p className="p-10 text-center text-sm text-slate-500">{loadingVendor ? "Loading vendor data..." : "Choose the dates to look at."}</p> : <>
+          <div className={`grid gap-4 border-b border-slate-200 p-5 sm:grid-cols-4 ${loadingVendor ? "opacity-60" : ""}`}><MetricCard title="Tickets Issued" value={vendorSummary.totals.tickets} subtitle={`${day(vendorSummary.date_from)} to ${day(vendorSummary.date_to)}`} accentColor="#2563eb" /><MetricCard title="Amount Owed" value={money(vendorSummary.totals.owed)} subtitle="Tickets x rate at collection" accentColor="#d97706" /><MetricCard title="Total Paid" value={money(vendorSummary.totals.paid)} subtitle="Payments covering these dates" accentColor="#059669" /><MetricCard title="Balance" value={money(vendorSummary.totals.balance)} subtitle="Owed minus paid" accentColor="#dc2626" /></div>
+          {canRecordVendor && <form id="vendor-payment-form" onSubmit={createVendorPayment} className="grid gap-3 border-b border-slate-200 p-5 md:grid-cols-4"><label className="text-xs font-semibold text-slate-600">Amount paid (NGN)<input required type="number" min="0.01" step="0.01" value={vendorPaymentForm.amount} onChange={(event) => setVendorPaymentForm({ ...vendorPaymentForm, amount: event.target.value })} className={`${inputClass} mt-1`} /></label><label className="text-xs font-semibold text-slate-600">Paid on<input required type="date" value={vendorPaymentForm.payment_date} onChange={(event) => setVendorPaymentForm({ ...vendorPaymentForm, payment_date: event.target.value })} className={`${inputClass} mt-1`} /></label><label className="text-xs font-semibold text-slate-600">Covers tickets from<input type="date" value={vendorPaymentForm.covers_from} onChange={(event) => setVendorPaymentForm({ ...vendorPaymentForm, covers_from: event.target.value })} className={`${inputClass} mt-1`} /></label><label className="text-xs font-semibold text-slate-600">Covers tickets to<input type="date" value={vendorPaymentForm.covers_to} min={vendorPaymentForm.covers_from || undefined} onChange={(event) => setVendorPaymentForm({ ...vendorPaymentForm, covers_to: event.target.value })} className={`${inputClass} mt-1`} /></label><input value={vendorPaymentForm.reference} onChange={(event) => setVendorPaymentForm({ ...vendorPaymentForm, reference: event.target.value })} placeholder="Reference" className={`${inputClass} md:col-span-2`} /><textarea value={vendorPaymentForm.notes} onChange={(event) => setVendorPaymentForm({ ...vendorPaymentForm, notes: event.target.value })} placeholder="Notes (optional)" className={`${inputClass} md:col-span-2 min-h-11`} /><p className="text-xs text-slate-500 md:col-span-3">Leave the covered dates empty and the payment counts on the day it was paid. Use "Record payment" on a row below to fill in that row&apos;s dates and amount owed.</p><button disabled={acting} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white">Record Payment</button></form>}
+          <ScrollArea maxHeight="50vh"><table className="w-full min-w-[720px] text-left"><thead className="text-xs font-semibold uppercase text-slate-500"><tr><th className="px-5 py-3">{vendorSummary.group_by === "week" ? "Week" : vendorSummary.group_by === "month" ? "Month" : "Day"}</th><th className="px-5 py-3">Tickets</th><th className="px-5 py-3">Amount owed</th><th className="px-5 py-3">Paid</th><th className="px-5 py-3">Balance</th>{canRecordVendor && <th className="px-5 py-3" />}</tr></thead><tbody className="divide-y divide-slate-100">{vendorSummary.buckets.map((bucket) => { const balance = Number(bucket.balance); return <tr key={bucket.key}><td className="px-5 py-3 text-sm font-medium">{bucketLabel(bucket, vendorSummary.group_by)}</td><td className="px-5 py-3 text-sm">{bucket.tickets}</td><td className="px-5 py-3 text-sm">{money(bucket.owed)}</td><td className="px-5 py-3 text-sm">{money(bucket.paid)}</td><td className={`px-5 py-3 text-sm font-semibold ${balance > 0 ? "text-red-600" : balance < 0 ? "text-amber-600" : "text-emerald-600"}`}>{money(bucket.balance)}</td>{canRecordVendor && <td className="px-5 py-3 text-right"><button type="button" onClick={() => payBucket(bucket)} className="text-xs font-semibold text-blue-600 hover:underline">Record payment</button></td>}</tr>; })}</tbody><tfoot><tr className="border-t-2 border-slate-300 bg-slate-50 text-sm font-bold"><td className="px-5 py-3">Total</td><td className="px-5 py-3">{vendorSummary.totals.tickets}</td><td className="px-5 py-3">{money(vendorSummary.totals.owed)}</td><td className="px-5 py-3">{money(vendorSummary.totals.paid)}</td><td className="px-5 py-3">{money(vendorSummary.totals.balance)}</td>{canRecordVendor && <td />}</tr></tfoot></table></ScrollArea>
+          <div className="border-t border-slate-200 px-5 pb-1 pt-4 text-sm font-semibold text-slate-700">Payments in these dates</div>
+          {vendorSummary.payments.length ? <ScrollArea maxHeight="40vh"><table className="w-full min-w-[800px] text-left"><thead className="text-xs font-semibold uppercase text-slate-500"><tr><th className="px-5 py-3">Amount</th><th className="px-5 py-3">Paid on</th><th className="px-5 py-3">Covers</th><th className="px-5 py-3">Reference</th><th className="px-5 py-3">Recorded By</th><th className="px-5 py-3">Notes</th></tr></thead><tbody className="divide-y divide-slate-100">{vendorSummary.payments.map((payment) => <tr key={payment.id}><td className="px-5 py-3 font-semibold">{money(payment.amount)}</td><td className="px-5 py-3 text-sm text-slate-600">{day(payment.payment_date)}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.covers_from && payment.covers_to ? `${day(payment.covers_from)} - ${day(payment.covers_to)}` : "Its payment date"}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.reference || "-"}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.recorded_by_name || "-"}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.notes || "-"}</td></tr>)}</tbody></table></ScrollArea> : <Empty message="No vendor payments in these dates." />}
         </>}
       </Section>}
 

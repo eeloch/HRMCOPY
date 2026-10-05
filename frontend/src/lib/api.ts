@@ -13,6 +13,8 @@ export type CurrentUser = {
     record_meal_operations: boolean;
     review_meal_excess: boolean;
     manage_meal_configuration: boolean;
+    view_meal_vendor_payments: boolean;
+    record_meal_vendor_payments: boolean;
     view_salary: boolean;
     view_biometrics_overview: boolean;
     manage_devices: boolean;

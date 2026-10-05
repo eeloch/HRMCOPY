@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
-from django.db.models import Q, Sum
+from django.db.models import Count, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -64,6 +64,19 @@ class CanViewMealOperations(BasePermission):
             or request.user.has_perm("meals.manage_meal_configuration")
         )
 
+
+
+class CanViewVendorPayments(BasePermission):
+    """The vendor figures have their own permission, so accounts can see them without any other meal access.
+    Everyone who could see them before (any meal permission) still can."""
+
+    def has_permission(self, request, view):
+        return request.user.has_perm("meals.view_meal_vendor_payments") or request.user.has_perm("meals.record_meal_vendor_payments") or CanViewMealOperations().has_permission(request, view)
+
+
+class CanRecordVendorPayments(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.has_perm("meals.record_meal_vendor_payments") or request.user.has_perm("meals.manage_meal_configuration")
 
 
 class CanReviewMealExcess(BasePermission):
@@ -190,7 +203,7 @@ class MealReviewRemindersAPIView(APIView):
 
 
 class MealVendorPeriodAPIView(APIView):
-    permission_classes = [IsAuthenticated, CanViewMealOperations]
+    permission_classes = [IsAuthenticated, CanViewVendorPayments]
 
     def get(self, request, payroll_period_id):
         period = get_object_or_404(PayrollPeriod, pk=payroll_period_id)
@@ -217,7 +230,7 @@ class MealVendorPeriodAPIView(APIView):
 
 
 class MealVendorPaymentListCreateAPIView(APIView):
-    permission_classes = [IsAuthenticated, CanManageMealConfiguration]
+    permission_classes = [IsAuthenticated, CanRecordVendorPayments]
 
     def post(self, request):
         serializer = MealVendorPaymentSerializer(data=request.data)
@@ -227,6 +240,87 @@ class MealVendorPaymentListCreateAPIView(APIView):
             MealVendorPaymentSerializer(payment).data,
             status=201,
         )
+
+
+VENDOR_GROUPINGS = ("week", "month", "day")
+MAX_VENDOR_RANGE_DAYS = 800
+
+
+def _vendor_bucket(day, group_by):
+    """The (start, end) of the week (Monday to Sunday), month or day a date falls in."""
+    if group_by == "day":
+        return day, day
+    if group_by == "month":
+        start = day.replace(day=1)
+        end = (start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)) - timedelta(days=1)
+        return start, end
+    start = day - timedelta(days=day.weekday())
+    return start, start + timedelta(days=6)
+
+
+class MealVendorSummaryAPIView(APIView):
+    """What the vendor is owed and has been paid, over any date range, grouped by week, month or day.
+
+    Tickets count by the day they were collected (voided ones never count). A payment counts on the first day it
+    says it covers, or on its payment date when it covers nothing in particular - so a week's payment settles
+    that week's tickets whenever it is actually paid."""
+
+    permission_classes = [IsAuthenticated, CanViewVendorPayments]
+
+    def get(self, request):
+        params = request.query_params
+        group_by = params.get("group_by", "week")
+        if group_by not in VENDOR_GROUPINGS:
+            return Response({"detail": "group_by must be week, month or day."}, status=400)
+        today = timezone.localdate()
+        try:
+            date_to = _date_param(params.get("date_to")) or today
+            date_from = _date_param(params.get("date_from")) or _vendor_bucket(date_to - timedelta(days=7 * 7), "week")[0]
+        except ValueError:
+            return Response({"detail": "Dates must be YYYY-MM-DD."}, status=400)
+        if date_from > date_to:
+            return Response({"detail": "The start date is after the end date."}, status=400)
+        if (date_to - date_from).days > MAX_VENDOR_RANGE_DAYS:
+            return Response({"detail": "Choose a range of at most about two years."}, status=400)
+
+        buckets = {}
+
+        def bucket_for(day):
+            start, end = _vendor_bucket(day, group_by)
+            key = start.isoformat()
+            if key not in buckets:
+                buckets[key] = {"key": key, "start": max(start, date_from).isoformat(), "end": min(end, date_to).isoformat(), "tickets": 0, "owed": 0, "paid": 0}
+            return buckets[key]
+
+        # every period in the range shows, even one with nothing in it
+        cursor = date_from
+        while cursor <= date_to:
+            bucket_for(cursor)
+            cursor = _vendor_bucket(cursor, group_by)[1] + timedelta(days=1)
+
+        rows = (
+            MealCollection.objects.filter(work_date__gte=date_from, work_date__lte=date_to, voided_at__isnull=True)
+            .values("work_date").annotate(tickets=Count("id"), owed=Sum("rate_snapshot"))
+        )
+        for row in rows:
+            bucket = bucket_for(row["work_date"])
+            bucket["tickets"] += row["tickets"]
+            bucket["owed"] += row["owed"] or 0
+
+        payments = []
+        for payment in MealVendorPayment.objects.select_related("recorded_by").order_by("-payment_date", "-id"):
+            counts_on = payment.covers_from or payment.payment_date
+            if not date_from <= counts_on <= date_to:
+                continue
+            bucket_for(counts_on)["paid"] += payment.amount
+            payments.append(payment)
+
+        rows_out = sorted(buckets.values(), key=lambda bucket: bucket["key"], reverse=True)
+        for bucket in rows_out:
+            bucket["balance"] = bucket["owed"] - bucket["paid"]
+        totals = {"tickets": sum(b["tickets"] for b in rows_out), "owed": sum(b["owed"] for b in rows_out), "paid": sum(b["paid"] for b in rows_out)}
+        totals["balance"] = totals["owed"] - totals["paid"]
+        return Response({"date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "group_by": group_by, "totals": totals, "buckets": rows_out, "payments": MealVendorPaymentSerializer(payments, many=True).data})
 
 
 class MealDeviceListAPIView(APIView):
@@ -493,6 +587,8 @@ class MealOperationsAPIView(APIView):
                         # face verification does (confirmed 2026-09-23) - flagged so a reviewer isn't left
                         # guessing why gating didn't stop this one.
                         "card_verified": card_verified.get(x.pk, False),
+                        # The entitlement or shift was entered after this scan: Accept clears it instead of charging.
+                        "balances_on_accept": MealService.would_balance(x),
                     }
                     for x in exception_rows
                 ],

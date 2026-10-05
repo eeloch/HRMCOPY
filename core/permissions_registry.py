@@ -28,6 +28,8 @@ MANAGED_PERMISSIONS = [
     {"codename": "record_meal_operations", "app_label": "meals", "label": "Record meal operations", "group": "Meals"},
     {"codename": "review_meal_excess", "app_label": "meals", "label": "Review meal excess deductions", "group": "Meals"},
     {"codename": "manage_meal_configuration", "app_label": "meals", "label": "Manage meal configuration", "group": "Meals"},
+    {"codename": "view_meal_vendor_payments", "app_label": "meals", "label": "View meal vendor payments (tickets owed and paid, by week or month)", "group": "Meals"},
+    {"codename": "record_meal_vendor_payments", "app_label": "meals", "label": "Record payments to the meal vendor", "group": "Meals"},
     {"codename": "record_employee_offences", "app_label": "offences", "label": "Record employee offences", "group": "Offences"},
     {"codename": "review_employee_offences", "app_label": "offences", "label": "Review and approve employee offences", "group": "Offences"},
     {"codename": "manage_offence_configuration", "app_label": "offences", "label": "Manage the offences and rewards policy (edit penalties and standard amounts)", "group": "Offences"},
