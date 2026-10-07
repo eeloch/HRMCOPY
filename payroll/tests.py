@@ -453,7 +453,9 @@ class PayrollMonetaryAttendanceTests(TestCase):
 
     def test_lateness_fixed_bands_and_half_day_rate_use_roster_denominator(self):
         self.complete_roster()
-        cases = [(1, Decimal("300.00"), "1_15"), (15, Decimal("300.00"), "1_15"), (16, Decimal("500.00"), "16_60"), (60, Decimal("500.00"), "16_60"), (61, Decimal("2777.78"), "over_60_half_day"), (120, Decimal("2777.78"), "over_60_half_day")]
+        cases = [(6, Decimal("300.00"), "6_15"), (15, Decimal("300.00"), "6_15"), (16, Decimal("500.00"), "16_30"), (30, Decimal("500.00"), "16_30"),
+                 (31, Decimal("700.00"), "31_59"), (59, Decimal("700.00"), "31_59"), (60, Decimal("1000.00"), "60_to_half_day"), (239, Decimal("1000.00"), "60_to_half_day"),
+                 (240, Decimal("2777.78"), "half_day"), (400, Decimal("2777.78"), "half_day")]
         for day, (minutes, expected_amount, policy_band) in enumerate(cases, start=1):
             exception = self.attendance_exception(day, "late", minutes)
             summary = sync_attendance_deductions_for_period(self.period)
@@ -462,20 +464,27 @@ class PayrollMonetaryAttendanceTests(TestCase):
             self.assertEqual(line.amount, expected_amount)
             self.assertEqual(line.metadata["minutes_affected"], minutes)
             self.assertEqual(line.metadata["policy_band"], policy_band)
-            if minutes > 60:
+            if policy_band == "half_day":
                 self.assertEqual(line.metadata["daily_rate"], "5555.56")
                 self.assertEqual(line.metadata["half_day_rate"], "2777.78")
             self.assertEqual(summary.lateness_deductions_created, 1)
 
     def test_early_departure_fixed_bands_and_half_day_rate(self):
         self.complete_roster()
-        cases = [(1, Decimal("300.00")), (15, Decimal("300.00")), (16, Decimal("500.00")), (60, Decimal("500.00")), (61, Decimal("2777.78"))]
-        for day, (minutes, expected_amount) in enumerate(cases, start=7):
+        cases = [(6, Decimal("500.00")), (15, Decimal("500.00")), (16, Decimal("1000.00")), (30, Decimal("1000.00")), (31, Decimal("1500.00")), (419, Decimal("1500.00")), (420, Decimal("2777.78")), (500, Decimal("2777.78"))]
+        for day, (minutes, expected_amount) in enumerate(cases, start=1):
             exception = self.attendance_exception(day, "early_departure", minutes)
             sync_attendance_deductions_for_period(self.period)
             line = PayrollLineItem.objects.get(payroll=self.payroll, source_reference=str(exception.pk))
             self.assertEqual(line.code, "ATTENDANCE_EARLY_DEPARTURE")
             self.assertEqual(line.amount, expected_amount)
+
+    def test_five_minutes_or_less_late_or_early_costs_nothing(self):
+        self.complete_roster()
+        for day, (kind, minutes) in enumerate((("late", 5), ("early_departure", 5), ("late", 1)), start=1):
+            self.attendance_exception(day, kind, minutes)
+        sync_attendance_deductions_for_period(self.period)
+        self.assertFalse(PayrollLineItem.objects.filter(payroll=self.payroll, is_system_generated=True).exists())
 
     def test_unapproved_and_zero_minute_exceptions_create_no_deduction(self):
         self.complete_roster()

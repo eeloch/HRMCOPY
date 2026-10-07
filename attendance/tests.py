@@ -216,9 +216,9 @@ class AttendanceProcessingTests(TestCase):
         during = timezone.make_aware(datetime(2026, 10, 15, 10, 0))
         punched = self.employee_with_shift("OPEN1")
         quiet = self.employee_with_shift("OPEN2")
-        self.add_event(punched, self.work_date, 7, 5)
+        self.add_event(punched, self.work_date, 7, 8)
         record = process_employee_attendance(punched, self.work_date, now=during)
-        self.assertEqual((record.status, record.late_minutes), ("late", 5))
+        self.assertEqual((record.status, record.late_minutes), ("late", 8))
         self.assertIsNone(record.actual_clock_out)
         self.assertFalse(AttendanceException.objects.filter(attendance=record, exception_type__in=["missing_clock_out", "early_departure", "absence"]).exists())
         self.assertIsNone(process_employee_attendance(quiet, self.work_date, now=during))  # nothing recorded, so not absent
@@ -325,11 +325,11 @@ class AttendanceProcessingTests(TestCase):
         still be deduped off late_minutes itself, not the overall status, or every periodic reprocess of
         an already-closed day re-logs the identical late arrival forever."""
         employee = self.employee_with_shift("SINGLE-LATE")
-        self.add_event(employee, self.work_date, 7, 5)
+        self.add_event(employee, self.work_date, 7, 8)
 
         first = process_employee_attendance(employee, self.work_date, now=self.after)
         self.assertEqual(first.status, "incomplete")
-        self.assertEqual(first.late_minutes, 5)
+        self.assertEqual(first.late_minutes, 8)
         self.assertEqual(AuditEvent.objects.filter(employee=employee, event_type="attendance.late").count(), 1)
 
         second = process_employee_attendance(employee, self.work_date, now=self.after)
@@ -705,3 +705,45 @@ class BiometricIngestionTests(TestCase):
         self.assertEqual(no_external_id.status, "invalid")
         self.assertIn("external_event_id", no_external_id.reason)
         self.assertFalse(AttendanceEvent.objects.exists())
+
+
+class PenaltyBandProcessingTests(AttendanceProcessingTests):
+    """Lateness and early departure are priced by the fixed bands from the attendance penalty policy."""
+
+    def process(self, number, arrive=None, leave=None):
+        employee = self.employee_with_shift(number)
+        if arrive:
+            self.add_event(employee, self.work_date, *arrive)
+        if leave:
+            self.add_event(employee, self.work_date, *leave)
+        return employee, process_employee_attendance(employee, self.work_date, now=self.after)
+
+    def amount(self, attendance, kind):
+        return AttendanceException.objects.get(attendance=attendance, exception_type=kind).proposed_deduction
+
+    def test_up_to_five_minutes_late_is_waived_and_is_not_a_late_day(self):
+        _employee, record = self.process("BAND-5", arrive=(7, 5), leave=(19, 0))
+        self.assertEqual((record.late_minutes, record.status), (5, "present"))
+        self.assertFalse(AttendanceException.objects.filter(attendance=record, exception_type="late").exists())
+
+    def test_late_bands_set_the_proposed_amount(self):
+        for number, minute, expected in (("BAND-6", 6, "300.00"), ("BAND-16", 16, "500.00"), ("BAND-45", 45, "700.00")):
+            _employee, record = self.process(number, arrive=(7, minute), leave=(19, 0))
+            self.assertEqual(self.amount(record, "late"), Decimal(expected), number)
+        _employee, record = self.process("BAND-90", arrive=(8, 30), leave=(19, 0))
+        self.assertEqual(self.amount(record, "late"), Decimal("1000.00"))
+
+    def test_arriving_four_hours_late_is_a_half_day(self):
+        employee, record = self.process("BAND-HALF", arrive=(11, 0), leave=(19, 0))
+        employee.basic_salary = Decimal("26000")
+        employee.save()
+        record = process_employee_attendance(employee, self.work_date, now=self.after)
+        self.assertEqual(self.amount(record, "late"), Decimal("13000.00"))  # half a day: this test roster has one working day that month
+
+    def test_early_departure_bands(self):
+        for number, leave, expected in (("EARLY-4", (18, 56), None), ("EARLY-10", (18, 50), "500.00"), ("EARLY-25", (18, 35), "1000.00"), ("EARLY-3H", (16, 0), "1500.00")):
+            _employee, record = self.process(number, arrive=(7, 0), leave=leave)
+            if expected is None:
+                self.assertFalse(AttendanceException.objects.filter(attendance=record, exception_type="early_departure").exists(), number)
+            else:
+                self.assertEqual(self.amount(record, "early_departure"), Decimal(expected), number)

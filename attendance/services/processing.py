@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from attendance.models import AttendanceEvent, AttendanceException, DailyAttendance, EmployeeRosterDay
 from attendance.services.leave import approved_leave_employee_ids
+from attendance.services.penalties import LATE_WAIVED_UP_TO, estimated_daily_rate, penalty_for, waived_up_to
 from attendance.services.roster import get_employee_roster_day
 from audit.models import AuditSeverity
 from audit.services import AuditService
@@ -50,7 +51,7 @@ def shift_schedule(shift, work_date):
     return scheduled_start, scheduled_end
 
 
-def _sync_exception(attendance, exception_type, *, applies, minutes=0, monetary=True):
+def _sync_exception(attendance, exception_type, *, applies, minutes=0, monetary=True, deduction=None):
     """Update pending exceptions only; HR-reviewed decisions are immutable here."""
     exceptions = AttendanceException.objects.filter(
         attendance=attendance,
@@ -62,7 +63,8 @@ def _sync_exception(attendance, exception_type, *, applies, minutes=0, monetary=
         exceptions.filter(status=PENDING_EXCEPTION_STATUS).delete()
         return
 
-    deduction = calculate_proposed_deduction(attendance.employee, minutes) if monetary else Decimal("0.00")
+    if deduction is None:
+        deduction = calculate_proposed_deduction(attendance.employee, minutes) if monetary else Decimal("0.00")
     if exception is None:
         AttendanceException.objects.create(
             attendance=attendance,
@@ -110,7 +112,7 @@ def _log_attendance_changes(attendance, previous):
     # though it's still carrying the same late_minutes fact. Checking status too meant that once
     # a day like that closed out, every 5-minute reprocess re-logged the identical late arrival
     # forever, since previous["status"] could never equal "late" for it.
-    if attendance.late_minutes and previous["late_minutes"] != attendance.late_minutes:
+    if attendance.late_minutes > LATE_WAIVED_UP_TO and previous["late_minutes"] != attendance.late_minutes:
         # Linked to the pending "late" exception itself, not the attendance row, so the Activity
         # Center can send HR straight to the record that actually needs a decision - _sync_exception
         # (called above) has already created or updated it for this same late_minutes value.
@@ -201,7 +203,7 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
             attendance.early_departure_minutes = 0
             attendance.worked_minutes = 0
             attendance.overtime_minutes = 0
-            attendance.status = "late" if attendance.late_minutes else "present"
+            attendance.status = "late" if attendance.late_minutes > LATE_WAIVED_UP_TO else "present"
         elif event_count == 0:
             attendance.actual_clock_in = None
             attendance.actual_clock_out = None
@@ -251,7 +253,7 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
                 0,
                 int((attendance.actual_clock_out - scheduled_end).total_seconds() // 60),
             )
-            attendance.status = "late" if attendance.late_minutes else "present"
+            attendance.status = "late" if attendance.late_minutes > LATE_WAIVED_UP_TO else "present"
             missing_clock_in = False
             missing_clock_out = False
 
@@ -268,18 +270,13 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
             applies=attendance.status == "absent",
             minutes=FLEXIBLE_DAY_MINUTES if shift.is_flexible else int((scheduled_end - scheduled_start).total_seconds() // 60),
         )
-        _sync_exception(
-            attendance,
-            "late",
-            applies=attendance.late_minutes > 0,
-            minutes=attendance.late_minutes,
-        )
-        _sync_exception(
-            attendance,
-            "early_departure",
-            applies=attendance.early_departure_minutes > 0,
-            minutes=attendance.early_departure_minutes,
-        )
+        # Lateness and early departure follow the fixed penalty bands; a few minutes within the allowance is waived and
+        # raises nothing at all. Half-day bands are priced from the month's roster, so look that up only when needed.
+        rate = estimated_daily_rate(attendance.employee, work_date) if max(attendance.late_minutes - LATE_WAIVED_UP_TO, attendance.early_departure_minutes - waived_up_to("early_departure")) > 0 else Decimal("0")
+        late_penalty = penalty_for("late", attendance.late_minutes, rate)
+        early_penalty = penalty_for("early_departure", attendance.early_departure_minutes, rate)
+        _sync_exception(attendance, "late", applies=late_penalty is not None, minutes=attendance.late_minutes, deduction=late_penalty[0] if late_penalty else None)
+        _sync_exception(attendance, "early_departure", applies=early_penalty is not None, minutes=attendance.early_departure_minutes, deduction=early_penalty[0] if early_penalty else None)
         _sync_exception(
             attendance,
             "missing_clock_in",

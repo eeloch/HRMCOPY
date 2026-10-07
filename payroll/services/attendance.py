@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction
 
 from attendance.models import AttendanceException, RosterDayStatus
+from attendance.services.penalties import penalty_for
 from attendance.services.roster import IncompleteRosterError, expected_attendance_days
 from audit.models import AuditSeverity
 from audit.services import AuditService
@@ -168,16 +169,8 @@ def _sync_system_line(payroll, *, source_type, source_reference, code, descripti
 
 
 def attendance_exception_deduction(exception, rate):
-    """Apply the approved fixed-band policy without recalculating attendance facts."""
-    minutes = exception.minutes_affected
-    if minutes <= 0:
-        return None
-    if minutes <= 15:
-        return Decimal("300.00"), "1_15", {}
-    if minutes <= 60:
-        return Decimal("500.00"), "16_60", {}
-    half_day_rate = (rate / Decimal("2")).quantize(MONEY, rounding=ROUND_HALF_UP)
-    return half_day_rate, "over_60_half_day", {"daily_rate": str(rate), "half_day_rate": str(half_day_rate)}
+    """The approved fixed-band policy (see attendance.services.penalties), applied without recalculating attendance."""
+    return penalty_for(exception.exception_type, exception.minutes_affected, rate)
 
 
 def _sync_employee_payroll(payroll, summary):

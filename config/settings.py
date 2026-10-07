@@ -330,6 +330,6 @@ ATTENDANCE_REWARDS_FIRST_MONTH = os.environ.get("DJANGO_ATTENDANCE_REWARDS_FIRST
 # reliable record (2026-09-21: every employee shows absent). Lateness up to the allowance is waived by the ready-made
 # rule; lateness of more than the long-late minutes is a clear case.
 ATTENDANCE_GO_LIVE_DATE = os.environ.get("DJANGO_ATTENDANCE_GO_LIVE_DATE", "2026-09-23")
-ATTENDANCE_LATE_ALLOWANCE_MINUTES = int(os.environ.get("DJANGO_ATTENDANCE_LATE_ALLOWANCE_MINUTES", "15"))
+ATTENDANCE_LATE_ALLOWANCE_MINUTES = int(os.environ.get("DJANGO_ATTENDANCE_LATE_ALLOWANCE_MINUTES", "5"))
 ATTENDANCE_LONG_LATE_MINUTES = int(os.environ.get("DJANGO_ATTENDANCE_LONG_LATE_MINUTES", "60"))
 
