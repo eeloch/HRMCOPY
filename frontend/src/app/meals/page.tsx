@@ -25,6 +25,9 @@ type VendorPayment = { id: number; payroll_period: number | null; amount: string
 type VendorBucket = { key: string; start: string; end: string; tickets: number; claimed: number; unclaimed: number; awaiting_claim: number; claim_status: "" | "claimed" | "partial" | "none"; owed: string; paid: string; balance: string };
 type VendorClaim = { id: number; date_from: string; date_to: string; quantity: number; reference: string; notes: string; recorded_by_name: string; issued: number; payable: number; unclaimed: number; over_claimed: number };
 type VendorSummary = { date_from: string; date_to: string; group_by: VendorGroup; totals: { tickets: number; claimed: number; unclaimed: number; awaiting_claim: number; owed: string; paid: string; balance: string }; buckets: VendorBucket[]; claims: VendorClaim[]; payments: VendorPayment[] };
+type MultipleTickets = { date_from: string; date_to: string; min_tickets: number; totals: { people: number; person_days: number; tickets: number }; days: Array<{ date: string; people: number; tickets: number }>; rows: Array<{ employee_number: string; employee_name: string; work_date: string; tickets: number; within: number; charged: number; waived: number; waiting: number }>; truncated: boolean };
+type Chargeback = { id: number; employee_number: string; employee_name: string; work_date: string; quantity: number; amount: string; reason: string; reference: string; status: "pending" | "deducted" | "cancelled"; pay_year: number; pay_month: number; created_by_name: string; created_at: string; cancel_reason: string };
+type ChargebackLookup = { employee_name: string; employee_status: string; work_date: string; rate: string | null; taken: number; already_charged: number; charged_back: number; chargeable: number };
 type VendorGroup = "week" | "month" | "day";
 type Tab = "review" | "collections" | "vendor" | "setup";
 type DecisionFilter = "pending" | "decided" | "all";
@@ -38,6 +41,8 @@ const dateTime = (value: string) => new Date(value).toLocaleString("en-NG", { da
 const rateInitial = () => ({ amount: "", effective_from: "", effective_to: "" });
 const entitlementInitial = () => ({ employee: "", tickets_per_work_day: "", effective_from: "", effective_to: "", reason: "", is_exceptional_override: false });
 const ruleInitial = () => ({ employment_type: "", employment_category: "", position: "", minimum_months_of_service: "", tickets_per_work_day: "", priority: "100", description: "" });
+const chargebackInitial = () => ({ employee_number: "", work_date: "", quantity: "1", reason: "", reference: "", pay_month: "" });
+const chargebackStatusLabel = { pending: "Waiting for payroll", deducted: "Deducted from pay", cancelled: "Cancelled" } as const;
 const vendorClaimInitial = () => ({ date_from: "", date_to: "", quantity: "", reference: "" });
 const vendorPaymentInitial = () => ({ amount: "", payment_date: "", covers_from: "", covers_to: "", reference: "", notes: "" });
 const employmentTypeOptions = [["permanent", "Permanent"], ["contract", "Contract"], ["casual", "Casual"], ["intern", "Intern"], ["nysc", "NYSC"], ["expatriate", "Expatriate"]];
@@ -166,10 +171,17 @@ export default function MealsPage() {
   const [loadingVendor, setLoadingVendor] = useState(false);
   const [vendorPaymentForm, setVendorPaymentForm] = useState(vendorPaymentInitial);
   const [vendorClaimForm, setVendorClaimForm] = useState(vendorClaimInitial);
+  const [multipleMin, setMultipleMin] = useState<2 | 3>(2);
+  const [multiple, setMultiple] = useState<MultipleTickets | null>(null);
+  const [chargebacks, setChargebacks] = useState<Chargeback[]>([]);
+  const [chargebackForm, setChargebackForm] = useState(chargebackInitial);
+  const [chargebackLookup, setChargebackLookup] = useState<ChargebackLookup | null>(null);
+  const [chargebackNote, setChargebackNote] = useState("");
   const canReview = currentUser?.permissions.review_meal_excess === true;
   const canConfigure = currentUser?.permissions.manage_meal_configuration === true;
   const canOperate = currentUser !== null && (currentUser.permissions.record_meal_operations === true || canReview || canConfigure);
   const canVendor = canOperate || currentUser?.permissions.view_meal_vendor_payments === true || currentUser?.permissions.record_meal_vendor_payments === true;
+  const canChargeBack = currentUser?.permissions.charge_back_meal_tickets === true || canReview;
   const canRecordVendor = currentUser?.permissions.record_meal_vendor_payments === true || canConfigure;
   const canAccess = canVendor;
 
@@ -240,9 +252,48 @@ export default function MealsPage() {
       setError(vendorError instanceof Error ? vendorError.message : "Unable to load vendor payment data.");
     } finally { setLoadingVendor(false); }
   }
+  async function loadMultiple() {
+    try {
+      const response = await apiFetch(`/meals/vendor/multiple-tickets/?${queryString({ date_from: vendorRange.from, date_to: vendorRange.to, min: String(multipleMin) })}`);
+      if (!response.ok) throw new Error(apiMessage(await response.json().catch(() => null), "Unable to load the multiple-ticket report."));
+      setMultiple(await response.json());
+    } catch (multipleError) { setError(multipleError instanceof Error ? multipleError.message : "Unable to load the multiple-ticket report."); }
+  }
+  async function loadChargebacks() {
+    try {
+      const response = await apiFetch(`/meals/chargebacks/?${queryString({ date_from: vendorRange.from, date_to: vendorRange.to })}`);
+      if (response.ok) setChargebacks((await response.json()).results || []);
+    } catch { /* the list is a convenience; the form still works */ }
+  }
+  async function lookUpChargeback() {
+    setChargebackNote(""); setChargebackLookup(null);
+    if (!chargebackForm.employee_number.trim() || !chargebackForm.work_date) { setChargebackNote("Enter the staff number and the date the tickets were taken."); return; }
+    const response = await apiFetch(`/meals/chargebacks/lookup/?${queryString({ employee: chargebackForm.employee_number.trim(), date: chargebackForm.work_date })}`);
+    const data = await response.json().catch(() => null);
+    if (!response.ok) { setChargebackNote(apiMessage(data, "Could not look that up.")); return; }
+    setChargebackLookup(data);
+    setChargebackForm((current) => ({ ...current, quantity: String(Math.max(1, Math.min(Number(current.quantity) || 1, data.chargeable || 1))) }));
+  }
+  async function submitChargeback(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = chargebackForm;
+    const month = form.pay_month ? form.pay_month.split("-") : [];
+    const body = { employee_number: form.employee_number.trim(), work_date: form.work_date, quantity: Number(form.quantity), reason: form.reason, reference: form.reference, pay_year: month[0] ? Number(month[0]) : null, pay_month: month[1] ? Number(month[1]) : null };
+    if (await request("/meals/chargebacks/", "POST", body, "Ticket charged back - it comes out of the employee's pay.")) { setChargebackForm(chargebackInitial()); setChargebackLookup(null); setChargebackNote(""); }
+  }
+  async function cancelChargeback(item: Chargeback) {
+    const why = window.prompt(`Cancel the charge of ${money(item.amount)} to ${item.employee_name}? Say why:`);
+    if (why === null) return;
+    await request(`/meals/chargebacks/${item.id}/cancel/`, "POST", { reason: why }, "Chargeback cancelled - nothing will be deducted.");
+  }
+  function chargeBackFrom(row: { employee_number: string; work_date: string }) {
+    setChargebackForm({ ...chargebackInitial(), employee_number: row.employee_number, work_date: row.work_date });
+    setChargebackLookup(null); setChargebackNote("");
+    window.setTimeout(() => document.getElementById("chargeback-form")?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+  }
   async function refreshAll() {
     if (canOperate) await Promise.all([loadReview(reviewQuery), loadCollections(collectionsQuery), load(true)]);
-    if (canVendor && tab === "vendor") await loadVendorSummary(true);
+    if (canVendor && tab === "vendor") { await loadVendorSummary(true); await loadMultiple(); if (canChargeBack || canOperate) await loadChargebacks(); }
   }
 
   const loadOnMount = useEffectEvent(() => { void load(); });
@@ -266,12 +317,12 @@ export default function MealsPage() {
     return () => window.clearTimeout(timer);
   }, [ready, canOperate, collectionsQuery]);
 
-  const runVendor = useEffectEvent(() => { void loadVendorSummary(); });
+  const runVendor = useEffectEvent(() => { void loadVendorSummary(); void loadMultiple(); if (canChargeBack || canOperate) void loadChargebacks(); });
   useEffect(() => {
     if (!ready || !canVendor || tab !== "vendor") return;
     const timer = window.setTimeout(runVendor, 0);
     return () => window.clearTimeout(timer);
-  }, [ready, canVendor, tab, vendorRange, vendorGroup]);
+  }, [ready, canVendor, tab, vendorRange, vendorGroup, multipleMin]);
 
   const handleQuickReviewKey = useEffectEvent((event: KeyboardEvent) => {
     const target = event.target as HTMLElement | null;
@@ -557,6 +608,34 @@ export default function MealsPage() {
           {vendorSummary.payments.length ? <ScrollArea maxHeight="40vh"><table className="w-full min-w-[800px] text-left"><thead className="text-xs font-semibold uppercase text-slate-500"><tr><th className="px-5 py-3">Amount</th><th className="px-5 py-3">Paid on</th><th className="px-5 py-3">Covers</th><th className="px-5 py-3">Reference</th><th className="px-5 py-3">Recorded By</th><th className="px-5 py-3">Notes</th></tr></thead><tbody className="divide-y divide-slate-100">{vendorSummary.payments.map((payment) => <tr key={payment.id}><td className="px-5 py-3 font-semibold">{money(payment.amount)}</td><td className="px-5 py-3 text-sm text-slate-600">{day(payment.payment_date)}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.covers_from && payment.covers_to ? `${day(payment.covers_from)} - ${day(payment.covers_to)}` : "Its payment date"}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.reference || "-"}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.recorded_by_name || "-"}</td><td className="px-5 py-3 text-sm text-slate-600">{payment.notes || "-"}</td></tr>)}</tbody></table></ScrollArea> : <Empty message="No vendor payments in these dates." />}
         </>}
       </Section>}
+
+      {tab === "vendor" && <div className="mt-6"><Section title="People who took more than one ticket" subtitle="Everyone who took two or more tickets in a single day, for the dates above, and what became of the extra ones.">
+        <div className="space-y-4 p-5">
+          <Chips<"2" | "3"> options={[["2", "2 or more in a day"], ["3", "3 or more in a day"]]} value={String(multipleMin) as "2" | "3"} onChange={(value) => setMultipleMin(value === "3" ? 3 : 2)} />
+          {!multiple ? <p className="text-sm text-slate-500">Loading...</p> : <>
+            <div className="grid gap-4 sm:grid-cols-3"><MetricCard title="People" value={multiple.totals.people} subtitle="Different people in these dates" accentColor="#7c3aed" /><MetricCard title="Person-days" value={multiple.totals.person_days} subtitle="Times someone took that many in one day" accentColor="#2563eb" /><MetricCard title="Tickets" value={multiple.totals.tickets} subtitle="Tickets in those person-days" accentColor="#d97706" /></div>
+            {multiple.days.length > 0 && <div className="flex flex-wrap gap-2">{multiple.days.map((entry) => <span key={entry.date} className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-700">{day(entry.date)}: {entry.people} {entry.people === 1 ? "person" : "people"}</span>)}</div>}
+            {multiple.rows.length ? <ScrollArea maxHeight="45vh"><table className="w-full min-w-[820px] text-left"><thead className="text-xs font-semibold uppercase text-slate-500"><tr><th className="px-4 py-3">Employee</th><th className="px-4 py-3">Date</th><th className="px-4 py-3">Tickets</th><th className="px-4 py-3">Within entitlement</th><th className="px-4 py-3">Extra: charged</th><th className="px-4 py-3">Extra: waived</th><th className="px-4 py-3">Extra: waiting</th>{canChargeBack && <th className="px-4 py-3" />}</tr></thead><tbody className="divide-y divide-slate-100">{multiple.rows.map((row) => <tr key={`${row.employee_number}-${row.work_date}`}><td className="px-4 py-3 text-sm font-medium">{row.employee_name}<span className="block text-xs font-normal text-slate-500">{row.employee_number}</span></td><td className="px-4 py-3 text-sm text-slate-600">{day(row.work_date)}</td><td className="px-4 py-3 text-sm font-semibold">{row.tickets}</td><td className="px-4 py-3 text-sm">{row.within}</td><td className="px-4 py-3 text-sm">{row.charged}</td><td className="px-4 py-3 text-sm">{row.waived}</td><td className={`px-4 py-3 text-sm ${row.waiting ? "font-semibold text-amber-700" : ""}`}>{row.waiting}</td>{canChargeBack && <td className="px-4 py-3 text-right"><button type="button" onClick={() => chargeBackFrom(row)} className="text-xs font-semibold text-blue-600 hover:underline">Charge back</button></td>}</tr>)}</tbody></table></ScrollArea> : <p className="text-sm text-slate-500">Nobody took {multipleMin} or more tickets in a day in these dates.</p>}
+            {multiple.truncated && <p className="text-xs text-slate-500">Showing the first 500 rows; narrow the dates to see the rest.</p>}
+          </>}
+        </div>
+      </Section></div>}
+      {tab === "vendor" && canChargeBack && <div className="mt-6"><Section title="Charge back meal tickets" subtitle="Charge an employee for tickets they have already taken - for example as a penalty for an offence, when taking the day's meal away is no longer possible. The vendor is still paid; the cost comes out of the employee's pay.">
+        <form id="chargeback-form" onSubmit={submitChargeback} className="grid gap-3 border-b border-slate-200 p-5 md:grid-cols-4">
+          <label className="text-xs font-semibold text-slate-600">Staff number<input required value={chargebackForm.employee_number} onChange={(event) => { setChargebackForm({ ...chargebackForm, employee_number: event.target.value }); setChargebackLookup(null); }} placeholder="e.g. 001361" className={`${inputClass} mt-1`} /></label>
+          <label className="text-xs font-semibold text-slate-600">Date the tickets were taken<input required type="date" value={chargebackForm.work_date} onChange={(event) => { setChargebackForm({ ...chargebackForm, work_date: event.target.value }); setChargebackLookup(null); }} className={`${inputClass} mt-1`} /></label>
+          <div className="flex items-end"><button type="button" onClick={() => void lookUpChargeback()} className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700">Check what they took</button></div>
+          <div className="flex items-center text-sm">{chargebackLookup ? <span className={chargebackLookup.chargeable ? "text-slate-700" : "font-semibold text-red-600"}><b>{chargebackLookup.employee_name}</b>: took {chargebackLookup.taken}{chargebackLookup.already_charged ? `, ${chargebackLookup.already_charged} already charged as excess` : ""}{chargebackLookup.charged_back ? `, ${chargebackLookup.charged_back} already charged back` : ""} - <b>{chargebackLookup.chargeable}</b> can be charged back{chargebackLookup.rate ? ` at ${money(chargebackLookup.rate)} each` : ""}</span> : <span className="text-xs text-slate-500">{chargebackNote}</span>}</div>
+          <label className="text-xs font-semibold text-slate-600">Tickets to charge<input required type="number" min="1" max={chargebackLookup?.chargeable || undefined} step="1" value={chargebackForm.quantity} onChange={(event) => setChargebackForm({ ...chargebackForm, quantity: event.target.value })} className={`${inputClass} mt-1`} /></label>
+          <label className="text-xs font-semibold text-slate-600">Deduct in month (optional)<input type="month" value={chargebackForm.pay_month} onChange={(event) => setChargebackForm({ ...chargebackForm, pay_month: event.target.value })} className={`${inputClass} mt-1`} /></label>
+          <label className="text-xs font-semibold text-slate-600 md:col-span-2">Offence reference (optional)<input value={chargebackForm.reference} onChange={(event) => setChargebackForm({ ...chargebackForm, reference: event.target.value })} className={`${inputClass} mt-1`} /></label>
+          <label className="text-xs font-semibold text-slate-600 md:col-span-3">Reason<textarea required value={chargebackForm.reason} onChange={(event) => setChargebackForm({ ...chargebackForm, reason: event.target.value })} placeholder="The offence or reason for charging the meal back" className={`${inputClass} mt-1 min-h-16`} /></label>
+          <div className="flex items-end"><button disabled={acting} className="w-full rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">Charge back</button></div>
+          <p className="text-xs text-slate-500 md:col-span-4">It is deducted in the month the tickets were taken (or the month you choose). If that month&apos;s payroll has not been generated yet, it waits and is applied when it is. Leave the month empty unless that payroll is already closed.</p>
+        </form>
+        <div className="border-b border-slate-200 px-5 pb-1 pt-4 text-sm font-semibold text-slate-700">Charged back in these dates</div>
+        {chargebacks.length ? <ScrollArea maxHeight="40vh"><table className="w-full min-w-[900px] text-left"><thead className="text-xs font-semibold uppercase text-slate-500"><tr><th className="px-4 py-3">Employee</th><th className="px-4 py-3">Ticket date</th><th className="px-4 py-3">Tickets</th><th className="px-4 py-3">Amount</th><th className="px-4 py-3">Reason</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">By</th><th className="px-4 py-3" /></tr></thead><tbody className="divide-y divide-slate-100">{chargebacks.map((item) => <tr key={item.id}><td className="px-4 py-3 text-sm font-medium">{item.employee_name}<span className="block text-xs font-normal text-slate-500">{item.employee_number}</span></td><td className="px-4 py-3 text-sm text-slate-600">{day(item.work_date)}</td><td className="px-4 py-3 text-sm">{item.quantity}</td><td className="px-4 py-3 text-sm font-semibold">{money(item.amount)}</td><td className="max-w-[18rem] px-4 py-3 text-sm text-slate-600">{item.reason}{item.reference ? <span className="block text-xs text-slate-500">Ref: {item.reference}</span> : null}{item.status === "cancelled" && item.cancel_reason ? <span className="block text-xs text-slate-500">Cancelled: {item.cancel_reason}</span> : null}</td><td className="px-4 py-3 text-xs font-semibold text-slate-600">{chargebackStatusLabel[item.status]}<span className="block font-normal text-slate-500">{String(item.pay_month).padStart(2, "0")}/{item.pay_year} payroll</span></td><td className="px-4 py-3 text-sm text-slate-600">{item.created_by_name || "-"}</td><td className="px-4 py-3 text-right">{item.status !== "cancelled" && <button type="button" disabled={acting} onClick={() => void cancelChargeback(item)} className="text-xs font-semibold text-red-600 hover:underline disabled:opacity-50">Cancel</button>}</td></tr>)}</tbody></table></ScrollArea> : <Empty message="Nothing has been charged back in these dates." />}
+      </Section></div>}
 
       {tab === "setup" && <>
         <Panel title="Entitlements" subtitle={`Employee-specific approved entitlement history - ${shownEntitlements.length} shown`} defaultOpen>

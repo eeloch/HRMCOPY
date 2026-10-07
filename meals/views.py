@@ -19,6 +19,7 @@ from .models import (
     MealEntitlementRule,
     MealExcessException,
     MealTicketRate,
+    MealChargeback,
     MealVendorClaim,
     MealVendorPayment,
 )
@@ -32,7 +33,7 @@ from .serializers import (
 )
 from decimal import Decimal
 
-from .services import MealService, allocate_vendor_claim
+from .services import MealService, allocate_vendor_claim, cancel_chargeback, charge_back_tickets, chargeable_tickets
 from payroll.models import PayrollPeriod
 
 CARD_VERIFICATION_MODE = 3  # confirmed 2026-09-23: matches meals/bridge.py's CARD_VERIFICATION_MODE
@@ -81,6 +82,18 @@ class CanViewVendorPayments(BasePermission):
 class CanRecordVendorPayments(BasePermission):
     def has_permission(self, request, view):
         return request.user.has_perm("meals.record_meal_vendor_payments") or request.user.has_perm("meals.manage_meal_configuration")
+
+
+class CanChargeBackMealTickets(BasePermission):
+    """Charging an employee for tickets they already took: its own right; anyone who reviews meal excess may too."""
+
+    def has_permission(self, request, view):
+        return request.user.has_perm("meals.charge_back_meal_tickets") or request.user.has_perm("meals.review_meal_excess")
+
+
+class CanSeeChargebacks(BasePermission):
+    def has_permission(self, request, view):
+        return CanChargeBackMealTickets().has_permission(request, view) or CanViewMealOperations().has_permission(request, view)
 
 
 class CanReviewMealExcess(BasePermission):
@@ -372,6 +385,140 @@ class MealVendorClaimDetailAPIView(APIView):
     def delete(self, request, pk):
         get_object_or_404(MealVendorClaim, pk=pk).delete()
         return Response(status=204)
+
+class MealMultipleTicketsAPIView(APIView):
+    """Who took two (or more) tickets in one day, over any dates: how many people, how many person-days, and who -
+    with what became of the extra ones (within entitlement, charged, waived, still waiting)."""
+
+    permission_classes = [IsAuthenticated, CanViewVendorPayments]
+    MAX_ROWS = 500
+
+    def get(self, request):
+        params = request.query_params
+        today = timezone.localdate()
+        date_to = _date_param(params.get("date_to")) or today
+        date_from = _date_param(params.get("date_from")) or date_to - timedelta(days=6)
+        try:
+            minimum = max(int(params.get("min", 2)), 2)
+        except ValueError:
+            minimum = 2
+        if date_from > date_to:
+            return Response({"detail": "The start date is after the end date."}, status=400)
+        if (date_to - date_from).days > MAX_VENDOR_RANGE_DAYS:
+            return Response({"detail": "Choose a range of at most about two years."}, status=400)
+
+        groups = list(
+            MealCollection.objects.filter(work_date__gte=date_from, work_date__lte=date_to, voided_at__isnull=True)
+            .values("employee_id", "work_date")
+            .annotate(
+                tickets=Count("id"),
+                within=Count("id", filter=Q(status="within_entitlement")),
+                charged=Count("id", filter=Q(excess_exception__status__in=["approved", "deducted"])),
+                waived=Count("id", filter=Q(excess_exception__status="cancelled")),
+                waiting=Count("id", filter=Q(excess_exception__status="pending")),
+            )
+            .filter(tickets__gte=minimum).order_by("-work_date", "-tickets", "employee_id")
+        )
+        days = {}
+        for group in groups:
+            day = days.setdefault(group["work_date"], {"date": group["work_date"].isoformat(), "people": 0, "tickets": 0})
+            day["people"] += 1
+            day["tickets"] += group["tickets"]
+        shown = groups[: self.MAX_ROWS]
+        people = {e.pk: e for e in Employee.objects.filter(pk__in={g["employee_id"] for g in shown})}
+        rows = []
+        for group in shown:
+            employee = people.get(group["employee_id"])
+            rows.append({
+                "employee_number": employee.employee_id if employee else "", "employee_name": employee.full_name if employee else "",
+                "work_date": group["work_date"].isoformat(), "tickets": group["tickets"], "within": group["within"],
+                "charged": group["charged"], "waived": group["waived"], "waiting": group["waiting"],
+            })
+        return Response({
+            "date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "min_tickets": minimum,
+            "totals": {"people": len({g["employee_id"] for g in groups}), "person_days": len(groups), "tickets": sum(g["tickets"] for g in groups)},
+            "days": sorted(days.values(), key=lambda day: day["date"], reverse=True), "rows": rows, "truncated": len(groups) > self.MAX_ROWS,
+        })
+
+
+def _chargeback_row(chargeback):
+    return {
+        "id": chargeback.pk, "employee_number": chargeback.employee.employee_id, "employee_name": chargeback.employee.full_name,
+        "work_date": chargeback.work_date.isoformat(), "quantity": chargeback.quantity, "amount": chargeback.amount, "reason": chargeback.reason,
+        "reference": chargeback.reference, "status": chargeback.status, "pay_year": chargeback.pay_year, "pay_month": chargeback.pay_month,
+        "created_by_name": chargeback.created_by.get_full_name() or chargeback.created_by.get_username() if chargeback.created_by_id else "",
+        "created_at": chargeback.created_at, "cancel_reason": chargeback.cancel_reason,
+    }
+
+
+class MealChargebackListCreateAPIView(APIView):
+    """Charge an employee for meal tickets they already took (e.g. a penalty for an offence), and list what was charged."""
+
+    def get_permissions(self):
+        return [IsAuthenticated(), CanChargeBackMealTickets() if self.request.method == "POST" else CanSeeChargebacks()]
+
+    def get(self, request):
+        params = request.query_params
+        chargebacks = MealChargeback.objects.select_related("employee", "created_by")
+        if date_from := _date_param(params.get("date_from")):
+            chargebacks = chargebacks.filter(work_date__gte=date_from)
+        if date_to := _date_param(params.get("date_to")):
+            chargebacks = chargebacks.filter(work_date__lte=date_to)
+        if params.get("status") in ("pending", "deducted", "cancelled"):
+            chargebacks = chargebacks.filter(status=params["status"])
+        if search := params.get("search", "").strip():
+            chargebacks = _employee_search(chargebacks, search)
+        rows = [_chargeback_row(c) for c in chargebacks[:300]]
+        return Response({"results": rows, "count": chargebacks.count()})
+
+    def post(self, request):
+        data = request.data
+        employee = Employee.objects.filter(employee_id=str(data.get("employee_number", "")).strip()).first()
+        if employee is None:
+            return Response({"detail": "No employee has that staff number."}, status=400)
+        work_date = _date_param(data.get("work_date"))
+        if work_date is None:
+            return Response({"detail": "Choose the date the tickets were taken."}, status=400)
+        try:
+            quantity = int(data.get("quantity", 1))
+            pay_year = int(data["pay_year"]) if data.get("pay_year") else None
+            pay_month = int(data["pay_month"]) if data.get("pay_month") else None
+            chargeback = charge_back_tickets(employee, work_date, quantity, data.get("reason", ""), request.user, reference=data.get("reference", ""), pay_year=pay_year, pay_month=pay_month)
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(_chargeback_row(chargeback), status=201)
+
+
+class MealChargebackLookupAPIView(APIView):
+    """What can be charged back for one person on one day - so the form shows it before anything is saved."""
+
+    permission_classes = [IsAuthenticated, CanChargeBackMealTickets]
+
+    def get(self, request):
+        employee = Employee.objects.filter(employee_id=request.query_params.get("employee", "").strip()).first()
+        work_date = _date_param(request.query_params.get("date"))
+        if employee is None:
+            return Response({"detail": "No employee has that staff number."}, status=404)
+        if work_date is None:
+            return Response({"detail": "Choose the date the tickets were taken."}, status=400)
+        try:
+            rate = MealService.rate_for(work_date).amount
+        except ValueError:
+            rate = None
+        return Response({"employee_name": employee.full_name, "employee_status": employee.status, "work_date": work_date.isoformat(), "rate": rate, **chargeable_tickets(employee, work_date)})
+
+
+class MealChargebackCancelAPIView(APIView):
+    permission_classes = [IsAuthenticated, CanChargeBackMealTickets]
+
+    def post(self, request, pk):
+        chargeback = get_object_or_404(MealChargeback.objects.select_related("employee", "created_by"), pk=pk)
+        try:
+            cancel_chargeback(chargeback, request.user, request.data.get("reason", ""))
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(_chargeback_row(chargeback))
+
 
 class MealDeviceListAPIView(APIView):
     """Read-only: devices are registered on the Biometric Devices page

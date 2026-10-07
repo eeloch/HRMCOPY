@@ -58,12 +58,13 @@ def generate_payroll_for_period(period, *, actor=None):
         from advances.services import AdvanceService
         from bonuses.services import BonusService
         from deferredfunds.services import DeferredFundService
-        from meals.services import MealService
+        from meals.services import MealService, apply_chargebacks_for_period
         from offences.services import OffenceService
         from ppe.services import PPEDeductionService
 
         summary.deductions_applied = (
             MealService.apply_accepted_excess_for_period(period)
+            + apply_chargebacks_for_period(period)
             + OffenceService.apply_approved_offences_for_period(period)
             + PPEDeductionService.apply_approved_for_period(period)
             + AdvanceService.apply_for_period(period)

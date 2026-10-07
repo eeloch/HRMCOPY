@@ -259,6 +259,44 @@ class MealVendorClaim(models.Model):
         return f"{self.quantity} claimed {self.date_from} to {self.date_to}"
 
 
+class MealChargebackStatus(models.TextChoices):
+    PENDING = "pending", "Waiting for payroll"
+    DEDUCTED = "deducted", "Deducted from pay"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class MealChargeback(models.Model):
+    """Charging an employee for meal tickets they already took - typically as a penalty for an offence, when
+    taking the day's meal away is no longer possible because they have had it. The tickets stay as they were
+    (the vendor is still paid); the employee repays the cost through payroll."""
+
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name="meal_chargebacks")
+    work_date = models.DateField()
+    quantity = models.PositiveIntegerField()
+    rate_snapshot = models.DecimalField(max_digits=12, decimal_places=2)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    reason = models.TextField()
+    reference = models.CharField(max_length=150, blank=True)
+    status = models.CharField(max_length=20, choices=MealChargebackStatus.choices, default=MealChargebackStatus.PENDING)
+    pay_year = models.PositiveIntegerField()
+    pay_month = models.PositiveIntegerField()
+    payroll_period = models.ForeignKey(PayrollPeriod, on_delete=models.SET_NULL, null=True, blank=True)
+    payroll = models.ForeignKey(EmployeePayroll, on_delete=models.SET_NULL, null=True, blank=True)
+    payroll_line_item = models.OneToOneField(PayrollLineItem, on_delete=models.SET_NULL, null=True, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="meal_chargebacks_created")
+    created_at = models.DateTimeField(auto_now_add=True)
+    cancelled_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="meal_chargebacks_cancelled")
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancel_reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-work_date", "-id"]
+        permissions = [("charge_back_meal_tickets", "Can charge back meal tickets to employees")]
+
+    def __str__(self):
+        return f"{self.employee.employee_id} - {self.quantity} ticket(s) on {self.work_date} - N {self.amount:,.2f} ({self.get_status_display()})"
+
+
 class MealTerminalUserState(models.Model):
     """Whether a person is currently switched on at a meal terminal, as last confirmed by the terminal.
     Only people covered by MEAL_GATING_EMPLOYEE_IDS ever appear here."""

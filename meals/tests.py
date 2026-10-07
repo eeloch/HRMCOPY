@@ -2945,3 +2945,152 @@ class VendorClaimTests(VendorSummaryTests):
         allocation = allocate_vendor_claim(claim)
         self.assertEqual((allocation["issued"], allocation["claimed"]), (3, 2))
         self.assertEqual(sum(day["claimed"] for day in allocation["days"].values()), 2)
+
+
+class MultipleTicketsReportTests(TestCase):
+    """How many people took two (or more) tickets on a day, and what became of the extra ones."""
+
+    def setUp(self):
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=date(2026, 9, 1))
+        MealDevice.objects.create(name="Canteen", serial_number="MEAL900", active=True)
+        self.shift = Shift.objects.create(name="Multi Day", start_time="07:00", end_time="19:00", is_overnight=False)
+        self.day = date(2026, 10, 2)
+        self.people = {}
+        for number, entitlement, scans in (("000901", 2, 2), ("000902", 1, 2), ("000903", 1, 1), ("000904", 1, 3)):
+            employee = Employee.objects.create(employee_id=number, first_name="P", last_name=number)
+            BiometricIdentity.objects.create(employee=employee, system="device", source_identifier="MEAL900", external_user_id=number[-3:])
+            EmployeeMealEntitlement.objects.create(employee=employee, tickets_per_work_day=entitlement, effective_from=date(2026, 9, 1), reason="t")
+            EmployeeRosterDay.objects.create(employee=employee, date=self.day, status=RosterDayStatus.WORK, shift=self.shift)
+            self.people[number] = employee
+            for scan in range(scans):
+                MealService.ingest(system="device", source_identifier="MEAL900", device_serial_number="MEAL900", external_user_id=number[-3:], external_event_id=f"{number}-{scan}", timestamp=timezone.make_aware(datetime(2026, 10, 2, 11 + scan, 0)))
+        self.user = get_user_model().objects.create_user(username="multi-viewer", password="pw")
+        self.user.user_permissions.add(Permission.objects.get(codename="view_meal_vendor_payments"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def report(self, **params):
+        query = "&".join(f"{k}={v}" for k, v in {"date_from": "2026-10-01", "date_to": "2026-10-03", **params}.items())
+        return self.client.get(f"/api/meals/vendor/multiple-tickets/?{query}").json()
+
+    def test_counts_the_people_who_took_two_or_more_in_a_day(self):
+        data = self.report()
+        self.assertEqual(data["totals"], {"people": 3, "person_days": 3, "tickets": 7})  # 000903 took one and is left out
+        self.assertEqual(data["days"], [{"date": "2026-10-02", "people": 3, "tickets": 7}])
+        self.assertEqual(sorted(row["employee_number"] for row in data["rows"]), ["000901", "000902", "000904"])
+
+    def test_each_row_says_what_became_of_the_extra_tickets(self):
+        rows = {row["employee_number"]: row for row in self.report()["rows"]}
+        self.assertEqual((rows["000901"]["tickets"], rows["000901"]["within"], rows["000901"]["waiting"]), (2, 2, 0))  # entitled to two
+        self.assertEqual((rows["000902"]["tickets"], rows["000902"]["within"], rows["000902"]["waiting"]), (2, 1, 1))  # one extra, waiting
+        self.assertEqual((rows["000904"]["tickets"], rows["000904"]["within"], rows["000904"]["waiting"]), (3, 1, 2))
+
+    def test_three_or_more_and_voided_tickets(self):
+        self.assertEqual([row["employee_number"] for row in self.report(min=3)["rows"]], ["000904"])
+        ticket = MealCollection.objects.filter(employee=self.people["000902"], work_date=self.day).order_by("-sequence_number").first()
+        MealService.void_collection(ticket, self.user, "test")
+        self.assertEqual(self.report()["totals"]["people"], 2)
+
+    def test_needs_the_vendor_view_permission(self):
+        self.client.force_authenticate(get_user_model().objects.create_user(username="nobody-multi", password="pw"))
+        self.assertEqual(self.client.get("/api/meals/vendor/multiple-tickets/").status_code, 403)
+
+
+class MealChargebackTests(TestCase):
+    """Charging an employee for tickets already taken - the offence penalty for a meal they have had."""
+
+    def setUp(self):
+        self.day = date(2026, 9, 7)
+        self.employee = Employee.objects.create(employee_id="000950", first_name="Charge", last_name="Back", basic_salary=Decimal("60000.00"))
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=date(2026, 9, 1))
+        MealDevice.objects.create(name="Canteen", serial_number="MEAL950", active=True)
+        BiometricIdentity.objects.create(employee=self.employee, system="device", source_identifier="MEAL950", external_user_id="950")
+        shift = Shift.objects.create(name="Chargeback Day", start_time="07:00", end_time="19:00", is_overnight=False)
+        EmployeeMealEntitlement.objects.create(employee=self.employee, tickets_per_work_day=1, effective_from=date(2026, 9, 1), reason="t")
+        EmployeeRosterDay.objects.create(employee=self.employee, date=self.day, status=RosterDayStatus.WORK, shift=shift)
+        MealService.ingest(system="device", source_identifier="MEAL950", device_serial_number="MEAL950", external_user_id="950", external_event_id="c1", timestamp=timezone.make_aware(datetime(2026, 9, 7, 12, 0)))
+        self.admin = get_user_model().objects.create_user(username="charger", password="pw")
+        self.admin.user_permissions.add(Permission.objects.get(codename="charge_back_meal_tickets"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.admin)
+
+    def post(self, **extra):
+        body = {"employee_number": "000950", "work_date": "2026-09-07", "quantity": 1, "reason": "Entered the factory without safety boots", **extra}
+        return self.client.post("/api/meals/chargebacks/", body, format="json")
+
+    def test_a_ticket_already_taken_within_entitlement_can_be_charged_back(self):
+        response = self.post()
+        self.assertEqual(response.status_code, 201, response.content)
+        data = response.json()
+        self.assertEqual((float(data["amount"]), data["status"], data["quantity"]), (700.0, "pending", 1))  # no payroll yet: it waits
+
+    def test_it_lands_in_that_months_payroll_when_it_is_generated_and_not_before(self):
+        period = PayrollPeriod.objects.create(year=2026, month=9)
+        self.post()
+        self.assertFalse(PayrollLineItem.objects.exists())
+        generate_payroll_for_period(period)
+        payroll = EmployeePayroll.objects.get(payroll_period=period, employee=self.employee)
+        line = PayrollLineItem.objects.get(payroll=payroll, code="MEAL_CHARGEBACK")
+        self.assertEqual(line.amount, Decimal("700.00"))
+        from meals.models import MealChargeback
+
+        self.assertEqual(MealChargeback.objects.get().status, "deducted")
+
+    def test_with_the_payroll_already_there_it_is_deducted_at_once(self):
+        period = PayrollPeriod.objects.create(year=2026, month=9)
+        generate_payroll_for_period(period)
+        data = self.post().json()
+        self.assertEqual(data["status"], "deducted")
+        payroll = EmployeePayroll.objects.get(payroll_period=period, employee=self.employee)
+        self.assertEqual(payroll.total_deductions, Decimal("700.00"))
+
+    def test_the_same_ticket_cannot_be_charged_back_twice_or_beyond_what_was_taken(self):
+        self.assertEqual(self.post().status_code, 201)
+        second = self.post()
+        self.assertEqual(second.status_code, 400)
+        self.assertIn("can still be charged back", second.json()["detail"])
+        self.assertEqual(self.post(quantity=5, work_date="2026-09-08").status_code, 400)  # took nothing that day
+
+    def test_a_ticket_already_charged_as_an_excess_cannot_be_charged_back_again(self):
+        MealService.ingest(system="device", source_identifier="MEAL950", device_serial_number="MEAL950", external_user_id="950", external_event_id="c2", timestamp=timezone.make_aware(datetime(2026, 9, 7, 13, 0)))
+        extra = MealCollection.objects.get(employee=self.employee, sequence_number=2)
+        MealService.approve(extra.excess_exception, None, self.admin)
+        info = self.client.get("/api/meals/chargebacks/lookup/?employee=000950&date=2026-09-07").json()
+        self.assertEqual((info["taken"], info["already_charged"], info["chargeable"]), (2, 1, 1))
+
+    def test_a_reason_is_required(self):
+        self.assertEqual(self.post(reason="  ").status_code, 400)
+
+    def test_a_closed_month_refuses_and_a_later_month_can_be_chosen(self):
+        period = PayrollPeriod.objects.create(year=2026, month=9)
+        generate_payroll_for_period(period)
+        PayrollPeriod.objects.filter(pk=period.pk).update(status="approved")
+        self.assertEqual(self.post().status_code, 400)
+        later = self.post(pay_year=2026, pay_month=10)
+        self.assertEqual((later.status_code, later.json()["pay_month"]), (201, 10))
+
+    def test_cancelling_takes_the_deduction_back_out_of_an_open_payroll(self):
+        period = PayrollPeriod.objects.create(year=2026, month=9)
+        generate_payroll_for_period(period)
+        chargeback_id = self.post().json()["id"]
+        response = self.client.post(f"/api/meals/chargebacks/{chargeback_id}/cancel/", {"reason": "Offence withdrawn"}, format="json")
+        self.assertEqual((response.status_code, response.json()["status"]), (200, "cancelled"))
+        payroll = EmployeePayroll.objects.get(payroll_period=period, employee=self.employee)
+        self.assertEqual(payroll.total_deductions, Decimal("0.00"))
+        self.assertFalse(PayrollLineItem.objects.filter(payroll=payroll, code="MEAL_CHARGEBACK").exists())
+        self.assertEqual(self.post().status_code, 201)  # the ticket is free to be charged again
+
+    def test_permissions(self):
+        outsider = get_user_model().objects.create_user(username="no-charge", password="pw")
+        self.client.force_authenticate(outsider)
+        self.assertEqual(self.post().status_code, 403)
+        self.assertEqual(self.client.get("/api/meals/chargebacks/").status_code, 403)
+        reviewer = get_user_model().objects.create_user(username="reviewer-charge", password="pw")
+        reviewer.user_permissions.add(Permission.objects.get(codename="review_meal_excess"))  # reviewers may charge too
+        self.client.force_authenticate(reviewer)
+        self.assertEqual(self.post().status_code, 201)
+
+    def test_the_list_shows_what_was_charged(self):
+        self.post()
+        rows = self.client.get("/api/meals/chargebacks/?search=000950").json()["results"]
+        self.assertEqual([(r["employee_number"], r["quantity"], r["status"]) for r in rows], [("000950", 1, "pending")])

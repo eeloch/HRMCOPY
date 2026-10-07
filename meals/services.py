@@ -1026,3 +1026,124 @@ def allocate_vendor_claim(claim):
         }
     return {"days": days, "issued": issued, "claimed": payable, "over_claimed": max(claim.quantity - issued, 0)}
 
+
+# ---- charging meal tickets back to an employee ------------------------------------------------------------------
+
+
+def chargeable_tickets(employee, work_date):
+    """How many of the tickets this person took on the day can still be charged back: valid tickets, minus any
+    already charged through an accepted excess, minus tickets already charged back."""
+    from .models import MealChargeback, MealChargebackStatus
+
+    tickets = MealCollection.objects.filter(employee=employee, work_date=work_date, voided_at__isnull=True)
+    taken = tickets.count()
+    charged_as_excess = tickets.filter(excess_exception__status__in=[MealExcessStatus.APPROVED, MealExcessStatus.DEDUCTED]).count()
+    charged_back = sum(MealChargeback.objects.filter(employee=employee, work_date=work_date).exclude(status=MealChargebackStatus.CANCELLED).values_list("quantity", flat=True))
+    return {"taken": taken, "already_charged": charged_as_excess, "charged_back": charged_back, "chargeable": max(taken - charged_as_excess - charged_back, 0)}
+
+
+_LOCKED_PERIOD = {PayrollPeriodStatus.APPROVED, PayrollPeriodStatus.PAID, PayrollPeriodStatus.CLOSED}
+_LOCKED_PAYROLL = {EmployeePayrollStatus.APPROVED, EmployeePayrollStatus.PAID}
+
+
+def _chargeback_target(chargeback):
+    """(period, payroll) the chargeback should land in, or (period, None) when that month's payroll record does not exist
+    yet. Raises when the month is already closed."""
+    period = PayrollPeriod.objects.filter(year=chargeback.pay_year, month=chargeback.pay_month).first()
+    if period is None:
+        return None, None
+    if period.status in _LOCKED_PERIOD:
+        raise ValueError(f"The {chargeback.pay_month:02d}/{chargeback.pay_year} payroll is already approved, so it cannot take a new deduction. Choose a later month.")
+    payroll = period.employee_payrolls.filter(employee=chargeback.employee).first()
+    if payroll is not None and payroll.status in _LOCKED_PAYROLL:
+        raise ValueError("This employee's payroll for that month is already approved, so it cannot take a new deduction. Choose a later month.")
+    return period, payroll
+
+
+def _apply_chargeback_to_payroll(chargeback, payroll):
+    from .models import MealChargebackStatus
+
+    line, _ = PayrollLineItem.objects.get_or_create(
+        payroll=payroll, source_type="meal_chargeback", source_reference=str(chargeback.pk), is_system_generated=True,
+        defaults={
+            "item_type": PayrollLineItemType.DEDUCTION, "code": "MEAL_CHARGEBACK",
+            "description": f"Meal ticket charged back for {chargeback.work_date}: {chargeback.reason[:80]}",
+            "amount": chargeback.amount,
+            "metadata": {"meal_chargeback_id": chargeback.pk, "work_date": chargeback.work_date.isoformat(), "quantity": chargeback.quantity, "rate": str(chargeback.rate_snapshot)},
+        },
+    )
+    recalculate_employee_payroll(payroll)
+    chargeback.payroll, chargeback.payroll_line_item, chargeback.payroll_period = payroll, line, payroll.payroll_period
+    chargeback.status = MealChargebackStatus.DEDUCTED
+    chargeback.save()
+
+
+@transaction.atomic
+def charge_back_tickets(employee, work_date, quantity, reason, actor, *, reference="", pay_year=None, pay_month=None):
+    """Charge an employee for tickets they already took. Deducted in the month of the work date unless another month
+    is given; if that month's payroll record does not exist yet it waits and is deducted when payroll is generated."""
+    from .models import MealChargeback
+
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("Say why the tickets are being charged back (the offence or reason).")
+    if quantity < 1:
+        raise ValueError("Charge back at least one ticket.")
+    available = chargeable_tickets(employee, work_date)
+    if quantity > available["chargeable"]:
+        raise ValueError(f"{employee.full_name} has {available['chargeable']} ticket(s) on {work_date} that can still be charged back (took {available['taken']}, {available['already_charged']} already charged as excess, {available['charged_back']} already charged back).")
+    rate = MealService.rate_for(work_date)
+    chargeback = MealChargeback(
+        employee=employee, work_date=work_date, quantity=quantity, rate_snapshot=rate.amount, amount=rate.amount * quantity,
+        reason=reason, reference=(reference or "").strip(), pay_year=pay_year or work_date.year, pay_month=pay_month or work_date.month, created_by=actor,
+    )
+    period, payroll = _chargeback_target(chargeback)  # refuses a closed month before anything is saved
+    chargeback.save()
+    if payroll is not None:
+        _apply_chargeback_to_payroll(chargeback, payroll)
+    AuditService.log(
+        event_type="meals.ticket_charged_back", module="meals", employee=employee, actor=actor, object=chargeback, severity=AuditSeverity.WARNING,
+        title="Meal ticket charged back", description=f"{quantity} ticket(s) for {work_date} charged back to {employee.full_name}: {reason}",
+        metadata={"chargeback": chargeback.pk, "amount": str(chargeback.amount), "deducted_now": payroll is not None},
+    )
+    return chargeback
+
+
+@transaction.atomic
+def cancel_chargeback(chargeback, actor, reason):
+    """Reverse a chargeback: nothing is deducted (a deduction already in an open payroll is taken out again)."""
+    from .models import MealChargebackStatus
+
+    reason = (reason or "").strip()
+    if chargeback.status == MealChargebackStatus.CANCELLED:
+        raise ValueError("This chargeback was already cancelled.")
+    if chargeback.status == MealChargebackStatus.DEDUCTED:
+        payroll = chargeback.payroll
+        if payroll is not None and (payroll.status in _LOCKED_PAYROLL or payroll.payroll_period.status in _LOCKED_PERIOD):
+            raise ValueError("The deduction is already in an approved payroll, so it cannot be taken out here.")
+        line = chargeback.payroll_line_item
+        chargeback.payroll_line_item = None
+        chargeback.save(update_fields=["payroll_line_item"])
+        if line is not None:
+            line.delete()
+        if payroll is not None:
+            recalculate_employee_payroll(payroll)
+    chargeback.status, chargeback.cancelled_by, chargeback.cancelled_at, chargeback.cancel_reason = MealChargebackStatus.CANCELLED, actor, timezone.now(), reason
+    chargeback.save()
+    AuditService.log(event_type="meals.charge_back_cancelled", module="meals", employee=chargeback.employee, actor=actor, object=chargeback, severity=AuditSeverity.WARNING,
+                     title="Meal ticket chargeback cancelled", description=f"Chargeback of {chargeback.quantity} ticket(s) for {chargeback.work_date} cancelled: {reason or 'no reason given'}", metadata={"chargeback": chargeback.pk})
+    return chargeback
+
+
+def apply_chargebacks_for_period(period):
+    """Deduct every chargeback still waiting for this month's payroll. Called when payroll is generated."""
+    from .models import MealChargeback, MealChargebackStatus
+
+    applied = 0
+    for chargeback in MealChargeback.objects.filter(status=MealChargebackStatus.PENDING, pay_year=period.year, pay_month=period.month).select_related("employee"):
+        payroll = period.employee_payrolls.filter(employee=chargeback.employee).exclude(status__in=_LOCKED_PAYROLL).first()
+        if payroll is not None:
+            _apply_chargeback_to_payroll(chargeback, payroll)
+            applied += 1
+    return applied
+
