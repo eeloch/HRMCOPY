@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Max, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -387,8 +387,10 @@ class MealVendorClaimDetailAPIView(APIView):
         return Response(status=204)
 
 class MealMultipleTicketsAPIView(APIView):
-    """Who took two (or more) tickets in one day, over any dates: how many people, how many person-days, and who -
-    with what became of the extra ones (within entitlement, charged, waived, still waiting)."""
+    """Who took EXTRA tickets - more than they are entitled to on a day - over any dates: how many people, how many
+    person-days, how many extra tickets, and who, with what became of each extra one (charged, waived, still waiting).
+    A person entitled to two who took two is not listed. A ticket with no entitlement behind it (a new starter, a rest
+    day, no shift yet) counts as extra."""
 
     permission_classes = [IsAuthenticated, CanViewVendorPayments]
     MAX_ROWS = 500
@@ -399,9 +401,9 @@ class MealMultipleTicketsAPIView(APIView):
         date_to = _date_param(params.get("date_to")) or today
         date_from = _date_param(params.get("date_from")) or date_to - timedelta(days=6)
         try:
-            minimum = max(int(params.get("min", 2)), 2)
+            minimum = max(int(params.get("min", 1)), 1)  # extra tickets in the day
         except ValueError:
-            minimum = 2
+            minimum = 1
         if date_from > date_to:
             return Response({"detail": "The start date is after the end date."}, status=400)
         if (date_to - date_from).days > MAX_VENDOR_RANGE_DAYS:
@@ -412,18 +414,19 @@ class MealMultipleTicketsAPIView(APIView):
             .values("employee_id", "work_date")
             .annotate(
                 tickets=Count("id"),
-                within=Count("id", filter=Q(status="within_entitlement")),
+                extra=Count("id", filter=~Q(status="within_entitlement")),
+                entitled=Max("entitlement_snapshot"),
                 charged=Count("id", filter=Q(excess_exception__status__in=["approved", "deducted"])),
                 waived=Count("id", filter=Q(excess_exception__status="cancelled")),
                 waiting=Count("id", filter=Q(excess_exception__status="pending")),
             )
-            .filter(tickets__gte=minimum).order_by("-work_date", "-tickets", "employee_id")
+            .filter(extra__gte=minimum).order_by("-work_date", "-extra", "employee_id")
         )
         days = {}
         for group in groups:
-            day = days.setdefault(group["work_date"], {"date": group["work_date"].isoformat(), "people": 0, "tickets": 0})
+            day = days.setdefault(group["work_date"], {"date": group["work_date"].isoformat(), "people": 0, "extra_tickets": 0})
             day["people"] += 1
-            day["tickets"] += group["tickets"]
+            day["extra_tickets"] += group["extra"]
         shown = groups[: self.MAX_ROWS]
         people = {e.pk: e for e in Employee.objects.filter(pk__in={g["employee_id"] for g in shown})}
         rows = []
@@ -431,12 +434,12 @@ class MealMultipleTicketsAPIView(APIView):
             employee = people.get(group["employee_id"])
             rows.append({
                 "employee_number": employee.employee_id if employee else "", "employee_name": employee.full_name if employee else "",
-                "work_date": group["work_date"].isoformat(), "tickets": group["tickets"], "within": group["within"],
+                "work_date": group["work_date"].isoformat(), "tickets": group["tickets"], "entitled": group["entitled"] or 0, "extra": group["extra"],
                 "charged": group["charged"], "waived": group["waived"], "waiting": group["waiting"],
             })
         return Response({
-            "date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "min_tickets": minimum,
-            "totals": {"people": len({g["employee_id"] for g in groups}), "person_days": len(groups), "tickets": sum(g["tickets"] for g in groups)},
+            "date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "min_extra": minimum,
+            "totals": {"people": len({g["employee_id"] for g in groups}), "person_days": len(groups), "extra_tickets": sum(g["extra"] for g in groups)},
             "days": sorted(days.values(), key=lambda day: day["date"], reverse=True), "rows": rows, "truncated": len(groups) > self.MAX_ROWS,
         })
 

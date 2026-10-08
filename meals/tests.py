@@ -2948,7 +2948,7 @@ class VendorClaimTests(VendorSummaryTests):
 
 
 class MultipleTicketsReportTests(TestCase):
-    """How many people took two (or more) tickets on a day, and what became of the extra ones."""
+    """Who took EXTRA tickets (more than their entitlement) on a day, and what became of them."""
 
     def setUp(self):
         MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=date(2026, 9, 1))
@@ -2973,23 +2973,31 @@ class MultipleTicketsReportTests(TestCase):
         query = "&".join(f"{k}={v}" for k, v in {"date_from": "2026-10-01", "date_to": "2026-10-03", **params}.items())
         return self.client.get(f"/api/meals/vendor/multiple-tickets/?{query}").json()
 
-    def test_counts_the_people_who_took_two_or_more_in_a_day(self):
+    def test_counts_only_people_who_took_more_than_their_entitlement(self):
         data = self.report()
-        self.assertEqual(data["totals"], {"people": 3, "person_days": 3, "tickets": 7})  # 000903 took one and is left out
-        self.assertEqual(data["days"], [{"date": "2026-10-02", "people": 3, "tickets": 7}])
-        self.assertEqual(sorted(row["employee_number"] for row in data["rows"]), ["000901", "000902", "000904"])
+        # 000901 is entitled to two and took two; 000903 took one: neither took an extra. 000902 took 1 extra, 000904 took 2.
+        self.assertEqual(data["totals"], {"people": 2, "person_days": 2, "extra_tickets": 3})
+        self.assertEqual(data["days"], [{"date": "2026-10-02", "people": 2, "extra_tickets": 3}])
+        self.assertEqual(sorted(row["employee_number"] for row in data["rows"]), ["000902", "000904"])
 
     def test_each_row_says_what_became_of_the_extra_tickets(self):
         rows = {row["employee_number"]: row for row in self.report()["rows"]}
-        self.assertEqual((rows["000901"]["tickets"], rows["000901"]["within"], rows["000901"]["waiting"]), (2, 2, 0))  # entitled to two
-        self.assertEqual((rows["000902"]["tickets"], rows["000902"]["within"], rows["000902"]["waiting"]), (2, 1, 1))  # one extra, waiting
-        self.assertEqual((rows["000904"]["tickets"], rows["000904"]["within"], rows["000904"]["waiting"]), (3, 1, 2))
+        self.assertEqual((rows["000902"]["tickets"], rows["000902"]["entitled"], rows["000902"]["extra"], rows["000902"]["waiting"]), (2, 1, 1, 1))
+        self.assertEqual((rows["000904"]["tickets"], rows["000904"]["entitled"], rows["000904"]["extra"], rows["000904"]["waiting"]), (3, 1, 2, 2))
 
-    def test_three_or_more_and_voided_tickets(self):
-        self.assertEqual([row["employee_number"] for row in self.report(min=3)["rows"]], ["000904"])
+    def test_two_or_more_extra_and_voided_tickets(self):
+        self.assertEqual([row["employee_number"] for row in self.report(min=2)["rows"]], ["000904"])
         ticket = MealCollection.objects.filter(employee=self.people["000902"], work_date=self.day).order_by("-sequence_number").first()
         MealService.void_collection(ticket, self.user, "test")
-        self.assertEqual(self.report()["totals"]["people"], 2)
+        self.assertEqual(self.report()["totals"]["people"], 1)  # the extra was voided
+
+    def test_a_ticket_with_no_entitlement_behind_it_counts_as_extra(self):
+        newcomer = Employee.objects.create(employee_id="000905", first_name="New", last_name="Starter")
+        BiometricIdentity.objects.create(employee=newcomer, system="device", source_identifier="MEAL900", external_user_id="905")
+        EmployeeRosterDay.objects.create(employee=newcomer, date=self.day, status=RosterDayStatus.WORK, shift=self.shift)  # works, but no entitlement entered yet
+        MealService.ingest(system="device", source_identifier="MEAL900", device_serial_number="MEAL900", external_user_id="905", external_event_id="905-0", timestamp=timezone.make_aware(datetime(2026, 10, 2, 12, 0)))
+        rows = {row["employee_number"]: row for row in self.report()["rows"]}
+        self.assertEqual((rows["000905"]["tickets"], rows["000905"]["entitled"], rows["000905"]["extra"]), (1, 0, 1))
 
     def test_needs_the_vendor_view_permission(self):
         self.client.force_authenticate(get_user_model().objects.create_user(username="nobody-multi", password="pw"))
