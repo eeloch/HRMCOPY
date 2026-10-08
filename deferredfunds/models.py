@@ -22,6 +22,9 @@ class DeferredFundAccount(models.Model):
     enrolled_on = models.DateField(auto_now_add=True)
     # When they started saving with the company (earlier than enrolment for people who saved before this system).
     saving_since = models.DateField(null=True, blank=True)
+    # Monthly contributions are taken from payrolls for months starting on or after this date. Blank = from the first payroll.
+    # Used when a balance that already includes recent months is loaded, so those months are not deducted twice.
+    contributions_from = models.DateField(null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     updated_at = models.DateTimeField(auto_now=True)
 

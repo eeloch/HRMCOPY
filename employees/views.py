@@ -151,6 +151,7 @@ class EmployeeListCreateAPIView(APIView):
             .select_related(
                 "department",
                 "position",
+                "deferred_fund",
             )
             .prefetch_related(
                 "biometric_identities",
@@ -217,6 +218,7 @@ class EmployeeListCreateAPIView(APIView):
                 | Q(bank_name="") | Q(account_number="") | Q(bank_code="")
                 | Q(biometric_user_id__isnull=True) | Q(biometric_user_id="")
                 | Q(basic_salary__isnull=True) | Q(basic_salary=0)
+                | (Q(status="active", employment_type="contract") & ~Q(deferred_fund__active=True))
             )
 
         serializer = EmployeeSerializer(
@@ -315,6 +317,7 @@ class EmployeeDirectorySummaryAPIView(APIView):
         missing_bank_details = active.filter(Q(bank_name="") | Q(account_number="") | Q(bank_code="")).count()
         missing_biometric = active.filter(Q(biometric_user_id__isnull=True) | Q(biometric_user_id="")).count()
         missing_salary = active.filter(Q(basic_salary__isnull=True) | Q(basic_salary=0)).count()
+        contract_without_fund = active.filter(employment_type="contract").exclude(deferred_fund__active=True).count()
 
         return Response({
             "total": sum(by_status.values()),
@@ -334,8 +337,9 @@ class EmployeeDirectorySummaryAPIView(APIView):
             "missing_bank_details": missing_bank_details,
             "missing_biometric": missing_biometric,
             "missing_salary": missing_salary,
+            "contract_without_deferred_fund": contract_without_fund,
             "needs_attention": len(active_ids - assigned_ids | set(
-                active.filter(Q(bank_name="") | Q(account_number="") | Q(bank_code="") | Q(biometric_user_id__isnull=True) | Q(biometric_user_id="") | Q(basic_salary__isnull=True) | Q(basic_salary=0)).values_list("pk", flat=True)
+                active.filter(Q(bank_name="") | Q(account_number="") | Q(bank_code="") | Q(biometric_user_id__isnull=True) | Q(biometric_user_id="") | Q(basic_salary__isnull=True) | Q(basic_salary=0) | Q(employment_type="contract", deferred_fund__isnull=True) | Q(employment_type="contract", deferred_fund__active=False)).values_list("pk", flat=True)
             )),
         })
 

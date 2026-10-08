@@ -51,7 +51,7 @@ def money(value):
 class DeferredFundService:
     # ---- accounts -------------------------------------------------------------------
     @staticmethod
-    def enrol(*, employee, percent, opening_balance=0, saving_since=None, actor):
+    def enrol(*, employee, percent, opening_balance=0, saving_since=None, contributions_from=None, opening_note="", actor):
         percent = Decimal(percent)
         if not Decimal("0") < percent <= Decimal("100"):
             raise ValueError("The percentage must be more than 0 and at most 100.")
@@ -61,16 +61,18 @@ class DeferredFundService:
         if opening < 0:
             raise ValueError("The opening balance cannot be negative.")
         with transaction.atomic():
-            account, created = DeferredFundAccount.objects.get_or_create(employee=employee, defaults={"percent": percent, "created_by": actor, "saving_since": saving_since})
+            account, created = DeferredFundAccount.objects.get_or_create(employee=employee, defaults={"percent": percent, "created_by": actor, "saving_since": saving_since, "contributions_from": contributions_from})
             if not created:
                 if account.active:
                     raise ValueError("This person is already enrolled.")
                 account.active, account.percent = True, percent
                 if saving_since:
                     account.saving_since = saving_since
-                account.save(update_fields=["active", "percent", "saving_since", "updated_at"])
+                if contributions_from:
+                    account.contributions_from = contributions_from
+                account.save(update_fields=["active", "percent", "saving_since", "contributions_from", "updated_at"])
             if opening > 0:
-                DeferredFundEntry.objects.create(account=account, entry_type=EntryType.OPENING, amount=opening, entry_date=timezone.localdate(), note="Balance already held before this system", created_by=actor)
+                DeferredFundEntry.objects.create(account=account, entry_type=EntryType.OPENING, amount=opening, entry_date=timezone.localdate(), note=opening_note or "Balance already held before this system", created_by=actor)
             DeferredFundService._log("deferred_fund.enrolled", account, actor, AuditSeverity.SUCCESS, "Enrolled in deferred fund", f"{employee.full_name} was enrolled at {percent}%" + (f" with an opening balance of {opening:,.2f}." if opening > 0 else "."))
         return account
 
@@ -103,24 +105,40 @@ class DeferredFundService:
     @staticmethod
     def apply_for_period(period):
         """Take each enrolled contract employee's monthly contribution from this period's
-        payroll. Called when payroll is generated; safe to repeat (once per person per month)."""
+        payroll. Called when payroll is generated; safe to repeat (once per person per month).
+
+        The deduction always appears on the pay slip for an enrolled person: when nothing can be taken (no salary on
+        file, or no net pay) it is shown as 0.00 with the reason, rather than leaving the line out."""
         if period.status in LOCKED_PERIOD:
             return 0
         applied = 0
         for account in DeferredFundAccount.objects.filter(active=True).select_related("employee"):
+            if account.contributions_from and period.start_date < account.contributions_from:
+                continue  # the loaded balance already includes this month
             payroll = period.employee_payrolls.select_for_update().filter(employee=account.employee).exclude(status__in=LOCKED_RECORD).first()
+            source_reference = f"{account.pk}:{period.pk}"
             if payroll is None or DeferredFundEntry.objects.filter(account=account, payroll_period=period, entry_type=EntryType.CONTRIBUTION).exists():
                 continue
+            if PayrollLineItem.objects.filter(payroll=payroll, source_type="deferred_fund", source_reference=source_reference, is_system_generated=True).exists():
+                continue  # already shown (a zero line from an earlier run)
             # A percentage of basic salary, never more than the person actually earns this month.
             amount = min(money(payroll.basic_salary * account.percent / 100), max(payroll.net_pay, Decimal("0.00")))
+            percent = f"{account.percent.normalize():f}%"
             if amount <= 0:
+                reason = "no salary on file" if not payroll.basic_salary else "no pay to take it from this month"
+                PayrollLineItem.objects.create(
+                    payroll=payroll, item_type=PayrollLineItemType.DEDUCTION, code="DEFERRED_FUND",
+                    description=f"Deferred fund contribution ({percent}) - nothing taken: {reason}", amount=Decimal("0.00"),
+                    source_type="deferred_fund", source_reference=source_reference, metadata={"percent": str(account.percent), "nothing_taken": reason}, is_system_generated=True,
+                )
+                recalculate_employee_payroll(payroll)
                 continue
             line_item = PayrollLineItem.objects.create(
                 payroll=payroll, item_type=PayrollLineItemType.DEDUCTION, code="DEFERRED_FUND",
-                description=f"Deferred fund contribution ({account.percent.normalize():f}%)", amount=amount,
-                source_type="deferred_fund", source_reference=f"{account.pk}:{period.pk}", metadata={"percent": str(account.percent)}, is_system_generated=True,
+                description=f"Deferred fund contribution ({percent})", amount=amount,
+                source_type="deferred_fund", source_reference=source_reference, metadata={"percent": str(account.percent)}, is_system_generated=True,
             )
-            DeferredFundEntry.objects.create(account=account, entry_type=EntryType.CONTRIBUTION, amount=amount, entry_date=timezone.localdate(), payroll_period=period, line_item=line_item, note=f"{period.display_name} at {account.percent.normalize():f}%")
+            DeferredFundEntry.objects.create(account=account, entry_type=EntryType.CONTRIBUTION, amount=amount, entry_date=timezone.localdate(), payroll_period=period, line_item=line_item, note=f"{period.display_name} at {percent}")
             recalculate_employee_payroll(payroll)
             applied += 1
         return applied

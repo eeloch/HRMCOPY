@@ -329,6 +329,10 @@ class EmployeeSerializer(serializers.ModelSerializer):
             reasons.append("No biometric link")
         if not employee.basic_salary:
             reasons.append("Missing salary")  # without it payroll and half-day penalties price at nothing
+        if employee.employment_type == "contract":
+            fund = getattr(employee, "deferred_fund", None)
+            if fund is None or not fund.active:
+                reasons.append("Contract staff not on the deferred fund list")  # correct their staff type, or enrol them
         return reasons
 
 
