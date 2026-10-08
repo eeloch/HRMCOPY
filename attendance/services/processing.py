@@ -237,9 +237,10 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
             attendance.status = "absent"
         elif event_count == 1:
             punch = events.first().timestamp
-            # A lone punch at/after shift end is treated as a clock-out; otherwise
-            # it is a clock-in. This preserves the real event without inventing one.
-            if punch >= scheduled_end:
+            # A lone punch in the second half of the shift (or after it) is the clock-out of someone who missed
+            # their clock-in: it must not make them look hours late. In the first half it is a clock-in. Either way
+            # the real event is kept and the missing one is flagged, never invented.
+            if punch >= scheduled_start + (scheduled_end - scheduled_start) / 2:
                 attendance.actual_clock_in = None
                 attendance.actual_clock_out = punch
                 missing_clock_in = True

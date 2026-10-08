@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from django.test import TestCase, override_settings
@@ -797,10 +797,35 @@ class ProposedAbsenceTests(AttendanceProcessingTests):
 
         get_user_model().objects.create_superuser(username="abs-boss", email="b@example.com", password="pw")
         employee = self.employee_with_shift("ABS-ALERT")
-        self.work_date = timezone.localdate() - timezone.timedelta(days=1) if hasattr(timezone, "timedelta") else self.work_date
         self.add_event(employee, self.work_date, 13, 5)
         self.add_event(employee, self.work_date, 19, 0)
         process_employee_attendance(employee, self.work_date, now=self.after)
         process_employee_attendance(employee, self.work_date, now=self.after)  # reprocessing must not alert again
         self.assertLessEqual(Notification.objects.filter(event_type="attendance.proposed_absence").count(), 1)
 
+
+
+class LonePunchInTheSecondHalfTests(AttendanceProcessingTests):
+    """One punch near the end of the shift is the clock-out of someone who missed clocking in, not a 12-hour lateness."""
+
+    def test_a_lone_punch_just_before_the_shift_end_is_a_clock_out_not_lateness(self):
+        employee = self.employee_with_shift("LONE-END")
+        self.add_event(employee, self.work_date, 18, 52)
+        record = process_employee_attendance(employee, self.work_date, now=self.after)
+        self.assertEqual((record.status, record.late_minutes, record.actual_clock_in is None, record.actual_clock_out is not None), ("incomplete", 0, True, True))
+        self.assertFalse(AttendanceException.objects.filter(attendance=record, exception_type="late").exists())
+        self.assertTrue(AttendanceException.objects.filter(attendance=record, exception_type="missing_clock_in").exists())
+
+    def test_a_lone_punch_in_the_first_half_is_still_a_clock_in_and_can_be_late(self):
+        employee = self.employee_with_shift("LONE-START")
+        self.add_event(employee, self.work_date, 7, 40)
+        record = process_employee_attendance(employee, self.work_date, now=self.after)
+        self.assertEqual((record.late_minutes, record.actual_clock_out), (40, None))
+        self.assertTrue(AttendanceException.objects.filter(attendance=record, exception_type="missing_clock_out").exists())
+
+    def test_a_night_workers_lone_morning_punch_is_their_clock_out(self):
+        night = Shift.objects.create(name="Lone Night", start_time="19:00", end_time="07:00", is_overnight=True)
+        employee = self.employee_with_shift("LONE-NIGHT", shift=night)
+        self.add_event(employee, self.work_date + timedelta(days=1), 6, 55)
+        record = process_employee_attendance(employee, self.work_date, now=self.after + timedelta(days=1))
+        self.assertEqual((record.late_minutes, record.actual_clock_in is None), (0, True))
