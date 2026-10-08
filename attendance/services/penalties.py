@@ -1,14 +1,14 @@
 """The attendance penalty bands - one place, used for the amount shown on an exception and for the payroll deduction.
 
-Lateness (minutes after the shift starts):
-    up to 5 min  waived              6-15 min   N300      16-30 min   N500
-    31-59 min    N700                1 hr up to 4 hrs     N1,000
-    4 hrs or more (11am on a 7am shift) - half a day's pay
-Early departure (minutes before the shift ends):
-    up to 5 min  waived              6-15 min   N500      16-30 min   N1,000
-    31 min up to 7 hrs   N1,500
-    7 hrs or more (noon on a 7pm close) - half a day's pay
-The half-day points are measured from the shift, so they work for night shifts too."""
+Lateness (minutes after the shift starts) and early departure (minutes before it ends) share one ladder:
+    up to 5 min   waived             6-15 min   N300         16-30 min   N500        31-59 min   N700
+    1 hr to 1 hr 59 min   N1,000
+    from 2 hrs: N1,000 for every full hour, plus N500 for an extra half hour (2h N2,000, 2h30 N2,500, 3h N3,000 ...)
+    Half-day pay only: arriving 12pm or later (5 hrs after a 7am start), or leaving at 12pm or earlier (7 hrs before a
+    7pm close). The ladder never charges more than that half day.
+    A proposed absence is raised for someone to confirm when it is worse still: arriving from 1pm (6 hrs late) or
+    leaving before 12 noon (more than 7 hrs early).
+The points are measured from the shift, so they work for night shifts too."""
 
 from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -18,33 +18,54 @@ DEFAULT_WORKING_DAYS = 26
 
 LATE_WAIVED_UP_TO = 5
 EARLY_WAIVED_UP_TO = 5
-HALF_DAY_LATE_MINUTES = 4 * 60
-HALF_DAY_EARLY_MINUTES = 7 * 60
+HALF_DAY_LATE_MINUTES = 5 * 60      # 12pm on a 7am start
+HALF_DAY_EARLY_MINUTES = 7 * 60     # 12 noon on a 7pm close
+ABSENCE_ALERT_LATE_MINUTES = 6 * 60  # arriving from 1pm
+ABSENCE_ALERT_EARLY_MINUTES = 7 * 60  # leaving before 12 noon (more than this)
 
-LATE_BANDS = ((15, "6_15", Decimal("300")), (30, "16_30", Decimal("500")), (59, "31_59", Decimal("700")))
-LATE_HOUR_FEE = Decimal("1000")
-EARLY_BANDS = ((15, "6_15", Decimal("500")), (30, "16_30", Decimal("1000")))
-EARLY_LONG_FEE = Decimal("1500")
+SMALL_BANDS = ((15, "6_15", Decimal("300")), (30, "16_30", Decimal("500")), (59, "31_59", Decimal("700")))
+HOUR = Decimal("1000")
+HALF_HOUR = Decimal("500")
 
 
 def waived_up_to(exception_type):
     return LATE_WAIVED_UP_TO if exception_type == "late" else EARLY_WAIVED_UP_TO
 
 
+def ladder(minutes):
+    """(amount, band) for a number of minutes beyond the waived allowance, before the half-day limit."""
+    for upper, band, amount in SMALL_BANDS:
+        if minutes <= upper:
+            return amount, band
+    hours, rest = divmod(minutes, 60)
+    if hours == 1:
+        return HOUR, "60_119"
+    return HOUR * hours + (HALF_HOUR if rest >= 30 else Decimal("0")), "hourly"
+
+
+def proposes_absence(exception_type, minutes):
+    """True when it is bad enough that an absence should be proposed for someone to confirm."""
+    if exception_type == "late":
+        return minutes >= ABSENCE_ALERT_LATE_MINUTES
+    if exception_type == "early_departure":
+        return minutes > ABSENCE_ALERT_EARLY_MINUTES
+    return False
+
+
 def penalty_for(exception_type, minutes, daily_rate):
     """(amount, band, extra metadata) for a lateness or early departure, or None when there is nothing to charge
-    (no minutes, or within the waived allowance). `daily_rate` prices the half-day bands."""
+    (no minutes, or within the waived allowance). `daily_rate` prices the half-day limit."""
     if exception_type not in ("late", "early_departure") or minutes <= waived_up_to(exception_type):
         return None
-    late = exception_type == "late"
-    half_day_at = HALF_DAY_LATE_MINUTES if late else HALF_DAY_EARLY_MINUTES
+    half_day_at = HALF_DAY_LATE_MINUTES if exception_type == "late" else HALF_DAY_EARLY_MINUTES
+    half_day = (Decimal(daily_rate) / Decimal("2")).quantize(MONEY, rounding=ROUND_HALF_UP)
+    extra = {"daily_rate": str(daily_rate), "half_day_rate": str(half_day)}
     if minutes >= half_day_at:
-        half_day = (daily_rate / Decimal("2")).quantize(MONEY, rounding=ROUND_HALF_UP)
-        return half_day, "half_day", {"daily_rate": str(daily_rate), "half_day_rate": str(half_day)}
-    for upper, band, amount in (LATE_BANDS if late else EARLY_BANDS):
-        if minutes <= upper:
-            return amount.quantize(MONEY), band, {}
-    return (LATE_HOUR_FEE if late else EARLY_LONG_FEE).quantize(MONEY), "60_to_half_day" if late else "31_to_half_day", {}
+        return half_day, "half_day", extra
+    amount, band = ladder(minutes)
+    if half_day > 0 and amount > half_day:  # never more than the half day, however the ladder climbs
+        return half_day, "half_day_limit", extra
+    return amount.quantize(MONEY), band, {}
 
 
 def estimated_daily_rate(employee, work_date):

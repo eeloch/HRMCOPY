@@ -731,19 +731,76 @@ class PenaltyBandProcessingTests(AttendanceProcessingTests):
             _employee, record = self.process(number, arrive=(7, minute), leave=(19, 0))
             self.assertEqual(self.amount(record, "late"), Decimal(expected), number)
         _employee, record = self.process("BAND-90", arrive=(8, 30), leave=(19, 0))
-        self.assertEqual(self.amount(record, "late"), Decimal("1000.00"))
+        self.assertEqual(self.amount(record, "late"), Decimal("1000.00"))  # 1 hr to 1:59 is a flat 1,000
+        _employee, record = self.process("BAND-2H", arrive=(9, 30), leave=(19, 0))
+        self.assertEqual(self.amount(record, "late"), Decimal("2500.00"))  # 2h30: 1,000 per hour plus 500 for the half hour
 
-    def test_arriving_four_hours_late_is_a_half_day(self):
-        employee, record = self.process("BAND-HALF", arrive=(11, 0), leave=(19, 0))
+    def test_arriving_at_noon_is_a_half_day(self):
+        employee, record = self.process("BAND-HALF", arrive=(12, 0), leave=(19, 0))
         employee.basic_salary = Decimal("26000")
         employee.save()
         record = process_employee_attendance(employee, self.work_date, now=self.after)
         self.assertEqual(self.amount(record, "late"), Decimal("13000.00"))  # half a day: this test roster has one working day that month
 
     def test_early_departure_bands(self):
-        for number, leave, expected in (("EARLY-4", (18, 56), None), ("EARLY-10", (18, 50), "500.00"), ("EARLY-25", (18, 35), "1000.00"), ("EARLY-3H", (16, 0), "1500.00")):
+        for number, leave, expected in (("EARLY-4", (18, 56), None), ("EARLY-10", (18, 50), "300.00"), ("EARLY-25", (18, 35), "500.00"), ("EARLY-3H", (16, 0), "3000.00")):
             _employee, record = self.process(number, arrive=(7, 0), leave=leave)
             if expected is None:
                 self.assertFalse(AttendanceException.objects.filter(attendance=record, exception_type="early_departure").exists(), number)
             else:
                 self.assertEqual(self.amount(record, "early_departure"), Decimal(expected), number)
+
+
+class ProposedAbsenceTests(AttendanceProcessingTests):
+    """Worse than the half-day point - arriving from 1pm, or leaving before noon - proposes an absence."""
+
+    def go(self, number, arrive=None, leave=None):
+        employee = self.employee_with_shift(number)
+        if arrive:
+            self.add_event(employee, self.work_date, *arrive)
+        if leave:
+            self.add_event(employee, self.work_date, *leave)
+        return employee, process_employee_attendance(employee, self.work_date, now=self.after)
+
+    def absence(self, record):
+        return AttendanceException.objects.filter(attendance=record, exception_type="absence").first()
+
+    def test_arriving_from_one_pm_proposes_an_absence_and_keeps_the_half_day_charge(self):
+        _employee, record = self.go("ABS-1PM", arrive=(13, 0), leave=(19, 0))
+        proposal = self.absence(record)
+        self.assertEqual(proposal.status, "pending")
+        self.assertIn("Proposed absence", proposal.supervisor_comment)
+        self.assertTrue(AttendanceException.objects.filter(attendance=record, exception_type="late", status="pending").exists())
+        self.assertNotEqual(record.status, "absent")  # a proposal, not a decision
+
+    def test_arriving_before_one_pm_is_a_half_day_but_not_an_absence_proposal(self):
+        _employee, record = self.go("ABS-12", arrive=(12, 30), leave=(19, 0))
+        self.assertIsNone(self.absence(record))
+
+    def test_leaving_before_noon_proposes_an_absence_but_noon_itself_does_not(self):
+        _employee, record = self.go("ABS-1130", arrive=(7, 0), leave=(11, 30))
+        self.assertIsNotNone(self.absence(record))
+        _employee, record = self.go("ABS-1200", arrive=(7, 0), leave=(12, 0))
+        self.assertIsNone(self.absence(record))
+
+    def test_a_late_case_already_decided_does_not_get_an_absence_proposal(self):
+        employee, record = self.go("ABS-DECIDED", arrive=(13, 0), leave=(19, 0))
+        AttendanceException.objects.filter(attendance=record, exception_type="absence").delete()
+        AttendanceException.objects.filter(attendance=record, exception_type="late").update(status="waived")
+        process_employee_attendance(employee, self.work_date, now=self.after)
+        self.assertIsNone(self.absence(record))
+
+    def test_reviewers_are_alerted_once(self):
+        from django.contrib.auth import get_user_model
+
+        from notifications.models import Notification
+
+        get_user_model().objects.create_superuser(username="abs-boss", email="b@example.com", password="pw")
+        employee = self.employee_with_shift("ABS-ALERT")
+        self.work_date = timezone.localdate() - timezone.timedelta(days=1) if hasattr(timezone, "timedelta") else self.work_date
+        self.add_event(employee, self.work_date, 13, 5)
+        self.add_event(employee, self.work_date, 19, 0)
+        process_employee_attendance(employee, self.work_date, now=self.after)
+        process_employee_attendance(employee, self.work_date, now=self.after)  # reprocessing must not alert again
+        self.assertLessEqual(Notification.objects.filter(event_type="attendance.proposed_absence").count(), 1)
+

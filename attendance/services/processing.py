@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from attendance.models import AttendanceEvent, AttendanceException, DailyAttendance, EmployeeRosterDay
 from attendance.services.leave import approved_leave_employee_ids
-from attendance.services.penalties import LATE_WAIVED_UP_TO, estimated_daily_rate, penalty_for, waived_up_to
+from attendance.services.penalties import LATE_WAIVED_UP_TO, estimated_daily_rate, penalty_for, proposes_absence, waived_up_to
 from attendance.services.roster import get_employee_roster_day
 from audit.models import AuditSeverity
 from audit.services import AuditService
@@ -51,8 +51,8 @@ def shift_schedule(shift, work_date):
     return scheduled_start, scheduled_end
 
 
-def _sync_exception(attendance, exception_type, *, applies, minutes=0, monetary=True, deduction=None):
-    """Update pending exceptions only; HR-reviewed decisions are immutable here."""
+def _sync_exception(attendance, exception_type, *, applies, minutes=0, monetary=True, deduction=None, note=""):
+    """Update pending exceptions only; HR-reviewed decisions are immutable here. Returns (exception, created)."""
     exceptions = AttendanceException.objects.filter(
         attendance=attendance,
         exception_type=exception_type,
@@ -61,21 +61,44 @@ def _sync_exception(attendance, exception_type, *, applies, minutes=0, monetary=
 
     if not applies:
         exceptions.filter(status=PENDING_EXCEPTION_STATUS).delete()
-        return
+        return None, False
 
     if deduction is None:
         deduction = calculate_proposed_deduction(attendance.employee, minutes) if monetary else Decimal("0.00")
     if exception is None:
-        AttendanceException.objects.create(
+        exception = AttendanceException.objects.create(
             attendance=attendance,
             exception_type=exception_type,
             minutes_affected=minutes,
             proposed_deduction=deduction,
+            supervisor_comment=note,
         )
-    elif exception.status == PENDING_EXCEPTION_STATUS:
+        return exception, True
+    if exception.status == PENDING_EXCEPTION_STATUS:
         exception.minutes_affected = minutes
         exception.proposed_deduction = deduction
-        exception.save(update_fields=["minutes_affected", "proposed_deduction"])
+        exception.supervisor_comment = note
+        exception.save(update_fields=["minutes_affected", "proposed_deduction", "supervisor_comment"])
+    return exception, False
+
+
+def _alert_proposed_absence(attendance, note):
+    """Tell the people who decide exceptions that someone's day is bad enough to be an absence."""
+    from django.contrib.auth import get_user_model
+    from django.db.models import Q
+
+    from notifications.models import NotificationSeverity
+    from notifications.services import NotificationService
+
+    reviewers = get_user_model().objects.filter(is_active=True).filter(
+        Q(is_superuser=True) | Q(user_permissions__codename="review_attendanceexception") | Q(groups__permissions__codename="review_attendanceexception")
+    ).distinct()
+    for user in reviewers:
+        NotificationService.create(
+            recipient=user, event_type="attendance.proposed_absence", title="Proposed absence to confirm",
+            message=f"{attendance.employee.full_name} ({attendance.employee.employee_id}) on {attendance.date}: {note}",
+            severity=NotificationSeverity.WARNING, employee=attendance.employee, related_url="/attendance/exceptions",
+        )
 
 
 def _log_attendance_changes(attendance, previous):
@@ -264,12 +287,6 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
 
         attendance.save()
 
-        _sync_exception(
-            attendance,
-            "absence",
-            applies=attendance.status == "absent",
-            minutes=FLEXIBLE_DAY_MINUTES if shift.is_flexible else int((scheduled_end - scheduled_start).total_seconds() // 60),
-        )
         # Lateness and early departure follow the fixed penalty bands; a few minutes within the allowance is waived and
         # raises nothing at all. Half-day bands are priced from the month's roster, so look that up only when needed.
         rate = estimated_daily_rate(attendance.employee, work_date) if max(attendance.late_minutes - LATE_WAIVED_UP_TO, attendance.early_departure_minutes - waived_up_to("early_departure")) > 0 else Decimal("0")
@@ -277,6 +294,23 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
         early_penalty = penalty_for("early_departure", attendance.early_departure_minutes, rate)
         _sync_exception(attendance, "late", applies=late_penalty is not None, minutes=attendance.late_minutes, deduction=late_penalty[0] if late_penalty else None)
         _sync_exception(attendance, "early_departure", applies=early_penalty is not None, minutes=attendance.early_departure_minutes, deduction=early_penalty[0] if early_penalty else None)
+
+        # Worse still - arriving from 1pm or leaving before noon - and an absence is proposed for someone to confirm. Only
+        # while the lateness / early departure itself is still undecided: a decided case is left as it was decided.
+        reasons = []
+        if proposes_absence("late", attendance.late_minutes):
+            reasons.append(f"arrived {attendance.late_minutes // 60}h{attendance.late_minutes % 60:02d} after the shift start")
+        if proposes_absence("early_departure", attendance.early_departure_minutes):
+            reasons.append(f"left {attendance.early_departure_minutes // 60}h{attendance.early_departure_minutes % 60:02d} before the shift end")
+        undecided = AttendanceException.objects.filter(attendance=attendance, exception_type__in=("late", "early_departure"), status=PENDING_EXCEPTION_STATUS).exists()
+        proposed = bool(reasons) and undecided and attendance.status != "absent"
+        note = f"Proposed absence: {' and '.join(reasons)}. Confirm it as an absence or decline it to keep the lateness charge." if proposed else ""
+        absence, created = _sync_exception(
+            attendance, "absence", applies=attendance.status == "absent" or proposed,
+            minutes=FLEXIBLE_DAY_MINUTES if shift.is_flexible else int((scheduled_end - scheduled_start).total_seconds() // 60), note=note,
+        )
+        if created and proposed and attendance.date >= timezone.localdate() - timedelta(days=3):
+            _alert_proposed_absence(attendance, note)
         _sync_exception(
             attendance,
             "missing_clock_in",
