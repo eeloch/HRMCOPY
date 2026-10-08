@@ -169,7 +169,7 @@ class EmployeeStatementAPIView(APIView):
             return Response({"detail": "Choose an employee and a month."}, status=400)
         employee = get_object_or_404(Employee.objects.select_related("department", "position"), pk=employee_id)
         try:
-            statement = build_statement(employee, year, month, today=today)
+            statement = build_statement(employee, year, month, today=today, can_change=request.user.has_perm("attendance.reverse_attendance_charge"))
         except ValueError as error:
             return Response({"detail": str(error)}, status=400)
         AuditService.log(

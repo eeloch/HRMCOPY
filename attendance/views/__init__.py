@@ -2,6 +2,7 @@ from .attendance import EmployeeAttendanceHistoryAPIView, TodayAttendanceAPIView
 from .dashboard import AttendanceDashboardAPIView
 from .exceptions import (
     AttendanceExceptionListAPIView,
+    ExceptionChangeDecisionAPIView,
     ExceptionDecisionAPIView,
     PendingExceptionAPIView,
 )
@@ -27,6 +28,7 @@ from .devices import BiometricDeviceListCreateAPIView, BiometricDeviceDetailAPIV
 __all__ = [
     "AttendanceDashboardAPIView",
     "AttendanceExceptionListAPIView",
+    "ExceptionChangeDecisionAPIView",
     "ExceptionDecisionAPIView",
     "PendingExceptionAPIView",
     "TodayAttendanceAPIView",

@@ -8,6 +8,7 @@ from .views.exception_review import (
 from .views import (
     AttendanceExceptionListAPIView,
     AttendanceDashboardAPIView,
+    ExceptionChangeDecisionAPIView,
     ExceptionDecisionAPIView,
     PendingExceptionAPIView,
     ShiftAssignmentDetailAPIView,
@@ -82,6 +83,7 @@ urlpatterns = [
         name="attendance-exceptions-pending",
     ),
 
+    path("exceptions/<int:exception_id>/change-decision/", ExceptionChangeDecisionAPIView.as_view(), name="attendance-exception-change-decision"),
     path(
         "exceptions/<int:exception_id>/decision/",
         ExceptionDecisionAPIView.as_view(),

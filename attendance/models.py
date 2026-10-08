@@ -514,6 +514,7 @@ class AttendanceException(models.Model):
     class Meta:
         permissions = [
             ("review_attendanceexception", "Can review attendance exceptions"),
+            ("reverse_attendance_charge", "Can reverse or change an attendance charge after it was decided"),
         ]
 
     def __str__(self):

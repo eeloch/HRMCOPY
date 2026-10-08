@@ -14,7 +14,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from advances.models import AdvanceRepayment, AdvanceStatus, SalaryAdvance
-from attendance.models import DailyAttendance, EmployeeRosterDay, RosterDayStatus
+from attendance.models import AttendanceException, DailyAttendance, EmployeeRosterDay, RosterDayStatus
 from bonuses.models import Bonus, BonusStatus
 from meals.models import MealExcessException, MealExcessStatus
 from offences.models import EmployeeOffence, EmployeeOffenceStatus
@@ -34,7 +34,32 @@ def _clock(value):
     return timezone.localtime(value).strftime("%H:%M") if value else None
 
 
-def build_statement(employee, year, month, *, today=None):
+CASE_LABELS = {"late": "Late arrival", "early_departure": "Early departure", "absence": "Absent"}
+CASE_STATUS_LABELS = {"pending": "Awaiting a decision", "approved": "Charged", "waived": "Waived - no charge", "held": "On hold - being checked"}
+
+
+def _attendance_cases(employee, first, last, can_change):
+    """Every lateness / early departure / absence case of the month, with the punches it was judged on, so a charge the
+    employee disputes can be checked against them. Minutes and decisions only - no amounts (see the module note)."""
+    cases = []
+    rows = AttendanceException.objects.filter(attendance__employee=employee, attendance__date__range=(first, last), exception_type__in=tuple(CASE_LABELS)).select_related("attendance", "attendance__shift").order_by("attendance__date", "exception_type")
+    for case in rows:
+        row = case.attendance
+        cases.append({
+            "id": case.pk, "date": row.date.isoformat(), "kind": CASE_LABELS[case.exception_type],
+            "minutes": case.minutes_affected if case.exception_type != "absence" else None,
+            "shift": row.shift.name if row.shift_id else None,
+            "scheduled": f"{_clock(row.scheduled_start)} - {_clock(row.scheduled_end)}" if row.scheduled_start and row.scheduled_end else None,
+            "clock_in": _clock(row.actual_clock_in), "clock_out": _clock(row.actual_clock_out),
+            "status": case.status, "status_label": CASE_STATUS_LABELS.get(case.status, case.status),
+            "decided_by": case.reviewed_by or None, "decided_on": timezone.localtime(case.reviewed_at).date().isoformat() if case.reviewed_at else None,
+            "comment": case.admin_comment or None,
+            "can_change": bool(can_change and case.status != "pending"),
+        })
+    return cases
+
+
+def build_statement(employee, year, month, *, today=None, can_change=False):
     today = today or timezone.localdate()
     if not (2000 <= year <= 2100 and 1 <= month <= 12):
         raise ValueError("Choose a valid month.")
@@ -130,6 +155,8 @@ def build_statement(employee, year, month, *, today=None):
             "hours_worked": round(worked_minutes / 60, 2), "late_minutes": late_minutes,
         },
         "days": days,
+        "attendance_cases": _attendance_cases(employee, first, shown_until, can_change),
+        "can_change_cases": bool(can_change),
         "absent_dates": [day["date"] for day in days if day["status"] == "absent"],
         "attendance_deduction_note": (
             "Days absent and time late are deducted from pay by payroll at the standard rate. The amount is not shown on this statement."

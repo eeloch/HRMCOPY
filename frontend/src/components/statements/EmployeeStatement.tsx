@@ -8,12 +8,15 @@ import { apiFetch, getCurrentUser } from "@/lib/api";
 type Employee = { id: number; employee_id: string; full_name: string; department_name?: string | null };
 type Day = { date: string; weekday: string; status: string; status_label: string; shift: string | null; clock_in: string | null; clock_out: string | null; late_minutes: number; hours_worked: number };
 type Charge = { date: string | null; kind: string; description: string; amount: string; status: string; status_label: string };
+type Case = { id: number; date: string; kind: string; minutes: number | null; shift: string | null; scheduled: string | null; clock_in: string | null; clock_out: string | null; status: string; status_label: string; decided_by: string | null; decided_on: string | null; comment: string | null; can_change: boolean };
 type Reward = { description: string; amount: string; status_label: string };
 type Statement = {
   employee: { id: number; employee_id: string; name: string; department: string | null; position: string | null };
   period: { year: number; month: number; label: string; provisional: boolean; shown_until: string };
   attendance_summary: { days_worked: number; present: number; late: number; absent: number; leave: number; incomplete: number; rest_days: number; scheduled_work_days: number; hours_worked: number; late_minutes: number };
   days: Day[];
+  attendance_cases: Case[];
+  can_change_cases: boolean;
   attendance_deduction_note: string | null;
   charges: Charge[];
   charges_total: string;
@@ -45,6 +48,7 @@ export function EmployeeStatement() {
   const [statement, setStatement] = useState<Statement | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [changing, setChanging] = useState<number | null>(null);
 
   const loadAccess = useEffectEvent(async () => {
     try {
@@ -66,9 +70,28 @@ export function EmployeeStatement() {
     return term ? employees.filter((employee) => `${employee.full_name} ${employee.employee_id}`.toLowerCase().includes(term)) : employees;
   }, [employees, filter]);
 
+  async function changeCase(item: Case, decision: "waived" | "approved") {
+    const question = decision === "waived" ? `Reverse this ${item.kind.toLowerCase()} charge (${fullDate(item.date)})? Say what you checked:` : `Charge this ${item.kind.toLowerCase()} (${fullDate(item.date)})? Say what you checked:`;
+    const reason = window.prompt(question);
+    if (reason === null) return;
+    setChanging(item.id); setError("");
+    try {
+      const response = await apiFetch(`/attendance/exceptions/${item.id}/change-decision/`, { method: "POST", body: JSON.stringify({ decision, reason }) });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.detail || "The charge could not be changed.");
+      await load(false);
+    } catch (changeError) {
+      setError(changeError instanceof Error ? changeError.message : "The charge could not be changed.");
+    } finally { setChanging(null); }
+  }
+
   async function generate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setLoading(true); setError(""); setStatement(null);
+    await load(true);
+  }
+
+  async function load(reset: boolean) {
+    setLoading(true); setError(""); if (reset) setStatement(null);
     try {
       const [year, monthNumber] = month.split("-");
       const response = await apiFetch(`/reports/employee-statement/?employee=${employeeId}&year=${year}&month=${Number(monthNumber)}`);
@@ -130,6 +153,13 @@ export function EmployeeStatement() {
         <div className="mt-4 overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500"><tr><th className="px-3 py-2">Date</th><th className="px-3 py-2">Day</th><th className="px-3 py-2">Status</th><th className="px-3 py-2">Shift</th><th className="px-3 py-2">In</th><th className="px-3 py-2">Out</th><th className="px-3 py-2 text-right">Late (min)</th><th className="px-3 py-2 text-right">Hours</th></tr></thead>
           <tbody className="divide-y divide-slate-100">{statement.days.map((day) => <tr key={day.date}><td className="px-3 py-1.5">{dayLabel(day.date)}</td><td className="px-3 py-1.5 text-slate-500">{day.weekday}</td><td className={`px-3 py-1.5 ${statusTone[day.status] || ""}`}>{day.status_label}</td><td className="px-3 py-1.5 text-slate-600">{day.shift || "-"}</td><td className="px-3 py-1.5">{day.clock_in || "-"}</td><td className="px-3 py-1.5">{day.clock_out || "-"}</td><td className="px-3 py-1.5 text-right">{day.late_minutes || "-"}</td><td className="px-3 py-1.5 text-right">{day.hours_worked || "-"}</td></tr>)}</tbody></table></div>
         {statement.attendance_deduction_note && <p className="mt-3 rounded-xl bg-slate-50 p-3 text-xs text-slate-600">{statement.attendance_deduction_note}</p>}
+
+        {statement.attendance_cases.length > 0 && <>
+          <h3 className="mt-8 text-sm font-bold uppercase tracking-wide text-slate-700">Lateness, early departures and absences</h3>
+          <p className="mt-1 text-xs text-slate-500">Each case with the times it was judged on. If the employee disputes one, check the punches here{statement.can_change_cases ? " and reverse the charge if it is wrong." : "; someone with permission can then reverse it."}</p>
+          <div className="mt-3 overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500"><tr><th className="px-3 py-2">Date</th><th className="px-3 py-2">Case</th><th className="px-3 py-2">Shift</th><th className="px-3 py-2">Clocked in</th><th className="px-3 py-2">Clocked out</th><th className="px-3 py-2">Decision</th>{statement.can_change_cases && <th className="px-3 py-2 print:hidden" />}</tr></thead>
+            <tbody className="divide-y divide-slate-100">{statement.attendance_cases.map((item) => <tr key={item.id}><td className="px-3 py-1.5">{dayLabel(item.date)}</td><td className="px-3 py-1.5">{item.kind}{item.minutes ? ` - ${item.minutes} min` : ""}</td><td className="px-3 py-1.5 text-slate-600">{item.scheduled || item.shift || "-"}</td><td className="px-3 py-1.5">{item.clock_in || "-"}</td><td className="px-3 py-1.5">{item.clock_out || "-"}</td><td className="px-3 py-1.5"><span className={item.status === "waived" ? "text-emerald-700" : item.status === "approved" ? "font-semibold text-red-700" : "text-amber-700"}>{item.status_label}</span>{item.decided_by && item.status !== "pending" && <span className="block text-xs text-slate-500">{item.decided_by}{item.decided_on ? `, ${fullDate(item.decided_on)}` : ""}</span>}{item.comment && <span className="block max-w-[22rem] text-xs text-slate-500">{item.comment}</span>}</td>{statement.can_change_cases && <td className="whitespace-nowrap px-3 py-1.5 text-right print:hidden">{item.can_change ? <>{item.status !== "waived" && <button type="button" disabled={changing === item.id} onClick={() => void changeCase(item, "waived")} className="rounded-lg border border-emerald-300 px-2.5 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">Reverse charge</button>}{item.status !== "approved" && <button type="button" disabled={changing === item.id} onClick={() => void changeCase(item, "approved")} className="ml-2 rounded-lg border border-red-300 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50">Charge it</button>}</> : <span className="text-xs text-slate-400">Awaiting a decision</span>}</td>}</tr>)}</tbody></table></div>
+        </>}
 
         <h3 className="mt-8 text-sm font-bold uppercase tracking-wide text-slate-700">Charges to come off pay</h3>
         {statement.charges.length ? <div className="mt-3 overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500"><tr><th className="px-3 py-2">Date</th><th className="px-3 py-2">Type</th><th className="px-3 py-2">Details</th><th className="px-3 py-2">Status</th><th className="px-3 py-2 text-right">Amount</th></tr></thead>

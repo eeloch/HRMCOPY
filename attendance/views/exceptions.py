@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.shortcuts import get_object_or_404
 
 from rest_framework import status
 from rest_framework.permissions import BasePermission, IsAuthenticated
@@ -18,6 +19,27 @@ from meals.services import MealService
 class CanReviewAttendanceExceptions(BasePermission):
     def has_permission(self, request, view):
         return request.user.has_perm("attendance.review_attendanceexception")
+
+
+class CanReverseAttendanceCharges(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.has_perm("attendance.reverse_attendance_charge")
+
+
+class ExceptionChangeDecisionAPIView(APIView):
+    """Reverse (waive) or reinstate a decided lateness / early-departure / absence charge, with the reason."""
+
+    permission_classes = [IsAuthenticated, CanReverseAttendanceCharges]
+
+    def post(self, request, exception_id):
+        from attendance.services.reversal import change_decision
+
+        exception = get_object_or_404(AttendanceException, pk=exception_id)
+        try:
+            exception = change_decision(exception, request.data.get("decision", "waived"), request.data.get("reason", ""), request.user)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"message": "Charge changed.", "exception": AttendanceExceptionSerializer(exception).data})
 
 
 class AttendanceExceptionListAPIView(APIView):

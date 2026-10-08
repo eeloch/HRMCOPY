@@ -20,6 +20,7 @@ MANAGED_PERMISSIONS = [
     {"codename": "manage_shifts", "app_label": "attendance", "label": "Assign & change shifts", "group": "Attendance"},
     {"codename": "manage_roster", "app_label": "attendance", "label": "Manage work rosters", "group": "Attendance"},
     {"codename": "review_attendanceexception", "app_label": "attendance", "label": "Review attendance exceptions", "group": "Attendance"},
+    {"codename": "reverse_attendance_charge", "app_label": "attendance", "label": "Reverse or change a lateness, early-departure or absence charge after it was decided (e.g. when an employee contests their statement)", "group": "Attendance"},
     {"codename": "review_overtime", "app_label": "attendance", "label": "Review overtime records", "group": "Attendance"},
     {"codename": "raise_leave_request", "app_label": "leave", "label": "Raise leave requests for employees", "group": "Leave"},
     {"codename": "approve_leave", "app_label": "leave", "label": "Approve leave requests", "group": "Leave"},
