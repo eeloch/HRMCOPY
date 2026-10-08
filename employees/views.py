@@ -216,6 +216,7 @@ class EmployeeListCreateAPIView(APIView):
                 Q(pk__in=no_plan_ids)
                 | Q(bank_name="") | Q(account_number="") | Q(bank_code="")
                 | Q(biometric_user_id__isnull=True) | Q(biometric_user_id="")
+                | Q(basic_salary__isnull=True) | Q(basic_salary=0)
             )
 
         serializer = EmployeeSerializer(
@@ -313,6 +314,7 @@ class EmployeeDirectorySummaryAPIView(APIView):
 
         missing_bank_details = active.filter(Q(bank_name="") | Q(account_number="") | Q(bank_code="")).count()
         missing_biometric = active.filter(Q(biometric_user_id__isnull=True) | Q(biometric_user_id="")).count()
+        missing_salary = active.filter(Q(basic_salary__isnull=True) | Q(basic_salary=0)).count()
 
         return Response({
             "total": sum(by_status.values()),
@@ -331,8 +333,9 @@ class EmployeeDirectorySummaryAPIView(APIView):
             "not_assigned_shift_plan": not_assigned_count,
             "missing_bank_details": missing_bank_details,
             "missing_biometric": missing_biometric,
+            "missing_salary": missing_salary,
             "needs_attention": len(active_ids - assigned_ids | set(
-                active.filter(Q(bank_name="") | Q(account_number="") | Q(bank_code="") | Q(biometric_user_id__isnull=True) | Q(biometric_user_id="")).values_list("pk", flat=True)
+                active.filter(Q(bank_name="") | Q(account_number="") | Q(bank_code="") | Q(biometric_user_id__isnull=True) | Q(biometric_user_id="") | Q(basic_salary__isnull=True) | Q(basic_salary=0)).values_list("pk", flat=True)
             )),
         })
 

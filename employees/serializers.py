@@ -327,6 +327,8 @@ class EmployeeSerializer(serializers.ModelSerializer):
             reasons.append("Missing bank details")
         if not employee.biometric_user_id:
             reasons.append("No biometric link")
+        if not employee.basic_salary:
+            reasons.append("Missing salary")  # without it payroll and half-day penalties price at nothing
         return reasons
 
 

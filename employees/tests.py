@@ -938,7 +938,7 @@ class EmployeeDirectorySummaryAndFiltersTests(APITestCase):
         self.day = Shift.objects.get_or_create(name="Dir Day", defaults={"start_time": time(7), "end_time": time(19)})[0]
         self.plan = ShiftPlan.objects.create(name="Dir Permanent Day", kind="fixed", shift=self.day, working_weekdays=[0, 1, 2, 3, 4, 5])
 
-        self.on_plan = Employee.objects.create(employee_id="DIR-001", first_name="On", last_name="Plan", department=self.department, status="active", employment_type="permanent", gender="female", bank_name="GTB", account_number="0123456789", bank_code="058", biometric_user_id="B1")
+        self.on_plan = Employee.objects.create(employee_id="DIR-001", first_name="On", last_name="Plan", department=self.department, status="active", employment_type="permanent", gender="female", bank_name="GTB", account_number="0123456789", bank_code="058", biometric_user_id="B1", basic_salary=50000)
         self.no_plan = Employee.objects.create(employee_id="DIR-002", first_name="No", last_name="Plan", department=self.department, status="active", employment_type="casual", gender="male")
         self.inactive = Employee.objects.create(employee_id="DIR-003", first_name="In", last_name="Active", department=self.department, status="inactive")
         assign_plan([self.on_plan], self.plan, start_date=date(2026, 1, 1))
@@ -956,7 +956,8 @@ class EmployeeDirectorySummaryAndFiltersTests(APITestCase):
         self.assertEqual(department_row["count"], 2)  # active only, not the inactive one
         plan_row = next(row for row in data["by_shift_plan"] if row["id"] == self.plan.pk)
         self.assertEqual(plan_row["count"], 1)
-        self.assertEqual(data["needs_attention"], 1)  # no_plan again: no plan AND no bank details AND no biometric
+        self.assertEqual(data["missing_salary"], 1)  # no_plan has no salary
+        self.assertEqual(data["needs_attention"], 1)  # no_plan again: no plan AND no bank details AND no biometric AND no salary
 
     def test_filter_by_shift_plan_id(self):
         response = self.client.get(f"/api/employees/?shift_plan={self.plan.pk}")
@@ -982,9 +983,22 @@ class EmployeeDirectorySummaryAndFiltersTests(APITestCase):
     def test_attention_reasons_are_specific_not_just_a_flag(self):
         response = self.client.get("/api/employees/?status=active")
         no_plan = next(row for row in response.data["results"] if row["employee_id"] == "DIR-002")
-        self.assertEqual(set(no_plan["attention_reasons"]), {"No shift plan", "Missing bank details", "No biometric link"})
+        self.assertEqual(set(no_plan["attention_reasons"]), {"No shift plan", "Missing bank details", "No biometric link", "Missing salary"})
         on_plan = next(row for row in response.data["results"] if row["employee_id"] == "DIR-001")
         self.assertEqual(on_plan["attention_reasons"], [])
+
+    def test_a_missing_salary_alone_needs_attention_and_never_shows_the_amount(self):
+        from datetime import date
+
+        from attendance.services.shift_plans import assign_plan
+
+        only_salary = Employee.objects.create(employee_id="DIR-004", first_name="No", last_name="Salary", department=self.department, status="active", bank_name="GTB", account_number="0123456789", bank_code="058", biometric_user_id="B4", basic_salary=0)
+        assign_plan([only_salary], self.plan, start_date=date(2026, 1, 1))
+        rows = {row["employee_id"]: row for row in self.client.get("/api/employees/?needs_attention=1&status=active").json()["results"]}
+        self.assertEqual(set(rows), {"DIR-002", "DIR-004"})
+        self.assertEqual(rows["DIR-004"]["attention_reasons"], ["Missing salary"])
+        self.assertEqual(self.client.get("/api/employees/summary/").json()["needs_attention"], 2)
+        self.assertEqual(self.client.get("/api/employees/summary/").json()["missing_salary"], 2)
 
     def test_attention_reasons_are_empty_for_inactive_employees(self):
         """An inactive employee predictably has no plan/bank details/biometric link - that is not a problem."""
