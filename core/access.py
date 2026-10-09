@@ -80,6 +80,9 @@ def install():
 
     def check_permissions(self, request):
         original(self, request)
+        from core.actor import set_actor
+
+        set_actor(request.user)  # so a change this request saves is attributed to whoever authenticated it
         needed = required_permissions(request.method, request.path)
         if needed is not None and not holds_any(request.user, needed):
             self.permission_denied(request, message="You do not have access to this part of the system.")
