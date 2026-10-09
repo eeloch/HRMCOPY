@@ -730,3 +730,57 @@ class ResyncMealGatingForTargetTests(TestCase):
         self.Command._resync_meal_gating_for_target(self.newcomer.pk, self.meal_device, 902)
         self.Command._resync_meal_gating_for_target(self.newcomer.pk, self.meal_device, 902)
         self.assertEqual(self.switches(), [False])
+
+
+class CommandBurstTests(SimpleTestCase):
+    """While commands are waiting for a terminal the poller looks again at once; idle, it waits the full interval."""
+
+    def run_steps(self, answers, waiting):
+        """`answers`: what _next_command_to_send returns on each pass; `waiting`: what _commands_waiting returns each time asked."""
+        import asyncio
+        import io
+
+        from attendance.management.commands import run_aiface_gateway as gateway
+
+        command = gateway.Command(stdout=io.StringIO(), stderr=io.StringIO())
+        for attribute in ("_last_gating_check", "_last_roster_check", "_last_attendance_refresh", "_last_auto_sync"):
+            setattr(command, attribute, float("inf"))  # no maintenance due: only the commands matter here
+        answers, waiting = list(answers), list(waiting)
+        sleeps, sent = [], []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        async def passthrough(function, *args):
+            return function(*args)
+
+        class FakeSocket:
+            async def send(self, message):
+                sent.append(message)
+
+        async def scenario():
+            with mock.patch.object(gateway.asyncio, "sleep", fake_sleep), mock.patch.object(command, "_run_db", passthrough), \
+                    mock.patch.object(command, "_next_command_to_send", lambda sn: answers.pop(0)), \
+                    mock.patch.object(command, "_commands_waiting", lambda sn: waiting.pop(0)), \
+                    mock.patch.object(command, "_mark_command_sent", lambda command_id: None):
+                for _ in range(len(answers)):
+                    await command._poll_step(FakeSocket(), "BURST1", None)
+
+        asyncio.run(scenario())
+        return sleeps, sent
+
+    def message(self, enrollid):
+        return enrollid, {"cmd": "setuserinfo", "enrollid": enrollid, "enable": 1}
+
+    def test_it_looks_again_quickly_after_sending_a_command(self):
+        sleeps, sent = self.run_steps([self.message(1), self.message(2), None], waiting=[False])
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(sleeps, [2, 0.3, 0.3])  # the first pass starts idle; every pass after a send is quick
+
+    def test_once_the_queue_is_empty_it_goes_back_to_the_normal_interval(self):
+        sleeps, _sent = self.run_steps([self.message(1), None, None], waiting=[False, False])
+        self.assertEqual(sleeps, [2, 0.3, 2])
+
+    def test_a_command_still_in_flight_keeps_it_looking_quickly(self):
+        sleeps, _sent = self.run_steps([self.message(1), None, None, None], waiting=[True, True, False])
+        self.assertEqual(sleeps, [2, 0.3, 0.3, 0.3])  # nothing new to send, but one is still waiting for its reply

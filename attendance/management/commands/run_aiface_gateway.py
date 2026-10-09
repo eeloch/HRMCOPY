@@ -51,6 +51,10 @@ LIST_USER_SLOTS_MAX_PAGES = 600  # 40 records a page: room for 24,000 slots
 LIST_USER_SLOTS_NEXT_PAGE_WAIT_SECONDS = 8
 
 COMMAND_POLL_INTERVAL_SECONDS = 2
+# While a terminal still has switches or other commands waiting, look again almost at once after each one instead of
+# after the full interval: the morning "switch everyone back on" is ~430 commands per meal terminal, one at a time, and
+# at 2s each the last people were refused ("user disabled") for ~20 minutes after the terminal came on (2026-10-09).
+COMMAND_BURST_INTERVAL_SECONDS = 0.3
 # The terminals were being cut off about every 40s: the websockets library pings each connection every 20s and
 # hangs up when no pong comes back within 20s, and the terminals do not answer WebSocket pings. Server pings are
 # off; instead a connection is dropped only when the terminal has sent nothing at all for DEVICE_SILENCE_LIMIT.
@@ -330,7 +334,8 @@ class Command(BaseCommand):
 
     async def _poll_step(self, ws, sn, activity):
         """One pass of the command poller: maintenance if due, then send/run at most one queued command."""
-        await asyncio.sleep(COMMAND_POLL_INTERVAL_SECONDS)
+        bursting = self.__dict__.setdefault("_bursting", {})
+        await asyncio.sleep(COMMAND_BURST_INTERVAL_SECONDS if bursting.get(sn) else COMMAND_POLL_INTERVAL_SECONDS)
         now = asyncio.get_running_loop().time()
         if activity is not None:
             activity["beat"], activity["busy_since"] = now, None  # looping normally; a long job below marks itself busy
@@ -354,7 +359,10 @@ class Command(BaseCommand):
             await self._run_db(self._auto_sync_enrollments)
         next_command = await self._run_db(self._next_command_to_send, sn)
         if next_command is None:
+            # nothing to send right now: keep looking quickly only while something is still queued or in flight
+            bursting[sn] = await self._run_db(self._commands_waiting, sn)
             return
+        bursting[sn] = True
         command_id, wire_message = next_command
         if wire_message is None:
             self._mark_busy(activity)
@@ -373,6 +381,13 @@ class Command(BaseCommand):
         self.stdout.write(f"[{sn}] sending queued command: {wire_message}")
         await ws.send(json.dumps(wire_message))
         await self._run_db(self._mark_command_sent, command_id)
+
+    @staticmethod
+    def _commands_waiting(serial_number):
+        """True while this terminal has a command queued or in flight that should be followed up quickly. Background
+        jobs (clone relays, purges, listings) are left out: they may be held for a long time and must not keep the
+        poller spinning."""
+        return DeviceCommand.objects.filter(device__serial_number=serial_number, status__in=("pending", "sent")).exclude(command_type__in=DeviceCommand.BACKGROUND_TYPES).exists()
 
     @staticmethod
     def _previous_listing_size(serial_number):
