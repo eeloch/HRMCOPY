@@ -365,27 +365,27 @@ class ForcedPasswordChangeTests(TestCase):
         client = self.login("fpc-new", created.data["temporary_password"])
 
         self.assertTrue(client.get("/api/auth/me/").data["must_change_password"])
-        blocked = client.get("/api/leave/requests/")
+        blocked = client.get("/api/notifications/unread-count/")
         self.assertEqual(blocked.status_code, 403)
         self.assertEqual(blocked.json()["code"], "password_change_required")
 
         changed = client.post("/api/auth/change-password/", {"current_password": created.data["temporary_password"], "new_password": "My-Own-Secret-7310"}, format="json")
         self.assertEqual(changed.status_code, 200)
         self.assertFalse(client.get("/api/auth/me/").data["must_change_password"])
-        self.assertEqual(client.get("/api/leave/requests/").status_code, 200)
+        self.assertEqual(client.get("/api/notifications/unread-count/").status_code, 200)
 
     def test_an_admin_reset_requires_a_new_change(self):
         user = get_user_model().objects.create_user(username="fpc-reset", password="Old-Secret-8842")
         reset = self.admin_client.patch(f"/api/auth/users/{user.pk}/", {"reset_password": True}, format="json")
         self.assertEqual(reset.status_code, 200)
         client = self.login("fpc-reset", reset.data["temporary_password"])
-        self.assertEqual(client.get("/api/leave/requests/").status_code, 403)
+        self.assertEqual(client.get("/api/notifications/unread-count/").status_code, 403)
 
     def test_an_account_not_flagged_is_unaffected(self):
         get_user_model().objects.create_user(username="fpc-normal", password="Normal-Secret-3317")
         client = self.login("fpc-normal", "Normal-Secret-3317")
         self.assertFalse(client.get("/api/auth/me/").data["must_change_password"])
-        self.assertEqual(client.get("/api/leave/requests/").status_code, 200)
+        self.assertEqual(client.get("/api/notifications/unread-count/").status_code, 200)
 
     def test_signing_out_is_still_possible_while_the_change_is_pending(self):
         user = get_user_model().objects.create_user(username="fpc-logout", password="Logout-Secret-6609")

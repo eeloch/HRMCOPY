@@ -120,6 +120,9 @@ class ContributionRulesTests(TestCase):
 class ContractWithoutFundNeedsAttentionTests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="dir-viewer", password="pw")
+        from django.contrib.auth.models import Permission
+
+        self.user.user_permissions.add(Permission.objects.get(codename="view_employee"))
         self.client = APIClient()
         self.client.force_authenticate(self.user)
         base = dict(status="active", basic_salary=Decimal("90000"), bank_name="GTB", account_number="0123456789", bank_code="058", biometric_user_id="B")

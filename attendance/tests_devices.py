@@ -38,8 +38,17 @@ class BiometricDeviceAPITests(TestCase):
             purpose="attendance",
         )
 
-    def test_any_authenticated_user_can_list_devices(self):
+    def overview_user(self):
+        user = get_user_model().objects.create_user(username="device-overview", password="test-password")
+        user.user_permissions.add(Permission.objects.get(codename="view_biometrics_overview"))
+        return user
+
+    def test_a_user_with_no_attendance_access_cannot_list_devices(self):
         self.client.force_authenticate(self.viewer)
+        self.assertEqual(self.client.get("/api/attendance/devices/").status_code, 403)
+
+    def test_a_user_with_biometrics_access_can_list_devices(self):
+        self.client.force_authenticate(self.overview_user())
         response = self.client.get("/api/attendance/devices/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["count"], 1)
@@ -50,7 +59,7 @@ class BiometricDeviceAPITests(TestCase):
             name="Canteen", serial_number="MEAL0001", location="Canteen",
             device_type="factory", purpose="meal_ticket",
         )
-        self.client.force_authenticate(self.viewer)
+        self.client.force_authenticate(self.overview_user())
         response = self.client.get("/api/attendance/devices/?purpose=meal_ticket")
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["serial_number"], "MEAL0001")
@@ -548,9 +557,11 @@ class DeviceCommandAPITests(TestCase):
         stuck.refresh_from_db()
         self.assertEqual(stuck.status, "failed")
 
-    def test_any_authenticated_user_can_view_command_history(self):
+    def test_command_history_needs_attendance_access(self):
         DeviceCommand.objects.create(device=self.device, command_type="refresh_enrolled_ids", payload={}, status="acked")
         self.client.force_authenticate(self.viewer)
+        self.assertEqual(self.client.get(self.url()).status_code, 403)
+        self.client.force_authenticate(self.manager)
         response = self.client.get(self.url())
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.data["results"]), 1)

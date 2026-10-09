@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 
+from core.access import can_see_staff_directory
 from django.contrib.auth import get_user_model
 from django.db.models import Count, Q
 from django.utils import timezone
@@ -193,6 +194,19 @@ class EmployeeListCreateAPIView(APIView):
 
         if gender:
             employees = employees.filter(gender=gender)
+
+        if not can_see_staff_directory(request.user):
+            # Someone who only needs to choose an employee for their own work (issuing PPE, raising leave...) gets a short
+            # name-and-number lookup of active staff, not the directory (shift plans, biometric ids, contact details).
+            people = employees.filter(status="active")
+            return Response({
+                "count": people.count(),
+                "results": [
+                    {"id": e.pk, "employee_id": e.employee_id, "full_name": e.full_name, "department": e.department_id,
+                     "department_name": e.department.name if e.department_id else None, "status": e.status}
+                    for e in people
+                ],
+            })
 
         today = timezone.localdate()
         month_start = today.replace(day=1)

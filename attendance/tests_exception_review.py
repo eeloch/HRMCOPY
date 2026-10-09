@@ -95,7 +95,7 @@ class ExceptionReviewTests(TestCase):
         case = self.case("ada", date(2026, 9, 24), "late", 5)
         client = APIClient()
         client.force_authenticate(self.viewer)
-        self.assertEqual(client.get("/api/attendance/exceptions/queue/").status_code, 200)  # looking is open, as before
+        self.assertEqual(client.get("/api/attendance/exceptions/queue/").status_code, 403)  # looking needs attendance access too
         self.assertEqual(client.post("/api/attendance/exceptions/bulk-decision/", {"ids": [case.pk], "decision": "approved"}, format="json").status_code, 403)
         self.assertEqual(client.get("/api/attendance/exceptions/queue/ids/").status_code, 403)
         self.assertEqual(client.get("/api/attendance/exceptions/rules/").status_code, 403)

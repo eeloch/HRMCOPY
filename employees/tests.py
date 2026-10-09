@@ -377,6 +377,7 @@ class EmployeeImportPreviewAPIViewTests(APITestCase):
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="previewer", password="test-password")
+        self.user.user_permissions.add(Permission.objects.get(codename="add_employee"))
         self.client.force_authenticate(user=self.user)
         self.department = Department.objects.create(name="Operations")
         Position.objects.create(department=self.department, name="Operator")
@@ -507,6 +508,7 @@ class EmployeeCurrentShiftTests(APITestCase):
 
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="shift-viewer", password="test-password")
+        self.user.user_permissions.add(Permission.objects.get(codename="view_employee"))
         self.client.force_authenticate(user=self.user)
         self.employee = Employee.objects.create(employee_id="EMP-200", first_name="Ada", last_name="Obi")
 
@@ -932,6 +934,7 @@ class EmployeeDirectorySummaryAndFiltersTests(APITestCase):
         from attendance.services.shift_plans import assign_plan
 
         self.user = get_user_model().objects.create_user(username="directory-viewer", password="test-password")
+        self.user.user_permissions.add(Permission.objects.get(codename="view_employee"))
         self.client.force_authenticate(self.user)
         self.department = Department.objects.create(name="Extrusion")
 
@@ -1168,6 +1171,7 @@ class PersonalDetailsPrivacyTests(APITestCase):
             date_of_birth="1990-01-02", department=dept, status="active", biometric_user_id="1234",
         )
         self.reader = User.objects.create_user(username="reader", password="x")
+        self.reader.user_permissions.add(Permission.objects.get(codename="add_employee"))  # works with the staff list, may not read personal details
         self.hr = User.objects.create_user(username="hr", password="x")
         self.hr.user_permissions.add(Permission.objects.get(codename="view_employee", content_type__app_label="employees"))
 

@@ -514,6 +514,7 @@ class WeekShiftsLineTests(PlanTestCase):
         from .services.shift_plans import monday_of
 
         self.user = get_user_model().objects.create_user(username="weeks-viewer", password="pw")
+        self.user.user_permissions.add(Permission.objects.get(codename="view_employee"))
         self.client = APIClient()
         self.client.force_authenticate(self.user)
         self.department = Department.objects.create(name="Weeks Dept")
@@ -693,6 +694,7 @@ class GroupLettersMeanMorningAndEveningTests(PlanTestCase):
         self.person = Employee.objects.create(employee_id="LET-1", first_name="Let", last_name="Ter", department=self.dept)
         self.client = APIClient()
         manager = get_user_model().objects.create_user(username="letters-manager", password="pw")
+        manager.user_permissions.add(Permission.objects.get(codename="view_employee"))
         manager.user_permissions.add(Permission.objects.get(codename="manage_shifts"))
         self.client.force_authenticate(manager)
 

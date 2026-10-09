@@ -3,6 +3,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -234,6 +235,7 @@ class WeeklyReportPptxTests(TestCase):
 class WeeklyReportAPITests(TestCase):
     def setUp(self):
         self.user = get_user_model().objects.create_user(username="report-viewer", password="pw")
+        self.user.user_permissions.add(Permission.objects.get(codename="view_payroll"))  # reports are for people who manage the business
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 

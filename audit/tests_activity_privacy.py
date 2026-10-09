@@ -14,6 +14,7 @@ class ActivityFeedFinancialPrivacyTests(APITestCase):
         AuditEvent.objects.create(event_type="bonus.approved", module="bonuses", title="Bonus", description="N 100,000 approved")
         AuditEvent.objects.create(event_type="attendance.exception_waived", module="attendance", title="Waived", description="late waived")
         self.reader = User.objects.create_user(username="reader", password="x")
+        self.reader.user_permissions.add(Permission.objects.get(codename="review_attendanceexception"))  # a login with some attendance work, nothing financial
         self.payroll = User.objects.create_user(username="payroller", password="x")
         self.payroll.user_permissions.add(Permission.objects.get(codename="view_payroll", content_type__app_label="payroll"))
         self.boss = User.objects.create_superuser(username="boss", password="x", email="b@x.co")

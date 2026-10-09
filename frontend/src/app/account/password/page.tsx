@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import Sidebar from "@/components/Sidebar";
 import { AppCard, PageHeader } from "@/components/ui";
 import { apiFetch, getAccessToken, getCurrentUser } from "@/lib/api";
+import { forgetUser, homeFor } from "@/lib/access";
 
 const fieldClass = "w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500";
 
@@ -50,7 +51,7 @@ export default function ChangePasswordPage() {
       setNewPassword("");
       setConfirmPassword("");
       setDone(true);
-      if (mustChange) window.setTimeout(() => router.push("/dashboard"), 1500);
+      if (mustChange) { forgetUser(); window.setTimeout(() => void getCurrentUser().then((user) => router.push(homeFor(user))).catch(() => router.push("/dashboard")), 1500); }
     } catch {
       setError("Unable to change your password. Check your connection and try again.");
     } finally {

@@ -13,6 +13,7 @@ import {
   getCurrentUser,
   login,
 } from "@/lib/api";
+import { forgetUser, homeFor } from "@/lib/access";
 
 
 export default function LoginPage() {
@@ -54,12 +55,15 @@ export default function LoginPage() {
         password
       );
 
+      forgetUser();
       const user = await getCurrentUser().catch(() => null);
 
       router.push(
         user?.must_change_password
           ? "/account/password"
-          : "/dashboard"
+          : user
+            ? homeFor(user)
+            : "/dashboard"
       );
 
     } catch (err) {

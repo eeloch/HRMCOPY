@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import Link from "next/link";
 
@@ -10,8 +10,11 @@ import {
 } from "next/navigation";
 
 import {
+  getCurrentUser,
   logout as logoutRequest,
+  type CurrentUser,
 } from "@/lib/api";
+import { canOpen, forgetUser, homeFor, loadUser } from "@/lib/access";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
 
 
@@ -109,6 +112,28 @@ export default function Sidebar() {
   const router =
     useRouter();
 
+  const [user, setUser] = useState<CurrentUser | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    loadUser(getCurrentUser).then((loaded) => {
+      if (!alive) return;
+      setUser(loaded);
+      // someone who types or follows a link to a page they may not open goes to their own first page instead
+      if (!canOpen(loaded, pathname)) router.replace(homeFor(loaded));
+    }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [pathname, router]);
+
+  // until the user is known show only what everyone may see, so a tab is never shown and then taken away
+  const visibleMenu: MenuItem[] = [];
+  for (const item of menu) {
+    const children = item.children?.filter((child) => user !== null && canOpen(user, child.href));
+    const own = item.href !== undefined && user !== null && canOpen(user, item.href);
+    if (!own && !(children && children.length)) continue;
+    visibleMenu.push({ label: item.label, href: own ? item.href : undefined, children: item.children ? children : undefined });
+  }
+
   const [expanded, setExpanded] = useState<Set<string>>(() => {
     const initial = new Set<string>();
     for (const item of menu) {
@@ -134,6 +159,7 @@ export default function Sidebar() {
 
   async function logout() {
     await logoutRequest();
+    forgetUser();
 
     router.push(
       "/login"
@@ -163,7 +189,7 @@ export default function Sidebar() {
 
       <nav className="flex-1 min-h-0 overflow-y-auto p-4 space-y-1">
 
-        {menu.map((item) => {
+        {visibleMenu.map((item) => {
 
           const active =
             item.href !== undefined && pathname === item.href;

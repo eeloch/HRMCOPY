@@ -152,6 +152,7 @@ class BiometricEventFeedTests(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.user = get_user_model().objects.create_user("biometric-feed-user")
+        self.user.user_permissions.add(Permission.objects.get(codename="view_biometrics_overview"))
         self.employee = Employee.objects.create(employee_id="FEED-001", first_name="Feed", last_name="Employee")
         self.device = BiometricDevice.objects.create(name="Feed Device", serial_number="FEED-DEVICE", location="Factory", device_type="factory")
         self.old = AttendanceEvent.objects.create(employee=self.employee, device=self.device, timestamp=timezone.make_aware(datetime(2026, 9, 3, 9)), external_event_id="feed-old", raw_payload={"mode": 0, "image": "must-not-be-exposed"})

@@ -269,6 +269,8 @@ class PPEWorkflowTests(TestCase):
         PPEDeductionService.issue(employee=other, ppe_type=self.boots, quantity=1, issue_date=date(2026, 9, 1), unit_cost=Decimal("1000.00"), notes="", actor=self.actor)
         from ppe.views import PPEIssueListCreateAPIView
 
+        self.actor.user_permissions.add(Permission.objects.get(codename="record_ppe_issue"))  # the store keeper: may see issues, not decide them
+        self.actor = get_user_model().objects.get(pk=self.actor.pk)
         request = APIRequestFactory().get(f"/api/ppe/issues/?employee={self.employee.pk}")
         force_authenticate(request, user=self.actor)
         response = PPEIssueListCreateAPIView.as_view()(request)
