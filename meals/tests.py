@@ -3102,3 +3102,101 @@ class MealChargebackTests(TestCase):
         self.post()
         rows = self.client.get("/api/meals/chargebacks/?search=000950").json()["results"]
         self.assertEqual([(r["employee_number"], r["quantity"], r["status"]) for r in rows], [("000950", 1, "pending")])
+
+
+class MealShiftReportTests(TestCase):
+    """The morning-after report for a night's meals: who was rostered, who clocked in, what was issued, what needs a look."""
+
+    DAY = date(2026, 10, 4)  # a Sunday
+
+    def setUp(self):
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=date(2026, 9, 1))
+        self.device = MealDevice.objects.create(name="Canteen", serial_number="MEALRPT", active=True)
+        self.night = Shift.objects.create(name="Report Night", start_time="19:00", end_time="07:00", is_overnight=True)
+        self.day_shift = Shift.objects.create(name="Report Day", start_time="07:00", end_time="19:00")
+        self.people = {}
+        for key, number in (("collected", "000601"), ("skipped", "000602"), ("absent", "000603"), ("no_clock", "000604"), ("extra", "000605"), ("none", "000606"), ("withheld", "000607"), ("waiting", "000608")):
+            self.people[key] = self.add_person(number, key)
+        self.entitle("collected", 2); self.entitle("skipped", 2); self.entitle("absent", 2); self.entitle("no_clock", 2); self.entitle("extra", 1); self.entitle("withheld", 2); self.entitle("waiting", 2)
+        for key in ("collected", "skipped"):
+            self.attend(key, "present")
+        self.attend("extra", "present"); self.attend("absent", "absent"); self.attend("withheld", "present")
+        MealAbsencePenalty.objects.create(employee=self.people["withheld"], penalty_type="three_monthly", source_absence_dates=["2026-10-01"], tickets_to_reduce_per_work_day=2,
+                                          work_days_to_apply=1, target_work_dates=[self.DAY.isoformat()], status="active")
+        self.ticket("collected", 19, 5, 1); self.ticket("collected", 19, 6, 2)
+        self.ticket("no_clock", 19, 20, 1)  # ate, never clocked in
+        self.ticket("extra", 19, 10, 1); self.ticket("extra", 19, 12, 2)
+        self.user = get_user_model().objects.create_user(username="shift-report-viewer", password="pw")
+        self.user.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def add_person(self, number, key, shift=None):
+        employee = Employee.objects.create(employee_id=number, first_name=key.title(), last_name="Night", status="active")
+        EmployeeRosterDay.objects.create(employee=employee, date=self.DAY, status=RosterDayStatus.WORK, shift=shift or self.night)
+        return employee
+
+    def entitle(self, key, tickets):
+        EmployeeMealEntitlement.objects.create(employee=self.people[key], tickets_per_work_day=tickets, effective_from=date(2026, 9, 1), reason="t")
+
+    def attend(self, key, status):
+        from datetime import datetime as dt
+
+        start = timezone.make_aware(dt(2026, 10, 4, 19, 0))
+        DailyAttendance.objects.create(employee=self.people[key], date=self.DAY, shift=self.night, status=status, actual_clock_in=start if status != "absent" else None)
+
+    def ticket(self, key, hour, minute, number, employee=None):
+        from datetime import datetime as dt
+
+        employee = employee or self.people[key]
+        event = MealEvent.objects.create(employee=employee, device=self.device, timestamp=timezone.make_aware(dt(2026, 10, 4, hour, minute)), external_event_id=f"r-{employee.employee_id}-{number}", source_system="device")
+        MealCollection.objects.create(event=event, employee=employee, work_date=self.DAY, sequence_number=number, entitlement_snapshot=1, rate_snapshot=Decimal("700.00"), status="within_entitlement")
+
+    def report(self, **params):
+        query = "&".join(f"{k}={v}" for k, v in {"date": self.DAY.isoformat(), **params}.items())
+        return self.client.get(f"/api/meals/shift-report/?{query}").json()
+
+    def results(self, data):
+        return {row["employee_number"]: row["result"] for row in data["rows"]}
+
+    def test_each_person_gets_the_right_result(self):
+        self.assertEqual(self.results(self.report()), {
+            "000601": "collected", "000602": "did_not_collect", "000603": "absent", "000604": "no_attendance",
+            "000605": "extra", "000606": "no_entitlement", "000607": "withheld", "000608": "no_clock_in_yet",
+        })
+
+    def test_the_totals_add_up(self):
+        totals = self.report()["totals"]
+        self.assertEqual((totals["rostered"], totals["clocked_in"], totals["collected"], totals["did_not_collect"]), (8, 4, 3, 1))
+        self.assertEqual(totals["tickets_issued"], 5)  # 2 + 1 + 2
+        self.assertEqual(totals["needs_a_look"], 3)  # the extra, the ticket without a clock-in, the missing entitlement
+        self.assertEqual(float(totals["value_at_rate"]), 3500.0)
+
+    def test_rows_show_when_the_tickets_were_issued(self):
+        row = next(r for r in self.report()["rows"] if r["employee_number"] == "000601")
+        self.assertEqual((row["tickets"], row["ticket_times"], row["entitled"], row["clock_in"]), (2, ["19:05", "19:06"], 2, "19:00"))
+
+    def test_tickets_for_people_not_on_the_night_shift_are_listed_separately(self):
+        stranger = Employee.objects.create(employee_id="000699", first_name="Not", last_name="Rostered", status="active")
+        self.ticket("x", 19, 30, 1, employee=stranger)
+        data = self.report()
+        self.assertEqual([(o["employee_number"], o["tickets"]) for o in data["others"]], [("000699", 1)])
+        self.assertEqual(data["totals"]["tickets_issued"], 6)
+        self.assertEqual(data["totals"]["tickets_for_others"], 1)
+
+    def test_a_day_workers_lunch_ticket_is_not_part_of_the_night_report(self):
+        day_worker = self.add_person("000700", "daily", shift=self.day_shift)
+        self.ticket("x", 12, 0, 1, employee=day_worker)
+        data = self.report()
+        self.assertNotIn("000700", self.results(data))
+        self.assertEqual(data["others"], [])
+        self.assertIn("000700", self.results(self.report(scope="all")))  # but it is there when asked for every shift
+
+    def test_a_voided_ticket_is_not_counted(self):
+        MealCollection.objects.filter(employee=self.people["collected"], sequence_number=2).update(voided_at=timezone.now())
+        row = next(r for r in self.report()["rows"] if r["employee_number"] == "000601")
+        self.assertEqual(row["tickets"], 1)
+
+    def test_it_needs_a_meal_permission(self):
+        self.client.force_authenticate(get_user_model().objects.create_user(username="no-meals-here", password="pw"))
+        self.assertEqual(self.client.get("/api/meals/shift-report/").status_code, 403)
