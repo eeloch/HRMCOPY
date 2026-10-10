@@ -17,20 +17,28 @@ from notifications.services import NotificationService
 
 OFFLINE_AFTER = timedelta(minutes=3)
 ALERT_FROM_HOUR, ALERT_UNTIL_HOUR = 10, 21  # local time: terminals work 10:00-21:00; outside that, being off is normal
+
+
+def in_alert_window(local):
+    """The daytime hours, plus Sunday night (19:00 Sunday to 07:00 Monday): nobody from HR is there then and the night
+    starters collect their meals on the terminals alone, so a terminal that drops out must be noticed."""
+    if ALERT_FROM_HOUR <= local.hour < ALERT_UNTIL_HOUR:
+        return True
+    return (local.weekday() == 6 and local.hour >= 19) or (local.weekday() == 0 and local.hour < 7)
 OFFLINE_EVENT = "meals.terminal_offline"
 BACK_EVENT = "meals.terminal_back_online"
 
 
 def check(now=None):
     now = now or timezone.now()
-    local_hour = timezone.localtime(now).hour
+    watching = in_alert_window(timezone.localtime(now))
     recipients = list(get_user_model().objects.filter(is_superuser=True, is_active=True))
     sent = []
     for device in BiometricDevice.objects.filter(purpose="meal_ticket"):
         last_contact = device.last_sync_at
         down = not device.is_online and (last_contact is None or now - last_contact > OFFLINE_AFTER)
         open_alert = Notification.objects.filter(event_type=OFFLINE_EVENT, metadata__serial=device.serial_number, metadata__resolved=False).exists()
-        if down and ALERT_FROM_HOUR <= local_hour < ALERT_UNTIL_HOUR and not open_alert:
+        if down and watching and not open_alert:
             since = timezone.localtime(last_contact).strftime("%H:%M on %d %b") if last_contact else "an unknown time"
             for user in recipients:
                 NotificationService.create(

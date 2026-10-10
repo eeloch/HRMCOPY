@@ -101,6 +101,12 @@ class BiometricIngestionService:
                 return IngestionResult("duplicate", "Event already imported.", existing.pk)
             raise
 
+        try:  # a clock-in may be what opens this person's meals tonight; never let that hold up saving the punch
+            from meals.gating import refresh_for_clock_in
+
+            refresh_for_clock_in(employee)
+        except Exception:
+            pass
         return IngestionResult("created", attendance_event_id=event.pk)
 
     @classmethod

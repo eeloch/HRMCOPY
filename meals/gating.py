@@ -10,11 +10,13 @@ Meal Ticket 2 (2026-09-25): it obeys the switch-off, but logs the refused verifi
 "Access denied no LOG" setting is off). The bridge ignores non-zero events, so a refusal is never counted as a ticket.
 """
 
+from datetime import datetime, timedelta
+
 from django.conf import settings
 from django.utils import timezone
 
 from attendance.integrations.aiface_protocol import IDENTITY_SYSTEM
-from attendance.models import BiometricDevice, DeviceCommand, RosterDayStatus
+from attendance.models import AttendanceEvent, BiometricDevice, DeviceCommand, RosterDayStatus
 from employees.models import BiometricIdentity, Employee
 
 from .models import MealCollection, MealTerminalUserState
@@ -41,6 +43,30 @@ def gated_employees(only=None):
     return employees
 
 
+CLOCK_IN_EARLIEST = timedelta(hours=3)  # a punch up to this long before the shift starts counts as arriving for it
+
+
+def requires_clock_in(work_date, roster):
+    """Unsupervised night meals: on the weekdays in MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS an overnight shift's meals open
+    only after the person has clocked in, so nobody who is not at work can collect a ticket with no one watching."""
+    weekdays = getattr(settings, "MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS", [])
+    return bool(weekdays) and roster is not None and roster.shift_id is not None and roster.shift.is_overnight and work_date.weekday() in weekdays
+
+
+def has_clocked_in(employee, work_date, shift):
+    start = timezone.make_aware(datetime.combine(work_date, shift.start_time)) - CLOCK_IN_EARLIEST
+    return AttendanceEvent.objects.filter(employee=employee, timestamp__gte=start).exists()
+
+
+def refresh_for_clock_in(employee):
+    """Called when someone's attendance punch is saved: if their meals wait for a clock-in, switch them on right away."""
+    if not getattr(settings, "MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS", []):
+        return
+    work_date, roster = MealService.resolve_work_day(employee, timezone.now())
+    if requires_clock_in(work_date, roster):
+        refresh(employee.pk)
+
+
 def tickets_left_today(employee, now=None):
     """Tickets this person may still collect today (0 on a rest day, with no allocation, or once used up)."""
     now = now or timezone.now()
@@ -50,6 +76,8 @@ def tickets_left_today(employee, now=None):
     entitlement = 0
     if roster and roster.status == RosterDayStatus.WORK:
         entitlement = max(MealService.approved_entitlement(employee, work_date) - MealService.absence_penalty_reduction(employee, work_date), 0)
+        if entitlement and requires_clock_in(work_date, roster) and not has_clocked_in(employee, work_date, roster.shift):
+            entitlement = 0  # not at work yet: the terminal stays switched off for them until they clock in
     used = MealCollection.objects.filter(employee=employee, work_date=work_date, voided_at__isnull=True).count()
     # What is left of the entitlement, plus extras a supervisor authorised that nobody has collected yet
     # (that works on a rest day too). A used authorisation adds nothing more.

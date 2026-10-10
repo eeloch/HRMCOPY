@@ -334,3 +334,7 @@ ATTENDANCE_GO_LIVE_DATE = os.environ.get("DJANGO_ATTENDANCE_GO_LIVE_DATE", "2026
 ATTENDANCE_LATE_ALLOWANCE_MINUTES = int(os.environ.get("DJANGO_ATTENDANCE_LATE_ALLOWANCE_MINUTES", "5"))
 ATTENDANCE_LONG_LATE_MINUTES = int(os.environ.get("DJANGO_ATTENDANCE_LONG_LATE_MINUTES", "60"))
 
+# Night meals nobody supervises (Sunday night, when no one from HR is on site): on these weekdays a person on an overnight
+# shift is switched on at the meal terminal only once they have clocked in. 6 = Sunday. Empty = off. (env: comma separated)
+MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS = [int(v) for v in os.environ.get("DJANGO_MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS", "6").split(",") if v.strip()]
+

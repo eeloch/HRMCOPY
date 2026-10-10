@@ -3200,3 +3200,105 @@ class MealShiftReportTests(TestCase):
     def test_it_needs_a_meal_permission(self):
         self.client.force_authenticate(get_user_model().objects.create_user(username="no-meals-here", password="pw"))
         self.assertEqual(self.client.get("/api/meals/shift-report/").status_code, 403)
+
+
+class SundayNightMealsOpenAfterClockInTests(TestCase):
+    """Unsupervised night meals: on the configured weekdays an overnight shift's meals open only after a clock-in."""
+
+    def setUp(self):
+        from django.test import override_settings
+        from meals import gating
+
+        self.gating = gating
+        self.today = timezone.localdate()
+        self.override = override_settings(MEAL_GATING_EMPLOYEE_IDS=["*"], MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS=[self.today.weekday()])
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.night = Shift.objects.create(name="Clock-in Night", start_time="19:00", end_time="07:00", is_overnight=True)
+        self.day_shift = Shift.objects.create(name="Clock-in Day", start_time="07:00", end_time="19:00")
+        self.worker = self.person("CI-1", self.night)
+        self.evening = timezone.make_aware(datetime.combine(self.today, datetime.min.time().replace(hour=20)))  # 20:00 on the night
+
+    def person(self, number, shift):
+        employee = Employee.objects.create(employee_id=number, first_name="Night", last_name=number, status="active")
+        EmployeeMealEntitlement.objects.create(employee=employee, tickets_per_work_day=2, effective_from=self.today - timedelta(days=30), reason="t")
+        EmployeeRosterDay.objects.create(employee=employee, date=self.today, status=RosterDayStatus.WORK, shift=shift)
+        return employee
+
+    def punch(self, employee, hour, minute):
+        from attendance.models import AttendanceEvent
+
+        AttendanceEvent.objects.create(employee=employee, timestamp=timezone.make_aware(datetime.combine(self.today, datetime.min.time().replace(hour=hour, minute=minute))), external_event_id=f"ci-{employee.employee_id}-{hour}{minute}")
+
+    def left(self, employee):
+        return self.gating.tickets_left_today(employee, self.evening)
+
+    def test_before_clocking_in_there_are_no_meals_and_after_there_are(self):
+        self.assertEqual(self.left(self.worker), 0)
+        self.punch(self.worker, 19, 30)
+        self.assertEqual(self.left(self.worker), 2)
+
+    def test_an_earlier_shifts_punch_does_not_count_as_clocking_in(self):
+        self.punch(self.worker, 7, 5)  # clocking out of the previous shift this morning
+        self.assertEqual(self.left(self.worker), 0)
+
+    def test_arriving_a_little_early_counts(self):
+        self.punch(self.worker, 17, 0)
+        self.assertEqual(self.left(self.worker), 2)
+
+    def test_a_day_shift_is_never_held_back(self):
+        worker = self.person("CI-2", self.day_shift)
+        self.assertEqual(self.left(worker), 2)
+
+    def test_other_weekdays_and_the_setting_off_are_unaffected(self):
+        from django.test import override_settings
+
+        with override_settings(MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS=[(self.today.weekday() + 1) % 7]):
+            self.assertEqual(self.left(self.worker), 2)
+        with override_settings(MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS=[]):
+            self.assertEqual(self.left(self.worker), 2)
+
+    def test_a_saved_punch_asks_for_their_meal_switch_to_be_rechecked(self):
+        from unittest import mock
+
+        with mock.patch.object(self.gating, "refresh") as refresh, mock.patch.object(self.gating.timezone, "now", return_value=self.evening):
+            self.gating.refresh_for_clock_in(self.worker)
+        refresh.assert_called_once_with(self.worker.pk)
+
+    def test_the_recheck_is_skipped_for_day_staff_and_when_the_rule_is_off(self):
+        from unittest import mock
+
+        from django.test import override_settings
+
+        day_worker = self.person("CI-3", self.day_shift)
+        with mock.patch.object(self.gating, "refresh") as refresh, mock.patch.object(self.gating.timezone, "now", return_value=self.evening):
+            self.gating.refresh_for_clock_in(day_worker)
+            with override_settings(MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS=[]):
+                self.gating.refresh_for_clock_in(self.worker)
+        refresh.assert_not_called()
+
+
+class SundayNightTerminalAlertTests(TestCase):
+    def setUp(self):
+        from meals.management.commands.check_meal_terminals import check
+
+        self.check = check
+        get_user_model().objects.create_superuser(username="sunday-alert-admin", email="s@example.com", password="pw")
+        self.device = BiometricDevice.objects.create(name="Sunday Meal Terminal", serial_number="SUN001", location="Canteen", device_type="face", purpose="meal_ticket")
+
+    def test_a_terminal_that_drops_out_on_sunday_night_is_noticed(self):
+        sunday = timezone.make_aware(datetime(2026, 10, 11, 23, 30))  # Sunday
+        BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=sunday - timedelta(minutes=20))
+        self.assertEqual(self.check(sunday), ["offline: Sunday Meal Terminal"])
+
+    def test_early_monday_morning_is_still_part_of_sunday_night(self):
+        monday = timezone.make_aware(datetime(2026, 10, 12, 3, 0))  # Monday
+        BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=monday - timedelta(minutes=20))
+        self.assertEqual(self.check(monday), ["offline: Sunday Meal Terminal"])
+
+    def test_other_nights_are_unchanged(self):
+        tuesday = timezone.make_aware(datetime(2026, 10, 13, 23, 30))
+        BiometricDevice.objects.filter(pk=self.device.pk).update(is_online=False, last_sync_at=tuesday - timedelta(minutes=20))
+        self.assertEqual(self.check(tuesday), [])
+        saturday = timezone.make_aware(datetime(2026, 10, 10, 23, 30))
+        self.assertEqual(self.check(saturday), [])
