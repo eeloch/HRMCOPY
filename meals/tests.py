@@ -3153,7 +3153,7 @@ class MealShiftReportTests(TestCase):
         MealCollection.objects.create(event=event, employee=employee, work_date=self.DAY, sequence_number=number, entitlement_snapshot=1, rate_snapshot=Decimal("700.00"), status="within_entitlement")
 
     def report(self, **params):
-        query = "&".join(f"{k}={v}" for k, v in {"date": self.DAY.isoformat(), **params}.items())
+        query = "&".join(f"{k}={v}" for k, v in {"date": self.DAY.isoformat(), "scope": "night", **params}.items())
         return self.client.get(f"/api/meals/shift-report/?{query}").json()
 
     def results(self, data):
@@ -3302,3 +3302,98 @@ class SundayNightTerminalAlertTests(TestCase):
         self.assertEqual(self.check(tuesday), [])
         saturday = timezone.make_aware(datetime(2026, 10, 10, 23, 30))
         self.assertEqual(self.check(saturday), [])
+
+
+class AbsentButCollectedTests(TestCase):
+    """Someone who was absent but collected a ticket: raised the next day, then charged back or let go."""
+
+    DAY = date(2026, 10, 7)
+
+    def setUp(self):
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=date(2026, 9, 1))
+        self.device = MealDevice.objects.create(name="Canteen", serial_number="MEALABS", active=True)
+        self.shift = Shift.objects.create(name="Absent Day", start_time="07:00", end_time="19:00")
+        self.person = Employee.objects.create(employee_id="000801", first_name="Was", last_name="Absent", status="active")
+        EmployeeMealEntitlement.objects.create(employee=self.person, tickets_per_work_day=2, effective_from=date(2026, 9, 1), reason="t")
+        EmployeeRosterDay.objects.create(employee=self.person, date=self.DAY, status=RosterDayStatus.WORK, shift=self.shift)
+        DailyAttendance.objects.create(employee=self.person, date=self.DAY, shift=self.shift, status="absent")
+        event = MealEvent.objects.create(employee=self.person, device=self.device, timestamp=timezone.make_aware(datetime(2026, 10, 7, 12, 30)), external_event_id="abs-1", source_system="device")
+        MealCollection.objects.create(event=event, employee=self.person, work_date=self.DAY, sequence_number=1, entitlement_snapshot=2, rate_snapshot=Decimal("700.00"), status="within_entitlement")
+        self.hr = get_user_model().objects.create_user(username="absent-ticket-hr", password="pw")
+        self.hr.user_permissions.add(Permission.objects.get(codename="charge_back_meal_tickets"), Permission.objects.get(codename="record_meal_operations"))
+        self.client = APIClient()
+        self.client.force_authenticate(self.hr)
+
+    def report(self):
+        return self.client.get(f"/api/meals/shift-report/?date={self.DAY.isoformat()}").json()
+
+    def row(self):
+        return self.report()["rows"][0]
+
+    def decide(self, decision, reason="Collected while absent", **extra):
+        return self.client.post("/api/meals/shift-report/decide/", {"employee_number": "000801", "work_date": self.DAY.isoformat(), "decision": decision, "reason": reason, **extra}, format="json")
+
+    def test_it_is_flagged_as_the_alarm_and_waits_for_a_decision(self):
+        data = self.report()
+        row = data["rows"][0]
+        self.assertEqual((row["result"], row["needs_decision"], row["needs_a_look"]), ("absent_collected", True, True))
+        self.assertEqual((data["totals"]["absent_collected"], data["totals"]["waiting_decision"]), (1, 1))
+        self.assertEqual([(w["employee_number"], w["work_date"], w["tickets"]) for w in data["waiting"]], [("000801", "2026-10-07", 1)])
+
+    def test_charging_it_back_records_the_charge_and_clears_the_alarm(self):
+        response = self.decide("charge")
+        self.assertEqual(response.status_code, 200, response.content)
+        from meals.models import MealChargeback
+
+        chargeback = MealChargeback.objects.get(employee=self.person)
+        self.assertEqual((chargeback.work_date, chargeback.quantity, chargeback.amount), (self.DAY, 1, Decimal("700.00")))
+        self.assertIn("absent", chargeback.reason)
+        data = self.report()
+        self.assertEqual((data["rows"][0]["needs_decision"], data["rows"][0]["review"]["decision"], data["totals"]["waiting_decision"]), (False, "charged", 0))
+        self.assertEqual(float(data["rows"][0]["review"]["amount"]), 700.0)
+
+    def test_letting_it_go_needs_a_reason_and_clears_the_alarm_without_a_charge(self):
+        self.assertEqual(self.decide("waive", reason="  ").status_code, 400)
+        self.assertEqual(self.decide("waive", reason="Was on an errand for the company").status_code, 200)
+        from meals.models import MealChargeback
+
+        self.assertFalse(MealChargeback.objects.exists())
+        data = self.report()
+        self.assertEqual((data["rows"][0]["review"]["decision"], data["totals"]["waiting_decision"]), ("waived", 0))
+
+    def test_a_case_can_only_be_decided_once(self):
+        self.decide("waive")
+        again = self.decide("charge")
+        self.assertEqual(again.status_code, 400)
+        self.assertIn("already been decided", again.json()["detail"])
+
+    def test_cancelling_the_charge_puts_it_back_on_the_alarm_list(self):
+        self.decide("charge")
+        from meals.models import MealChargeback
+        from meals.services import cancel_chargeback
+
+        cancel_chargeback(MealChargeback.objects.get(), self.hr, "Offence withdrawn")
+        data = self.report()
+        self.assertEqual((data["rows"][0]["needs_decision"], data["totals"]["waiting_decision"]), (True, 1))
+        self.assertEqual(self.decide("waive", reason="Agreed to let it go").status_code, 200)  # and it can be decided again
+
+    def test_someone_who_was_present_has_nothing_to_decide(self):
+        DailyAttendance.objects.filter(employee=self.person).update(status="present", actual_clock_in=timezone.make_aware(datetime(2026, 10, 7, 7, 0)))
+        self.assertEqual(self.decide("charge").status_code, 400)
+        self.assertEqual(self.report()["rows"][0]["result"], "collected")
+
+    def test_the_waiting_list_reaches_back_over_the_last_two_weeks(self):
+        old = timezone.localdate() - timedelta(days=5)
+        DailyAttendance.objects.create(employee=self.person, date=old, shift=self.shift, status="absent")
+        event = MealEvent.objects.create(employee=self.person, device=self.device, timestamp=timezone.make_aware(datetime.combine(old, datetime.min.time().replace(hour=12))), external_event_id="abs-old", source_system="device")
+        MealCollection.objects.create(event=event, employee=self.person, work_date=old, sequence_number=1, entitlement_snapshot=2, rate_snapshot=Decimal("700.00"), status="within_entitlement")
+        waiting = self.client.get(f"/api/meals/shift-report/?date={self.DAY.isoformat()}").json()["waiting"]
+        self.assertIn(old.isoformat(), [w["work_date"] for w in waiting])
+
+    def test_only_people_who_may_charge_back_can_decide(self):
+        viewer = get_user_model().objects.create_user(username="absent-ticket-viewer", password="pw")
+        viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        self.client.force_authenticate(viewer)
+        self.assertEqual(self.client.get(f"/api/meals/shift-report/?date={self.DAY.isoformat()}").status_code, 200)  # may look
+        self.assertEqual(self.decide("charge").status_code, 403)  # may not decide
+

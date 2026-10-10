@@ -20,6 +20,7 @@ from .models import (
     MealExcessException,
     MealTicketRate,
     MealAbsencePenalty,
+    MealAbsenceTicketReview,
     MealChargeback,
     MealVendorClaim,
     MealVendorPayment,
@@ -34,7 +35,7 @@ from .serializers import (
 )
 from decimal import Decimal
 
-from .services import MealService, allocate_vendor_claim, cancel_chargeback, charge_back_tickets, chargeable_tickets
+from .services import MealService, allocate_vendor_claim, cancel_chargeback, charge_back_tickets, chargeable_tickets, decide_absent_ticket
 from payroll.models import PayrollPeriod
 
 CARD_VERIFICATION_MODE = 3  # confirmed 2026-09-23: matches meals/bridge.py's CARD_VERIFICATION_MODE
@@ -525,26 +526,72 @@ class MealChargebackCancelAPIView(APIView):
 
 
 class MealShiftReportAPIView(APIView):
-    """The morning-after report for a shift's meals: everyone rostered, whether they clocked in, how many tickets they
-    were issued, and what needs a look. It replaces a hand-written list of who ate and who did not (Sunday night, when
-    nobody from HR is there): the terminals issue the tickets on their own and this shows what they issued.
-    scope=night is the overnight shifts only (the default), scope=all every shift that day."""
+    """The meal report for any day, day shifts and night shifts: everyone rostered, whether they clocked in, how many tickets
+    they were issued, and what needs a look. It replaces a hand-written list of who ate and who did not.
+
+    The alarm that matters is "absent but collected a ticket": an absence is only known after the shift is judged, so it shows
+    up the next day, and HR then charges the ticket back or lets it go (see MealShiftReportDecideAPIView). Undecided cases of the
+    last two weeks are always returned, so none is missed if nobody looked on the day.
+    scope=all (default) is every shift that day, scope=night the overnight shifts only."""
 
     permission_classes = [IsAuthenticated, CanViewMealOperations]
+    ALARM_WINDOW_DAYS = 14
 
     # the result of each person, and whether it needs someone to look
     RESULTS = {
         "collected": ("Collected", False), "did_not_collect": ("Did not collect", False), "absent": ("Absent - no meal", False),
         "withheld": ("Meals withheld (absence penalty)", False), "no_clock_in_yet": ("No clock-in yet", False),
-        "extra": ("Extra ticket", True), "no_attendance": ("Ticket without a clock-in", True), "no_entitlement": ("No meal entitlement entered", True),
+        "absent_collected": ("Absent but collected a ticket", True), "extra": ("Extra ticket", True),
+        "no_attendance": ("Ticket without a clock-in", True), "no_entitlement": ("No meal entitlement entered", True),
     }
 
+    @staticmethod
+    def review_info(review):
+        if review is None:
+            return None
+        chargeback = review.chargeback
+        if review.decision == "charged" and (chargeback is None or chargeback.status == "cancelled"):
+            return None  # the charge was cancelled: the case is open again
+        return {
+            "decision": review.decision, "reason": review.reason, "by": (review.decided_by.get_full_name() or review.decided_by.get_username()) if review.decided_by_id else "",
+            "at": review.decided_at, "amount": chargeback.amount if chargeback else None, "chargeback_status": chargeback.status if chargeback else None,
+        }
+
+    def pending_alarms(self, today):
+        """Absent-but-collected cases from the last two weeks that nobody has decided yet."""
+        from attendance.models import AttendanceException, DailyAttendance
+
+        start = today - timedelta(days=self.ALARM_WINDOW_DAYS)
+        absences = {(a.employee_id, a.date): a for a in DailyAttendance.objects.filter(status="absent", date__gte=start, date__lte=today).select_related("employee__department", "shift")}
+        if not absences:
+            return []
+        tickets = {}
+        for collection in MealCollection.objects.filter(voided_at__isnull=True, work_date__gte=start, work_date__lte=today, employee_id__in={e for e, _ in absences}).select_related("event"):
+            if (collection.employee_id, collection.work_date) in absences:
+                tickets.setdefault((collection.employee_id, collection.work_date), []).append(collection)
+        reviews = {(r.employee_id, r.work_date): r for r in MealAbsenceTicketReview.objects.filter(work_date__gte=start).select_related("chargeback", "decided_by")}
+        absence_status = {(x.attendance.employee_id, x.attendance.date): x.status for x in AttendanceException.objects.filter(exception_type="absence", attendance__in=[a.pk for a in absences.values()]).select_related("attendance")}
+        clock = lambda moment: timezone.localtime(moment).strftime("%H:%M")  # noqa: E731
+        alarms = []
+        for key, given in tickets.items():
+            if self.review_info(reviews.get(key)) is not None:
+                continue
+            attendance = absences[key]
+            employee = attendance.employee
+            alarms.append({
+                "employee_number": employee.employee_id, "employee_name": employee.full_name, "department": employee.department.name if employee.department_id else "",
+                "work_date": key[1].isoformat(), "shift": attendance.shift.name if attendance.shift_id else "", "tickets": len(given),
+                "ticket_times": sorted(clock(c.event.timestamp) for c in given), "absence_status": absence_status.get(key),
+            })
+        return sorted(alarms, key=lambda a: (a["work_date"], a["employee_name"]), reverse=True)
+
     def get(self, request):
-        from attendance.models import DailyAttendance, EmployeeRosterDay
+        from attendance.models import AttendanceException, DailyAttendance, EmployeeRosterDay
 
         params = request.query_params
-        work_date = _date_param(params.get("date")) or timezone.localdate() - timedelta(days=1)
-        scope = "all" if params.get("scope") == "all" else "night"
+        today = timezone.localdate()
+        work_date = _date_param(params.get("date")) or today - timedelta(days=1)
+        scope = "night" if params.get("scope") == "night" else "all"
 
         roster = EmployeeRosterDay.objects.filter(date=work_date, status="work", employee__status="active").select_related("employee__department", "shift")
         if scope == "night":
@@ -552,6 +599,8 @@ class MealShiftReportAPIView(APIView):
         roster = list(roster.order_by("employee__department__name", "employee__first_name", "employee__last_name"))
 
         attendance = {a.employee_id: a for a in DailyAttendance.objects.filter(date=work_date, employee_id__in=[r.employee_id for r in roster])}
+        absence_status = {x.attendance.employee_id: x.status for x in AttendanceException.objects.filter(exception_type="absence", attendance__date=work_date).select_related("attendance")}
+        reviews = {r.employee_id: r for r in MealAbsenceTicketReview.objects.filter(work_date=work_date).select_related("chargeback", "decided_by")}
         tickets = {}
         for collection in MealCollection.objects.filter(work_date=work_date, voided_at__isnull=True).select_related("event").order_by("event__timestamp"):
             tickets.setdefault(collection.employee_id, []).append(collection)
@@ -570,8 +619,11 @@ class MealShiftReportAPIView(APIView):
             entitled = max(base - reduction, 0)
             given = tickets.get(employee.pk, [])
             attended = attendance.get(employee.pk)
-            present = attended is not None and attended.status != "absent" and (attended.actual_clock_in or attended.actual_clock_out)
-            if len(given) > entitled and given:
+            absent = attended is not None and attended.status == "absent"
+            present = attended is not None and not absent and bool(attended.actual_clock_in or attended.actual_clock_out)
+            if given and absent:
+                result = "absent_collected"
+            elif given and len(given) > entitled:
                 result = "extra"
             elif given and not present:
                 result = "no_attendance"
@@ -583,16 +635,20 @@ class MealShiftReportAPIView(APIView):
                 result = "withheld"
             elif present:
                 result = "did_not_collect"
-            elif attended is not None and attended.status == "absent":
+            elif absent:
                 result = "absent"
             else:
                 result = "no_clock_in_yet"
             label, needs_look = self.RESULTS[result]
+            review = self.review_info(reviews.get(employee.pk)) if result == "absent_collected" else None
+            if review is not None:
+                needs_look = False  # decided
             rows.append({
                 "employee_number": employee.employee_id, "employee_name": employee.full_name, "department": employee.department.name if employee.department_id else "",
                 "shift": row.shift.name, "clock_in": clock(attended.actual_clock_in) if attended else None, "clock_out": clock(attended.actual_clock_out) if attended else None,
-                "attendance": attended.status if attended else "none", "entitled": entitled, "tickets": len(given), "ticket_times": [clock(c.event.timestamp) for c in given],
-                "result": result, "result_label": label, "needs_a_look": needs_look,
+                "attendance": attended.status if attended else "none", "absence_status": absence_status.get(employee.pk), "entitled": entitled, "tickets": len(given),
+                "ticket_times": [clock(c.event.timestamp) for c in given], "result": result, "result_label": label, "needs_a_look": needs_look,
+                "needs_decision": result == "absent_collected" and review is None, "review": review,
             })
 
         others = []
@@ -602,7 +658,7 @@ class MealShiftReportAPIView(APIView):
             employee = given[0].employee
             others.append({"employee_number": employee.employee_id, "employee_name": employee.full_name, "tickets": len(given), "ticket_times": [clock(c.event.timestamp) for c in given],
                            "shift": given[0].shift.name if given[0].shift_id else "Not rostered", "status": given[0].status})
-        if scope == "night":  # day-shift tickets are not this report's business; keep only tickets scanned during the night
+        if scope == "night":  # day-shift tickets are not a night report's business; keep only tickets scanned during the night
             others = [o for o in others if any(t >= "19:00" or t < "07:00" for t in o["ticket_times"])]
 
         total_tickets = sum(r["tickets"] for r in rows) + sum(o["tickets"] for o in others)
@@ -611,15 +667,36 @@ class MealShiftReportAPIView(APIView):
         except ValueError:
             rate = None
         counts = {key: sum(1 for r in rows if r["result"] == key) for key in self.RESULTS}
+        alarms = self.pending_alarms(today)
         return Response({
             "date": work_date.isoformat(), "scope": scope,
             "totals": {
                 "rostered": len(rows), "clocked_in": sum(1 for r in rows if r["clock_in"] or r["clock_out"]), "collected": sum(1 for r in rows if r["tickets"]),
-                "did_not_collect": counts["did_not_collect"], "needs_a_look": sum(1 for r in rows if r["needs_a_look"]) + len(others),
+                "did_not_collect": counts["did_not_collect"], "absent_collected": counts["absent_collected"], "waiting_decision": len(alarms),
+                "needs_a_look": sum(1 for r in rows if r["needs_a_look"]) + len(others),
                 "tickets_issued": total_tickets, "value_at_rate": (rate * total_tickets) if rate is not None else None, "tickets_for_others": sum(o["tickets"] for o in others),
             },
-            "counts": counts, "results": {key: label for key, (label, _look) in self.RESULTS.items()}, "rows": rows, "others": others,
+            "counts": counts, "results": {key: label for key, (label, _look) in self.RESULTS.items()}, "rows": rows, "others": others, "waiting": alarms,
         })
+
+
+class MealShiftReportDecideAPIView(APIView):
+    """Charge the ticket(s) back to someone who was absent but collected a meal, or let it go - with the reason."""
+
+    permission_classes = [IsAuthenticated, CanChargeBackMealTickets]
+
+    def post(self, request):
+        data = request.data
+        employee = Employee.objects.filter(employee_id=str(data.get("employee_number", "")).strip()).first()
+        work_date = _date_param(data.get("work_date"))
+        if employee is None or work_date is None:
+            return Response({"detail": "Choose the employee and the date."}, status=400)
+        try:
+            quantity = int(data["quantity"]) if data.get("quantity") else None
+            review = decide_absent_ticket(employee, work_date, data.get("decision", ""), data.get("reason", ""), request.user, quantity=quantity)
+        except (ValueError, TypeError) as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response({"decision": review.decision, "reason": review.reason, "chargeback": review.chargeback_id})
 
 
 class MealDeviceListAPIView(APIView):

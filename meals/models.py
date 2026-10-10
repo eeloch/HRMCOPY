@@ -297,6 +297,28 @@ class MealChargeback(models.Model):
         return f"{self.employee.employee_id} - {self.quantity} ticket(s) on {self.work_date} - N {self.amount:,.2f} ({self.get_status_display()})"
 
 
+class MealAbsenceTicketReview(models.Model):
+    """The decision on someone who was absent but collected a meal ticket that day. Absence is only known the next day, so
+    the meal report raises it then; HR either charges the ticket back to the employee or lets it go, with a reason."""
+
+    DECISIONS = [("charged", "Charged back"), ("waived", "Not charged")]
+
+    employee = models.ForeignKey(Employee, on_delete=models.PROTECT, related_name="meal_absence_reviews")
+    work_date = models.DateField()
+    decision = models.CharField(max_length=10, choices=DECISIONS)
+    reason = models.TextField()
+    chargeback = models.ForeignKey(MealChargeback, on_delete=models.SET_NULL, null=True, blank=True, related_name="absence_reviews")
+    decided_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="meal_absence_reviews")
+    decided_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-work_date", "-id"]
+        constraints = [models.UniqueConstraint(fields=["employee", "work_date"], name="one_absence_ticket_review_per_person_day")]
+
+    def __str__(self):
+        return f"{self.employee.employee_id} {self.work_date} - {self.get_decision_display()}"
+
+
 class MealTerminalUserState(models.Model):
     """Whether a person is currently switched on at a meal terminal, as last confirmed by the terminal.
     Only people covered by MEAL_GATING_EMPLOYEE_IDS ever appear here."""

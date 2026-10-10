@@ -1147,3 +1147,37 @@ def apply_chargebacks_for_period(period):
             applied += 1
     return applied
 
+
+@transaction.atomic
+def decide_absent_ticket(employee, work_date, decision, reason, actor, *, quantity=None):
+    """Settle 'absent but collected a ticket': charge the tickets back to the employee, or let it go. Either way it is
+    recorded with the reason and leaves the alarm list. A charge that was later cancelled puts the case back on it."""
+    from attendance.models import DailyAttendance
+    from .models import MealAbsenceTicketReview, MealChargebackStatus
+
+    reason = (reason or "").strip()
+    if decision not in ("charge", "waive"):
+        raise ValueError("Choose to charge the ticket back or not to charge it.")
+    if not reason:
+        raise ValueError("Say why (for example: collected a meal on a day they were absent).")
+    attendance = DailyAttendance.objects.filter(employee=employee, date=work_date, status="absent").first()
+    tickets = MealCollection.objects.filter(employee=employee, work_date=work_date, voided_at__isnull=True).count()
+    if attendance is None or not tickets:
+        raise ValueError("This person was not recorded absent with a ticket on that day, so there is nothing to decide.")
+    existing = MealAbsenceTicketReview.objects.select_for_update().filter(employee=employee, work_date=work_date).select_related("chargeback").first()
+    if existing is not None and not (existing.decision == "charged" and existing.chargeback is not None and existing.chargeback.status == MealChargebackStatus.CANCELLED):
+        raise ValueError("This case has already been decided.")
+    chargeback = None
+    if decision == "charge":
+        wanted = quantity or min(tickets, chargeable_tickets(employee, work_date)["chargeable"])
+        chargeback = charge_back_tickets(employee, work_date, wanted, f"Collected a meal ticket on a day they were absent. {reason}", actor)
+    review = existing or MealAbsenceTicketReview(employee=employee, work_date=work_date)
+    review.decision, review.reason, review.chargeback, review.decided_by = ("charged" if decision == "charge" else "waived"), reason, chargeback, actor
+    review.save()
+    AuditService.log(
+        event_type="meals.absent_ticket_decided", module="meals", employee=employee, actor=actor, object=review, severity=AuditSeverity.WARNING,
+        title="Absent-but-collected ticket decided", description=f"{employee.full_name} was absent on {work_date} and collected {tickets} ticket(s): {'charged back' if chargeback else 'not charged'} - {reason}",
+        metadata={"work_date": work_date.isoformat(), "decision": review.decision, "tickets": tickets, "chargeback": chargeback.pk if chargeback else None},
+    )
+    return review
+
