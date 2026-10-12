@@ -3211,7 +3211,7 @@ class SundayNightMealsOpenAfterClockInTests(TestCase):
 
         self.gating = gating
         self.today = timezone.localdate()
-        self.override = override_settings(MEAL_GATING_EMPLOYEE_IDS=["*"], MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS=[self.today.weekday()])
+        self.override = override_settings(MEAL_GATING_EMPLOYEE_IDS=["*"], MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS=[self.today.weekday()], MEAL_SINGLE_TICKET_NIGHT_WEEKDAYS=[])
         self.override.enable()
         self.addCleanup(self.override.disable)
         self.night = Shift.objects.create(name="Clock-in Night", start_time="19:00", end_time="07:00", is_overnight=True)
@@ -3397,3 +3397,58 @@ class AbsentButCollectedTests(TestCase):
         self.assertEqual(self.client.get(f"/api/meals/shift-report/?date={self.DAY.isoformat()}").status_code, 200)  # may look
         self.assertEqual(self.decide("charge").status_code, 403)  # may not decide
 
+
+
+class SundayNightIsOneTicketTests(TestCase):
+    """A night shift that starts on a Sunday gives one ticket whatever the entitlement on other days."""
+
+    SUNDAY = date(2026, 10, 11)
+
+    def setUp(self):
+        from django.test import override_settings
+
+        self.override = override_settings(MEAL_GATING_EMPLOYEE_IDS=["*"], MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS=[], MEAL_SINGLE_TICKET_NIGHT_WEEKDAYS=[6])
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.night = Shift.objects.create(name="One Night", start_time="19:00", end_time="07:00", is_overnight=True)
+        self.day_shift = Shift.objects.create(name="One Day", start_time="07:00", end_time="19:00")
+        self.employee = Employee.objects.create(employee_id="ONE-1", first_name="One", last_name="Meal", status="active")
+        EmployeeMealEntitlement.objects.create(employee=self.employee, tickets_per_work_day=2, effective_from=self.SUNDAY - timedelta(days=60), reason="t")
+        MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=self.SUNDAY - timedelta(days=60), active=True)
+
+    def roster(self, day, shift):
+        return EmployeeRosterDay.objects.create(employee=self.employee, date=day, status=RosterDayStatus.WORK, shift=shift)
+
+    def test_a_sunday_night_gives_one_ticket_even_when_entitled_to_two(self):
+        from meals.gating import tickets_left_today
+
+        self.roster(self.SUNDAY, self.night)
+        evening = timezone.make_aware(datetime(2026, 10, 11, 20, 0))
+        self.assertEqual(tickets_left_today(self.employee, evening), 1)
+
+    def test_other_nights_and_a_sunday_day_shift_keep_the_full_entitlement(self):
+        from meals.gating import tickets_left_today
+
+        monday = self.SUNDAY + timedelta(days=1)
+        self.roster(monday, self.night)
+        self.assertEqual(tickets_left_today(self.employee, timezone.make_aware(datetime(2026, 10, 12, 20, 0))), 2)
+        other = Employee.objects.create(employee_id="ONE-2", first_name="Sunday", last_name="Day", status="active")
+        EmployeeMealEntitlement.objects.create(employee=other, tickets_per_work_day=2, effective_from=self.SUNDAY - timedelta(days=60), reason="t")
+        EmployeeRosterDay.objects.create(employee=other, date=self.SUNDAY, status=RosterDayStatus.WORK, shift=self.day_shift)
+        self.assertEqual(tickets_left_today(other, timezone.make_aware(datetime(2026, 10, 11, 12, 0))), 2)
+
+    def test_a_second_ticket_on_a_sunday_night_is_an_excess(self):
+        from meals.models import MealCollection
+
+        self.roster(self.SUNDAY, self.night)
+        MealDevice.objects.create(name="One Device", serial_number="ONEDEV", active=True)
+        BiometricIdentity.objects.create(employee=self.employee, system="device", source_identifier="ONEDEV", external_user_id="ONEID", is_active=True)
+        made = []
+        for number in range(2):
+            collection, _ = MealService.ingest(
+                system="device", source_identifier="ONEDEV", device_serial_number="ONEDEV", external_user_id="ONEID",
+                external_event_id=f"one-{number}", timestamp=timezone.make_aware(datetime(2026, 10, 11, 19, 30 + number)),
+            )
+            made.append((collection.sequence_number, collection.entitlement_snapshot, collection.status))
+        self.assertEqual(made, [(1, 1, "within_entitlement"), (2, 1, "excess")])
+        self.assertEqual(MealCollection.objects.filter(employee=self.employee).count(), 2)

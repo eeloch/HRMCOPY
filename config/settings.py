@@ -337,4 +337,7 @@ ATTENDANCE_LONG_LATE_MINUTES = int(os.environ.get("DJANGO_ATTENDANCE_LONG_LATE_M
 # Night meals nobody supervises (Sunday night, when no one from HR is on site): on these weekdays a person on an overnight
 # shift is switched on at the meal terminal only once they have clocked in. 6 = Sunday. Empty = off. (env: comma separated)
 MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS = [int(v) for v in os.environ.get("DJANGO_MEAL_REQUIRE_CLOCK_IN_NIGHT_WEEKDAYS", "6").split(",") if v.strip()]
+# A night shift that starts on one of these weekdays (6 = Sunday) gives ONE meal ticket, whatever the person's
+# entitlement on other days: it follows a rest day, so it starts with a single meal.
+MEAL_SINGLE_TICKET_NIGHT_WEEKDAYS = [int(v) for v in os.environ.get("DJANGO_MEAL_SINGLE_TICKET_NIGHT_WEEKDAYS", "6").split(",") if v.strip()]
 

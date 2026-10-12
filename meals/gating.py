@@ -75,7 +75,7 @@ def tickets_left_today(employee, now=None):
     work_date, roster = MealService.resolve_work_day(employee, now)
     entitlement = 0
     if roster and roster.status == RosterDayStatus.WORK:
-        entitlement = max(MealService.approved_entitlement(employee, work_date) - MealService.absence_penalty_reduction(employee, work_date), 0)
+        entitlement = max(MealService.entitlement_for_day(employee, work_date, roster) - MealService.absence_penalty_reduction(employee, work_date), 0)
         if entitlement and requires_clock_in(work_date, roster) and not has_clocked_in(employee, work_date, roster.shift):
             entitlement = 0  # not at work yet: the terminal stays switched off for them until they clock in
     used = MealCollection.objects.filter(employee=employee, work_date=work_date, voided_at__isnull=True).count()

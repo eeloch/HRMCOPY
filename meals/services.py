@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -106,6 +107,17 @@ class MealService:
             if cutoff_start <= anniversary <= as_of:
                 due.append(employee)
         return due
+
+    @classmethod
+    def entitlement_for_day(cls, employee, work_date, roster):
+        """The tickets this person's entitlement gives on this work day, before any absence penalty. Normally their
+        approved entitlement; but a night shift that starts on a Sunday (settings.MEAL_SINGLE_TICKET_NIGHT_WEEKDAYS) is
+        always ONE ticket: it follows a rest day, so it starts with a single meal."""
+        base = cls.approved_entitlement(employee, work_date)
+        weekdays = getattr(settings, "MEAL_SINGLE_TICKET_NIGHT_WEEKDAYS", [])
+        if roster is not None and roster.status == RosterDayStatus.WORK and roster.shift_id and roster.shift.is_overnight and work_date.weekday() in weekdays:
+            return min(base, 1)
+        return base
 
     @staticmethod
     def approved_entitlement(employee, work_date):
@@ -580,9 +592,10 @@ class MealService:
             # is never invisible - the reviewer can Waive it for a genuine scheduling gap.
             unscheduled = roster is None
             if roster and roster.status == RosterDayStatus.WORK:
-                base_entitlement = cls.approved_entitlement(
+                base_entitlement = cls.entitlement_for_day(
                     identity.employee,
                     work_date,
+                    roster,
                 )
 
                 absence_reduction = cls.absence_penalty_reduction(
@@ -784,7 +797,7 @@ class MealService:
         roster = EmployeeRosterDay.objects.filter(employee=employee, date=work_date).first()
         if roster is None or roster.status != RosterDayStatus.WORK:
             return 0
-        base = cls.approved_entitlement(employee, work_date)
+        base = cls.entitlement_for_day(employee, work_date, roster)
         if base == 0:
             first = EmployeeMealEntitlement.objects.filter(employee=employee).order_by("effective_from", "id").first()
             if (
