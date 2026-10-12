@@ -21,6 +21,14 @@ def monday_of(day):
     return day - timedelta(days=day.weekday())
 
 
+def plan_week_monday(plan, day):
+    """The Monday that names the week `day` belongs to for this plan: a Sunday-to-Saturday plan counts a Sunday in the
+    week that starts that day (named by the Monday after it), every other plan counts it in the week that ends on it."""
+    if getattr(plan, "week_starts_sunday", False) and day.weekday() == 6:
+        return monday_of(day + timedelta(days=1))
+    return monday_of(day)
+
+
 def day_group_for_week(plan, monday):
     """Which group ("A" or "B") is on the Day shift in the week that starts on this Monday."""
     weeks = (monday - plan.anchor_monday).days // 7
@@ -65,7 +73,7 @@ def planned_day(plan, group, day, day_off=None):
     if plan.kind == "alternating":
         if day.weekday() not in (plan.working_weekdays or []):
             return RosterDayStatus.REST, None
-        first_this_week = day_group_for_week(plan, monday_of(day)) == group
+        first_this_week = day_group_for_week(plan, plan_week_monday(plan, day)) == group
         return RosterDayStatus.WORK, (plan.day_shift if first_this_week else plan.night_shift)
     on_day_this_week = day_group_for_week(plan, monday_of(day)) == group
     if day.weekday() < 6:  # Monday to Saturday: the week's shift

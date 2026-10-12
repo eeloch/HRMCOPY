@@ -908,12 +908,27 @@ class SecurityShiftsTests(PlanTestCase):
         call_command("setup_security_shifts", stdout=StringIO())
         self.assertEqual(ShiftPlan.objects.filter(name__startswith="Security Shift").count() + ShiftPlan.objects.filter(name__startswith="Permanent Security").count(), 2)
 
-    def test_the_rotation_works_every_day_and_swaps_weekly(self):
-        day_week = self.names(self.week(self.rotating, "A", MONDAY))
-        night_week = self.names(self.week(self.rotating, "B", MONDAY))
+    def test_the_rotation_works_every_day_and_swaps_weekly_from_sunday(self):
+        sunday = MONDAY - timedelta(days=1)  # the week runs Sunday to Saturday
+        self.assertTrue(self.rotating.week_starts_sunday)
+        day_week = self.names(self.week(self.rotating, "A", sunday))
+        night_week = self.names(self.week(self.rotating, "B", sunday))
         self.assertEqual(day_week, ["W:Day Shift"] * 7)  # seven days, no rest day
         self.assertEqual(night_week, ["W:Night Shift"] * 7)
-        self.assertEqual(self.names(self.week(self.rotating, "A", MONDAY + timedelta(days=7))), night_week)  # the week after, they swap
+        self.assertEqual(self.names(self.week(self.rotating, "A", sunday + timedelta(days=7))), night_week)  # the week after, they swap
+
+    def test_the_swap_happens_on_sunday_not_monday(self):
+        saturday, sunday = MONDAY - timedelta(days=2), MONDAY - timedelta(days=1)
+        a_before = planned_day(self.rotating, "A", saturday)[1].name
+        a_sunday = planned_day(self.rotating, "A", sunday)[1].name
+        a_monday = planned_day(self.rotating, "A", MONDAY)[1].name
+        self.assertNotEqual(a_before, a_sunday)  # swapped on the Sunday
+        self.assertEqual(a_sunday, a_monday)  # and the Monday carries on in the same shift
+
+    def test_other_alternating_plans_still_swap_on_monday(self):
+        self.rotating.week_starts_sunday = False
+        sunday = MONDAY - timedelta(days=1)
+        self.assertEqual(planned_day(self.rotating, "A", sunday)[1].name, planned_day(self.rotating, "A", MONDAY - timedelta(days=2))[1].name)
 
     def test_the_permanent_night_shift_is_every_night_of_the_week(self):
         self.assertEqual(self.names(self.week(self.night_plan, "", MONDAY)), ["W:Night Shift"] * 7)

@@ -111,6 +111,9 @@ class ShiftPlan(models.Model):
     day_shift = models.ForeignKey(Shift, null=True, blank=True, on_delete=models.PROTECT, related_name="+")
     night_shift = models.ForeignKey(Shift, null=True, blank=True, on_delete=models.PROTECT, related_name="+")
     anchor_monday = models.DateField(null=True, blank=True)
+    # An alternating plan whose week runs Sunday to Saturday (the Day team starts Sunday 07:00, the Night team Sunday 19:00)
+    # instead of Monday to Sunday.
+    week_starts_sunday = models.BooleanField(default=False)
     active = models.BooleanField(default=True)
 
     def __str__(self):
