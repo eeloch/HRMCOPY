@@ -185,6 +185,11 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
     # Leave stays an operational overlay. Do not create an absence row or punch
     # facts for a leave-only shift; existing facts remain untouched when no events exist.
     if not events.exists() and has_leave:
+        if existing_attendance is not None and existing_attendance.status == "absent":
+            from attendance.services.leave_cover import cover_leave_days
+
+            cover_leave_days(employee, work_date, work_date, leave_ref="")
+            existing_attendance.refresh_from_db()
         return existing_attendance
 
     # Shift still open and nobody has punched yet: there is nothing to record (and nobody to call absent yet).

@@ -175,22 +175,52 @@ class MealService:
                 "approved_at": timezone.now(),
             },
         )
+        if not created and penalty.status == MealAbsencePenaltyStatus.CANCELLED and penalty.work_days_applied == 0:
+            # Cancelled earlier (paired with a neighbouring absence that has since fallen away): it stands again.
+            penalty.status = MealAbsencePenaltyStatus.ACTIVE
+            penalty.save(update_fields=["status"])
 
         return penalty, created
 
     @classmethod
     def sync_absence_penalties(cls, employee, reference_date, actor=None):
-        candidate_absences = list(
+        from attendance.services.leave import leave_dates
+
+        every_approved_absence = list(
             AttendanceException.objects
             .filter(
                 attendance__employee=employee,
-                attendance__date__lte=reference_date,
                 exception_type="absence",
                 status="approved",
             )
             .select_related("attendance")
             .order_by("attendance__date", "id")
         )
+        covered_by_leave = leave_dates(
+            employee,
+            min((a.attendance.date for a in every_approved_absence), default=reference_date),
+            max((a.attendance.date for a in every_approved_absence), default=reference_date),
+        ) if every_approved_absence else set()
+        standing_dates = {
+            absence.attendance.date.isoformat()
+            for absence in every_approved_absence
+            if absence.attendance.date not in covered_by_leave
+        }
+
+        # A penalty whose absence has since been waived, reversed or covered by approved leave no longer stands.
+        for penalty in MealAbsencePenalty.objects.filter(
+            employee=employee,
+            status__in=[MealAbsencePenaltyStatus.PENDING, MealAbsencePenaltyStatus.ACTIVE],
+        ):
+            if any(source not in standing_dates for source in (penalty.source_absence_dates or [])):
+                penalty.status = MealAbsencePenaltyStatus.CANCELLED
+                penalty.save(update_fields=["status"])
+
+        candidate_absences = [
+            absence
+            for absence in every_approved_absence
+            if absence.attendance.date <= reference_date and absence.attendance.date not in covered_by_leave
+        ]
 
         roster_work_dates = list(
             EmployeeRosterDay.objects

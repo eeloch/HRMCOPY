@@ -138,3 +138,91 @@ class StatementShowsChargesToCheckTests(TestCase):
         data = self.statement(changer)
         self.assertTrue(data["can_change_cases"])
         self.assertTrue(data["attendance_cases"][0]["can_change"])
+
+
+class LeaveClearsAbsenceTests(TestCase):
+    """Leave approved after the absences were decided: the days become leave and everything they caused is undone."""
+
+    def setUp(self):
+        from leave.models import LeaveRequest, LeaveStatus, LeaveType
+        from meals.models import MealAbsencePenalty  # noqa: F401
+
+        self.employee = Employee.objects.create(employee_id="LVC-001", first_name="Sick", last_name="Day", basic_salary=Decimal("150000.00"))
+        self.shift = Shift.objects.create(name="Leave Cover Shift", start_time="07:00", end_time="19:00")
+        self.period = PayrollPeriod.objects.create(year=2032, month=6)
+        self.payroll = EmployeePayroll.objects.create(payroll_period=self.period, employee=self.employee, basic_salary=Decimal("150000.00"), gross_earnings=Decimal("150000.00"), net_pay=Decimal("150000.00"))
+        for day in range(1, 31):
+            EmployeeRosterDay.objects.get_or_create(employee=self.employee, date=date(2032, 6, day), defaults={"status": "work", "shift": self.shift, "source": "manual"})
+        self.actor = get_user_model().objects.create_user(username="leaver", password="pw")
+        leave_type = LeaveType.objects.create(name="Sick Cover", code="SICK-COVER")
+        self.leave = LeaveRequest.objects.create(request_number="LV-COVER-1", employee=self.employee, leave_type=leave_type, start_date=date(2032, 6, 3), end_date=date(2032, 6, 4), total_days=2, reason="Sick", status=LeaveStatus.PENDING)
+        self.days = {}
+        for day in (2, 3, 4, 8):
+            attendance = DailyAttendance.objects.create(employee=self.employee, date=date(2032, 6, day), shift=self.shift, status="absent")
+            AttendanceException.objects.create(attendance=attendance, exception_type="absence", minutes_affected=720, status="approved", reviewed_by="HR", reviewed_at=timezone.now())
+            self.days[day] = attendance
+
+    def approve_leave(self):
+        from leave.models import LeaveStatus
+        from leave.services.approval import LeaveApprovalService
+
+        LeaveApprovalService._apply_decision(self.leave, self.actor, status=LeaveStatus.APPROVED, approved_start_date=date(2032, 6, 3), approved_end_date=date(2032, 6, 4), approved_days=2)
+
+    def penalties(self):
+        from meals.models import MealAbsencePenalty, MealAbsencePenaltyStatus
+
+        return MealAbsencePenalty.objects.filter(employee=self.employee, status=MealAbsencePenaltyStatus.ACTIVE)
+
+    def test_approving_leave_turns_covered_absences_into_leave_and_undoes_their_meal_penalty(self):
+        from meals.services import MealService
+
+        MealService.sync_absence_penalties(self.employee, date(2032, 6, 8))
+        self.assertTrue(self.penalties().filter(penalty_type="two_consecutive").exists())
+
+        self.approve_leave()
+
+        for day in (3, 4):
+            self.days[day].refresh_from_db()
+            self.assertEqual(self.days[day].status, "leave")
+            exception = self.days[day].exceptions.get()
+            self.assertEqual(exception.status, "waived")
+            self.assertIn("LV-COVER-1", exception.admin_comment)
+        for day in (2, 8):
+            self.days[day].refresh_from_db()
+            self.assertEqual(self.days[day].status, "absent")
+            self.assertEqual(self.days[day].exceptions.get().status, "approved")
+        # Only the two uncovered absences (2 and 8 June) still count; the leave pair and the monthly trigger are gone.
+        remaining = list(self.penalties())
+        self.assertEqual([p.penalty_type for p in remaining], ["single_absence", "single_absence"])
+        self.assertEqual(sorted(sum((p.source_absence_dates for p in remaining), [])), ["2032-06-02", "2032-06-08"])
+
+    def test_a_pending_absence_inside_leave_is_dropped_and_the_day_becomes_leave(self):
+        AttendanceException.objects.filter(attendance=self.days[3]).update(status="pending")
+        self.approve_leave()
+        self.days[3].refresh_from_db()
+        self.assertEqual(self.days[3].status, "leave")
+        self.assertFalse(self.days[3].exceptions.exists())
+
+    def test_a_day_with_a_punch_is_left_alone(self):
+        DailyAttendance.objects.filter(pk=self.days[3].pk).update(status="incomplete")
+        self.approve_leave()
+        self.days[3].refresh_from_db()
+        self.assertEqual(self.days[3].status, "incomplete")
+
+    def test_a_day_in_an_approved_payroll_is_left_as_it_is(self):
+        PayrollPeriod.objects.filter(pk=self.period.pk).update(status="approved")
+        self.approve_leave()
+        self.days[3].refresh_from_db()
+        self.assertEqual(self.days[3].status, "absent")
+        self.assertEqual(self.days[3].exceptions.get().status, "approved")
+
+    def test_processing_a_leave_day_clears_a_leftover_absence(self):
+        from leave.models import LeaveStatus
+
+        type(self.leave).objects.filter(pk=self.leave.pk).update(status=LeaveStatus.APPROVED, approved_start_date=date(2032, 6, 3), approved_end_date=date(2032, 6, 4), approved_days=2)
+        from attendance.services.processing import process_employee_attendance
+
+        process_employee_attendance(self.employee, date(2032, 6, 3), now=timezone.make_aware(datetime(2032, 6, 20, 12)))
+        self.days[3].refresh_from_db()
+        self.assertEqual(self.days[3].status, "leave")
+        self.assertEqual(self.days[3].exceptions.get().status, "waived")

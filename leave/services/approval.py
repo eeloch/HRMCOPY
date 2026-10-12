@@ -148,3 +148,14 @@ class LeaveApprovalService:
         leave_request.approved_days = approved_days
         leave_request.rejection_reason = rejection_reason
         leave_request.save()
+        if status in (LeaveStatus.APPROVED, LeaveStatus.PARTIALLY_APPROVED):
+            # Days already marked absent inside the approved dates become leave, and what the absence caused is undone.
+            from attendance.services.leave_cover import cover_leave_days
+
+            cover_leave_days(
+                leave_request.employee,
+                approved_start_date,
+                approved_end_date,
+                leave_ref=leave_request.request_number,
+                actor=acting_user,
+            )
