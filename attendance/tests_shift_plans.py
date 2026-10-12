@@ -887,3 +887,46 @@ class MeltingFlexibleAndPermanentPlansTests(PlanTestCase):
         self._punch(person, day + timedelta(days=1), 1, 30, "n")  # 1:30 the next morning belongs to the next day
         process_employee_attendance(person, day)
         self.assertEqual(DailyAttendance.objects.get(employee=person, date=day).status, "absent")
+
+
+class SecurityShiftsTests(PlanTestCase):
+    """The rotating Security shift and the permanent Security night shift, both Monday to Sunday."""
+
+    def setUp(self):
+        super().setUp()
+        self.rotation.name = "Rotating Day / Night (weekly)"
+        self.rotation.save()
+        from django.core.management import call_command
+
+        call_command("setup_security_shifts", stdout=StringIO())
+        self.rotating = ShiftPlan.objects.get(name="Security Shift (Mon-Sun 7AM-7PM) - Rotation")
+        self.night_plan = ShiftPlan.objects.get(name="Permanent Security Night Shift (Mon-Sun 7PM-7AM)")
+
+    def test_the_command_creates_both_plans_once(self):
+        from django.core.management import call_command
+
+        call_command("setup_security_shifts", stdout=StringIO())
+        self.assertEqual(ShiftPlan.objects.filter(name__startswith="Security Shift").count() + ShiftPlan.objects.filter(name__startswith="Permanent Security").count(), 2)
+
+    def test_the_rotation_works_every_day_and_swaps_weekly(self):
+        day_week = self.names(self.week(self.rotating, "A", MONDAY))
+        night_week = self.names(self.week(self.rotating, "B", MONDAY))
+        self.assertEqual(day_week, ["W:Day Shift"] * 7)  # seven days, no rest day
+        self.assertEqual(night_week, ["W:Night Shift"] * 7)
+        self.assertEqual(self.names(self.week(self.rotating, "A", MONDAY + timedelta(days=7))), night_week)  # the week after, they swap
+
+    def test_the_permanent_night_shift_is_every_night_of_the_week(self):
+        self.assertEqual(self.names(self.week(self.night_plan, "", MONDAY)), ["W:Night Shift"] * 7)
+
+    def test_people_can_be_assigned_and_get_a_roster(self):
+        dept = Department.objects.create(name="Security Dept")
+        guard = Employee.objects.create(employee_id="SEC-1", first_name="Sec", last_name="Guard", department=dept)
+        assign_plan([guard], self.night_plan, start_date=MONDAY)
+        sunday = EmployeeRosterDay.objects.get(employee=guard, date=MONDAY + timedelta(days=6))
+        self.assertEqual((sunday.status, sunday.shift.name), ("work", "Night Shift"))
+
+    def test_a_personal_day_off_still_applies(self):
+        dept = Department.objects.create(name="Security Dept 2")
+        guard = Employee.objects.create(employee_id="SEC-2", first_name="Sec", last_name="Guard2", department=dept)
+        assign_plan([guard], self.night_plan, start_date=MONDAY, day_off=2)  # Wednesday
+        self.assertEqual(EmployeeRosterDay.objects.get(employee=guard, date=MONDAY + timedelta(days=2)).status, "rest")
