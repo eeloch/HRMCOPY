@@ -16,6 +16,11 @@ from decimal import Decimal, ROUND_HALF_UP
 MONEY = Decimal("0.01")
 DEFAULT_WORKING_DAYS = 26
 
+# Not clocking in, or not clocking out, is fined once the case is approved. N1,000 is the minimum; whoever approves it
+# can raise the amount (for someone who really left work very early), never lower it.
+MISSING_PUNCH_TYPES = ("missing_clock_in", "missing_clock_out")
+MISSING_PUNCH_FINE = Decimal("1000.00")
+
 LATE_WAIVED_UP_TO = 5
 EARLY_WAIVED_UP_TO = 5
 HALF_DAY_LATE_MINUTES = 5 * 60      # 12pm on a 7am start

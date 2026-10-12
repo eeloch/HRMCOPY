@@ -7,7 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction
 
 from attendance.models import AttendanceException, RosterDayStatus
-from attendance.services.penalties import penalty_for
+from attendance.services.penalties import MISSING_PUNCH_TYPES, penalty_for
 from attendance.services.roster import IncompleteRosterError, expected_attendance_days
 from audit.models import AuditSeverity
 from audit.services import AuditService
@@ -38,6 +38,8 @@ class PayrollAttendanceSyncSummary:
     lateness_deductions_existing: int = 0
     early_departure_deductions_created: int = 0
     early_departure_deductions_existing: int = 0
+    missing_punch_deductions_created: int = 0
+    missing_punch_deductions_existing: int = 0
     unpaid_leave_deductions_created: int = 0
     unpaid_leave_deductions_existing: int = 0
     paid_leave_days_ignored: Decimal = Decimal("0.00")
@@ -115,7 +117,7 @@ def build_attendance_summary(period):
         if start <= period.end_date and end >= period.start_date:
             if _leave_is_paid(leave_request): summary.paid_leave += 1
             else: summary.unpaid_leave += 1
-    summary.unsupported = summary.approved_missing_punch
+    summary.unsupported = approved.filter(exception_type__in=MISSING_PUNCH_TYPES, proposed_deduction__lte=0).count()  # approved with no fine: nothing to deduct
     return summary
 
 
@@ -151,6 +153,7 @@ def _sync_system_line(payroll, *, source_type, source_reference, code, descripti
         if kind == "absence": summary.absence_deductions_created += 1
         elif kind == "unpaid_leave": summary.unpaid_leave_deductions_created += 1
         elif kind == "late": summary.lateness_deductions_created += 1
+        elif kind == "missing_punch": summary.missing_punch_deductions_created += 1
         else: summary.early_departure_deductions_created += 1
         summary.total_deduction_amount += amount
         return True
@@ -164,6 +167,7 @@ def _sync_system_line(payroll, *, source_type, source_reference, code, descripti
     if kind == "absence": summary.absence_deductions_existing += 1
     elif kind == "unpaid_leave": summary.unpaid_leave_deductions_existing += 1
     elif kind == "late": summary.lateness_deductions_existing += 1
+    elif kind == "missing_punch": summary.missing_punch_deductions_existing += 1
     else: summary.early_departure_deductions_existing += 1
     return False
 
@@ -239,6 +243,24 @@ def _sync_employee_payroll(payroll, summary):
             },
             summary=summary,
             kind="late" if is_late else "early_departure",
+        )
+    for exception in period_exceptions(period).filter(attendance__employee=employee, status="approved", exception_type__in=MISSING_PUNCH_TYPES):
+        work_date = exception.attendance.date
+        if work_date not in work_dates:
+            summary.rest_days_ignored += 1
+            continue
+        if work_date in leave_dates or work_date in approved_absence_dates or exception.proposed_deduction <= 0:
+            continue
+        reference = str(exception.pk)
+        eligible_sources.add(("attendance_exception", reference))
+        is_in = exception.exception_type == "missing_clock_in"
+        changed |= _sync_system_line(
+            payroll, source_type="attendance_exception", source_reference=reference,
+            code="ATTENDANCE_MISSING_CLOCK_IN" if is_in else "ATTENDANCE_MISSING_CLOCK_OUT",
+            description=f"{'No Clock-in' if is_in else 'No Clock-out'} - {work_date.isoformat()}",
+            amount=exception.proposed_deduction.quantize(MONEY, rounding=ROUND_HALF_UP),
+            metadata={"attendance_exception_id": exception.pk, "attendance_date": work_date.isoformat()},
+            summary=summary, kind="missing_punch",
         )
     for line in PayrollLineItem.objects.filter(payroll=payroll, is_system_generated=True, source_type__in=SYSTEM_SOURCE_TYPES):
         if (line.source_type, line.source_reference) not in eligible_sources:

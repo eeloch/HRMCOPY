@@ -213,11 +213,11 @@ function ExceptionPageInner() {
     setBulk({ decision: rule.decision, comment: rule.comment, title: rule.label, ids: data.ids, lockComment: true, filterNote: rule.description });
   }
 
-  async function submitDecision(decision: Decision, comment: string) {
+  async function submitDecision(decision: Decision, comment: string, amount?: string) {
     if (!selectedRecord) return;
     setSubmitting(true); setModalError("");
     try {
-      const response = await apiFetch(`/attendance/exceptions/${selectedRecord.id}/decision/`, { method: "POST", body: JSON.stringify({ decision, comment }) });
+      const response = await apiFetch(`/attendance/exceptions/${selectedRecord.id}/decision/`, { method: "POST", body: JSON.stringify(amount ? { decision, comment, amount } : { decision, comment }) });
       if (!response.ok) throw new Error(await errorMessage(response));
       setSelectedRecord(null);
       setFeedback(`${label(selectedRecord.exception_type)} was ${decision}.`);
@@ -356,7 +356,7 @@ function ExceptionPageInner() {
         </div>
       )}
 
-      {selectedRecord && <ExceptionReviewModal record={selectedRecord} submitting={submitting} error={modalError} onClose={() => !submitting && setSelectedRecord(null)} onSubmit={(decision, comment) => void submitDecision(decision, comment)} />}
+      {selectedRecord && <ExceptionReviewModal record={selectedRecord} submitting={submitting} error={modalError} onClose={() => !submitting && setSelectedRecord(null)} onSubmit={(decision, comment, amount) => void submitDecision(decision, comment, amount)} />}
     </div>
   );
 }

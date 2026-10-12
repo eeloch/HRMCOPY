@@ -364,7 +364,8 @@ class AttendanceProcessingTests(TestCase):
             AttendanceException.objects.filter(
                 attendance=attendance,
                 exception_type="absence",
-                status="pending",
+                status="approved",
+                reviewed_by="System (automatic)",
             ).exists()
         )
 

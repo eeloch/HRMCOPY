@@ -29,7 +29,7 @@ type Props = {
   submitting: boolean;
   error: string;
   onClose: () => void;
-  onSubmit: (decision: Decision, comment: string) => void;
+  onSubmit: (decision: Decision, comment: string, amount?: string) => void;
 };
 
 function formatDateTime(value: string | null) {
@@ -51,6 +51,8 @@ export function ExceptionReviewModal({ record, submitting, error, onClose, onSub
   const [decision, setDecision] = useState<Decision>("approved");
   const [comment, setComment] = useState("");
   const [validationError, setValidationError] = useState("");
+  const isMissingPunch = record.exception_type === "missing_clock_in" || record.exception_type === "missing_clock_out";
+  const [amount, setAmount] = useState(String(Math.max(Number(record.proposed_deduction) || 0, 1000)));
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -58,8 +60,12 @@ export function ExceptionReviewModal({ record, submitting, error, onClose, onSub
       setValidationError(`A reason is required to ${decision === "waived" ? "waive" : "hold"} this exception.`);
       return;
     }
+    if (isMissingPunch && decision === "approved" && !(Number(amount) >= 1000)) {
+      setValidationError("The fine is at least ₦1,000.");
+      return;
+    }
     setValidationError("");
-    onSubmit(decision, comment.trim());
+    onSubmit(decision, comment.trim(), isMissingPunch && decision === "approved" ? String(Number(amount)) : undefined);
   }
 
   return (
@@ -94,6 +100,13 @@ export function ExceptionReviewModal({ record, submitting, error, onClose, onSub
             <DecisionOption decision="waived" active={decision === "waived"} onSelect={setDecision} label="Waive" detail="Waive with a recorded reason." />
             <DecisionOption decision="held" active={decision === "held"} onSelect={setDecision} label="Hold" detail="Hold for further investigation." />
           </div>
+
+          {isMissingPunch && decision === "approved" && (
+            <label className="mt-5 block text-sm font-medium text-slate-700">
+              Fine (₦) <span className="font-normal text-slate-500">- at least ₦1,000; raise it if the person really left work very early</span>
+              <input type="number" min={1000} step={100} value={amount} onChange={(event) => setAmount(event.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-300 px-3 py-2.5 outline-none focus:ring-2 focus:ring-blue-500" />
+            </label>
+          )}
 
           <label className="mt-5 block text-sm font-medium text-slate-700">
             Admin Comment {decision !== "approved" && <span className="text-red-600">(required)</span>}

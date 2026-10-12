@@ -71,7 +71,7 @@ class ChangeAttendanceChargeTests(TestCase):
         with self.assertRaisesMessage(ValueError, "Say why"):
             change_decision(decided, "waived", "  ", self.actor)
         punch = self.case(day=5, kind="late")
-        AttendanceException.objects.filter(pk=punch.pk).update(exception_type="missing_clock_out")
+        AttendanceException.objects.filter(pk=punch.pk).update(exception_type="hostel_violation")
         with self.assertRaisesMessage(ValueError, "Only lateness"):
             change_decision(punch, "waived", "x", self.actor)
 
@@ -127,7 +127,7 @@ class StatementShowsChargesToCheckTests(TestCase):
         case = data["attendance_cases"][0]
         self.assertEqual((case["kind"], case["minutes"], case["clock_in"], case["status_label"]), ("Late arrival", 40, "07:40", "Charged"))
         self.assertEqual(case["scheduled"], "07:00 - 19:00")
-        self.assertNotIn("amount", case)
+        self.assertIsNone(case["amount"])  # an amount is shown only for a missing clock-in/out fine, and only to someone who can change it
         self.assertNotIn("proposed_deduction", case)
         self.assertFalse(case["can_change"])
         self.assertFalse(data["can_change_cases"])

@@ -42,6 +42,22 @@ class ExceptionChangeDecisionAPIView(APIView):
         return Response({"message": "Charge changed.", "exception": AttendanceExceptionSerializer(exception).data})
 
 
+class ExceptionFineAmountAPIView(APIView):
+    """Change the fine on a missing clock-in / clock-out (at least N1,000), with the reason."""
+
+    permission_classes = [IsAuthenticated, CanReverseAttendanceCharges]
+
+    def post(self, request, exception_id):
+        from attendance.services.reversal import change_fine_amount
+
+        exception = get_object_or_404(AttendanceException, pk=exception_id)
+        try:
+            exception = change_fine_amount(exception, request.data.get("amount"), request.data.get("reason", ""), request.user)
+        except ValueError as error:
+            return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"message": "Fine changed.", "exception": AttendanceExceptionSerializer(exception).data})
+
+
 class MarkAbsentAPIView(APIView):
     """Say that someone on a no-attendance shift did not work a day (they are present by default)."""
 

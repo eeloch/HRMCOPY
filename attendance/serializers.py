@@ -240,6 +240,13 @@ class ExceptionDecisionSerializer(serializers.Serializer):
         allow_blank=True,
     )
 
+    # The fine for a missing clock-in / clock-out: at least the minimum, higher when the person really left very early.
+    amount = serializers.DecimalField(
+        required=False,
+        max_digits=12,
+        decimal_places=2,
+    )
+
     def validate(self, attrs):
         if self.instance and self.instance.status != "pending":
             raise serializers.ValidationError(
@@ -248,6 +255,14 @@ class ExceptionDecisionSerializer(serializers.Serializer):
 
         decision = attrs["decision"]
         comment = attrs.get("comment", "").strip()
+
+        if attrs.get("amount") is not None:
+            from attendance.services.penalties import MISSING_PUNCH_FINE, MISSING_PUNCH_TYPES
+
+            if not self.instance or self.instance.exception_type not in MISSING_PUNCH_TYPES:
+                raise serializers.ValidationError({"amount": "An amount can only be set on a missing clock-in or clock-out fine."})
+            if attrs["amount"] < MISSING_PUNCH_FINE:
+                raise serializers.ValidationError({"amount": f"The fine is at least N{MISSING_PUNCH_FINE:,.0f}."})
 
         if decision in ["waived", "held"] and not comment:
             raise serializers.ValidationError({
@@ -270,6 +285,8 @@ class ExceptionDecisionSerializer(serializers.Serializer):
         instance.status = decision
         instance.admin_comment = comment
         instance.reviewed_at = timezone.now()
+        if decision == "approved" and validated_data.get("amount") is not None:
+            instance.proposed_deduction = validated_data["amount"]
 
         if request.user.get_full_name():
             instance.reviewed_by = request.user.get_full_name()

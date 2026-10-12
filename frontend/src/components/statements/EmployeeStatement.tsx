@@ -8,7 +8,7 @@ import { apiFetch, getCurrentUser } from "@/lib/api";
 type Employee = { id: number; employee_id: string; full_name: string; department_name?: string | null };
 type Day = { no_attendance?: boolean; can_mark_absent?: boolean; date: string; weekday: string; status: string; status_label: string; shift: string | null; clock_in: string | null; clock_out: string | null; late_minutes: number; hours_worked: number };
 type Charge = { date: string | null; kind: string; description: string; amount: string; status: string; status_label: string };
-type Case = { id: number; date: string; kind: string; minutes: number | null; shift: string | null; scheduled: string | null; clock_in: string | null; clock_out: string | null; status: string; status_label: string; decided_by: string | null; decided_on: string | null; comment: string | null; can_change: boolean };
+type Case = { type?: string; amount?: string | null; id: number; date: string; kind: string; minutes: number | null; shift: string | null; scheduled: string | null; clock_in: string | null; clock_out: string | null; status: string; status_label: string; decided_by: string | null; decided_on: string | null; comment: string | null; can_change: boolean };
 type Reward = { description: string; amount: string; status_label: string };
 type Statement = {
   employee: { id: number; employee_id: string; name: string; department: string | null; position: string | null };
@@ -82,6 +82,22 @@ export function EmployeeStatement() {
       await load(false);
     } catch (changeError) {
       setError(changeError instanceof Error ? changeError.message : "The charge could not be changed.");
+    } finally { setChanging(null); }
+  }
+
+  async function changeFine(item: Case) {
+    const entered = window.prompt(`Fine for ${item.kind.toLowerCase()} on ${fullDate(item.date)} (currently ₦${Number(item.amount || 0).toLocaleString()}, at least ₦1,000). New amount:`, item.amount || "1000");
+    if (entered === null) return;
+    const reason = window.prompt("Why is the fine being changed (for example, the person really left very early)?");
+    if (reason === null) return;
+    setChanging(item.id); setError("");
+    try {
+      const response = await apiFetch(`/attendance/exceptions/${item.id}/fine-amount/`, { method: "POST", body: JSON.stringify({ amount: entered, reason }) });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.detail || "The fine could not be changed.");
+      await load(false);
+    } catch (fineError) {
+      setError(fineError instanceof Error ? fineError.message : "The fine could not be changed.");
     } finally { setChanging(null); }
   }
 
@@ -172,7 +188,7 @@ export function EmployeeStatement() {
           <h3 className="mt-8 text-sm font-bold uppercase tracking-wide text-slate-700">Lateness, early departures and absences</h3>
           <p className="mt-1 text-xs text-slate-500">Each case with the times it was judged on. If the employee disputes one, check the punches here{statement.can_change_cases ? " and reverse the charge if it is wrong." : "; someone with permission can then reverse it."}</p>
           <div className="mt-3 overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500"><tr><th className="px-3 py-2">Date</th><th className="px-3 py-2">Case</th><th className="px-3 py-2">Shift</th><th className="px-3 py-2">Clocked in</th><th className="px-3 py-2">Clocked out</th><th className="px-3 py-2">Decision</th>{statement.can_change_cases && <th className="px-3 py-2 print:hidden" />}</tr></thead>
-            <tbody className="divide-y divide-slate-100">{statement.attendance_cases.map((item) => <tr key={item.id}><td className="px-3 py-1.5">{dayLabel(item.date)}</td><td className="px-3 py-1.5">{item.kind}{item.minutes ? ` - ${item.minutes} min` : ""}</td><td className="px-3 py-1.5 text-slate-600">{item.scheduled || item.shift || "-"}</td><td className="px-3 py-1.5">{item.clock_in || "-"}</td><td className="px-3 py-1.5">{item.clock_out || "-"}</td><td className="px-3 py-1.5"><span className={item.status === "waived" ? "text-emerald-700" : item.status === "approved" ? "font-semibold text-red-700" : "text-amber-700"}>{item.status_label}</span>{item.decided_by && item.status !== "pending" && <span className="block text-xs text-slate-500">{item.decided_by}{item.decided_on ? `, ${fullDate(item.decided_on)}` : ""}</span>}{item.comment && <span className="block max-w-[22rem] text-xs text-slate-500">{item.comment}</span>}</td>{statement.can_change_cases && <td className="whitespace-nowrap px-3 py-1.5 text-right print:hidden">{item.can_change ? <>{item.status !== "waived" && <button type="button" disabled={changing === item.id} onClick={() => void changeCase(item, "waived")} className="rounded-lg border border-emerald-300 px-2.5 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">Reverse charge</button>}{item.status !== "approved" && <button type="button" disabled={changing === item.id} onClick={() => void changeCase(item, "approved")} className="ml-2 rounded-lg border border-red-300 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50">Charge it</button>}</> : <span className="text-xs text-slate-400">Awaiting a decision</span>}</td>}</tr>)}</tbody></table></div>
+            <tbody className="divide-y divide-slate-100">{statement.attendance_cases.map((item) => <tr key={item.id}><td className="px-3 py-1.5">{dayLabel(item.date)}</td><td className="px-3 py-1.5">{item.kind}{item.minutes ? ` - ${item.minutes} min` : ""}{item.amount != null ? ` - fine ₦${Number(item.amount).toLocaleString()}` : ""}</td><td className="px-3 py-1.5 text-slate-600">{item.scheduled || item.shift || "-"}</td><td className="px-3 py-1.5">{item.clock_in || "-"}</td><td className="px-3 py-1.5">{item.clock_out || "-"}</td><td className="px-3 py-1.5"><span className={item.status === "waived" ? "text-emerald-700" : item.status === "approved" ? "font-semibold text-red-700" : "text-amber-700"}>{item.status_label}</span>{item.decided_by && item.status !== "pending" && <span className="block text-xs text-slate-500">{item.decided_by}{item.decided_on ? `, ${fullDate(item.decided_on)}` : ""}</span>}{item.comment && <span className="block max-w-[22rem] text-xs text-slate-500">{item.comment}</span>}</td>{statement.can_change_cases && <td className="whitespace-nowrap px-3 py-1.5 text-right print:hidden">{item.can_change ? <>{item.status !== "waived" && <button type="button" disabled={changing === item.id} onClick={() => void changeCase(item, "waived")} className="rounded-lg border border-emerald-300 px-2.5 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">Reverse charge</button>}{item.status !== "approved" && <button type="button" disabled={changing === item.id} onClick={() => void changeCase(item, "approved")} className="ml-2 rounded-lg border border-red-300 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50">Charge it</button>}{item.amount != null && item.status !== "waived" && <button type="button" disabled={changing === item.id} onClick={() => void changeFine(item)} className="ml-2 rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Change amount</button>}</> : <span className="text-xs text-slate-400">Awaiting a decision</span>}</td>}</tr>)}</tbody></table></div>
         </>}
 
         <h3 className="mt-8 text-sm font-bold uppercase tracking-wide text-slate-700">Charges to come off pay</h3>

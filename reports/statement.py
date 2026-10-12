@@ -34,7 +34,7 @@ def _clock(value):
     return timezone.localtime(value).strftime("%H:%M") if value else None
 
 
-CASE_LABELS = {"late": "Late arrival", "early_departure": "Early departure", "absence": "Absent"}
+CASE_LABELS = {"late": "Late arrival", "early_departure": "Early departure", "absence": "Absent", "missing_clock_in": "No clock-in", "missing_clock_out": "No clock-out"}
 CASE_STATUS_LABELS = {"pending": "Awaiting a decision", "approved": "Charged", "waived": "Waived - no charge", "held": "On hold - being checked"}
 
 
@@ -47,7 +47,9 @@ def _attendance_cases(employee, first, last, can_change):
         row = case.attendance
         cases.append({
             "id": case.pk, "date": row.date.isoformat(), "kind": CASE_LABELS[case.exception_type],
-            "minutes": case.minutes_affected if case.exception_type != "absence" else None,
+            "minutes": case.minutes_affected if case.exception_type in ("late", "early_departure") else None,
+            "type": case.exception_type,
+            "amount": _money(case.proposed_deduction) if can_change and case.exception_type in ("missing_clock_in", "missing_clock_out") else None,
             "shift": row.shift.name if row.shift_id else None,
             "scheduled": f"{_clock(row.scheduled_start)} - {_clock(row.scheduled_end)}" if row.scheduled_start and row.scheduled_end else None,
             "clock_in": _clock(row.actual_clock_in), "clock_out": _clock(row.actual_clock_out),

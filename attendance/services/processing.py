@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from attendance.models import AttendanceEvent, AttendanceException, DailyAttendance, EmployeeRosterDay
 from attendance.services.leave import approved_leave_employee_ids
-from attendance.services.penalties import LATE_WAIVED_UP_TO, estimated_daily_rate, penalty_for, proposes_absence, waived_up_to
+from attendance.services.penalties import LATE_WAIVED_UP_TO, MISSING_PUNCH_FINE, estimated_daily_rate, penalty_for, proposes_absence, waived_up_to
 from attendance.services.roster import get_employee_roster_day
 from audit.models import AuditSeverity
 from audit.services import AuditService
@@ -17,6 +17,7 @@ from audit.services import AuditService
 CAPTURE_WINDOW_HOURS = 3
 FLEXIBLE_DAY_MINUTES = 720  # an absence on a flexible day costs one normal 12-hour day
 PENDING_EXCEPTION_STATUS = "pending"
+AUTO_REVIEWER = "System (automatic)"  # who an absence is approved by the moment it is recorded
 
 
 def combine_date_and_time(work_date, shift_time):
@@ -80,6 +81,31 @@ def _sync_exception(attendance, exception_type, *, applies, minutes=0, monetary=
         exception.supervisor_comment = note
         exception.save(update_fields=["minutes_affected", "proposed_deduction", "supervisor_comment"])
     return exception, False
+
+
+def _auto_approve_absence(exception):
+    """An absence is approved the moment it is recorded (no waiting in the queue); it can still be reviewed afterwards -
+    Reverse charge on the employee's statement - and an approved absence cuts the meal tickets as usual."""
+    from attendance.views.exceptions import ExceptionDecisionAPIView
+    from meals.services import MealService
+
+    exception.status, exception.reviewed_by, exception.reviewed_at = "approved", AUTO_REVIEWER, timezone.now()
+    exception.admin_comment = "Approved automatically when the absence was recorded. It can be reviewed later and reversed if it was wrong."
+    exception.save(update_fields=["status", "reviewed_by", "reviewed_at", "admin_comment"])
+    MealService.sync_absence_penalties(exception.attendance.employee, exception.attendance.date, actor=None)
+    ExceptionDecisionAPIView._log_decision(exception, None)
+
+
+def _undo_auto_absence(attendance):
+    """Punches that arrived later (a terminal reconnecting) show the person was there: take back an absence that was
+    approved automatically - the deduction and the meal penalty with it. A day whose payroll is already approved stays."""
+    from attendance.services.reversal import change_decision
+
+    for exception in AttendanceException.objects.filter(attendance=attendance, exception_type="absence", status="approved", reviewed_by=AUTO_REVIEWER):
+        try:
+            change_decision(exception, "waived", "The person's punches arrived afterwards, so the automatic absence was withdrawn.", None)
+        except ValueError:
+            pass
 
 
 def _alert_proposed_absence(attendance, note):
@@ -350,15 +376,24 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
         )
         if created and proposed and attendance.date >= timezone.localdate() - timedelta(days=3):
             _alert_proposed_absence(attendance, note)
+        if created and attendance.status == "absent":
+            _auto_approve_absence(absence)
+        elif attendance.status != "absent":
+            _undo_auto_absence(attendance)
+        # A forgotten clock-in or clock-out is fined (N1,000 at least, raised by whoever approves it). A flexible shift has
+        # no clock-in or clock-out time to miss, so nothing is fined there.
+        missing_fine = Decimal("0.00") if shift.is_flexible else MISSING_PUNCH_FINE
         _sync_exception(
             attendance,
             "missing_clock_in",
             applies=event_count == 1 and missing_clock_in,
+            deduction=missing_fine,
         )
         _sync_exception(
             attendance,
             "missing_clock_out",
             applies=event_count == 1 and missing_clock_out,
+            deduction=missing_fine,
         )
         _sync_exception(attendance, "leave_punch_conflict", applies=has_leave and event_count > 0, monetary=False)
         _log_attendance_changes(attendance, previous)

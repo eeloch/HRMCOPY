@@ -3383,7 +3383,7 @@ class AbsentButCollectedTests(TestCase):
         self.assertEqual(self.report()["rows"][0]["result"], "collected")
 
     def test_the_waiting_list_reaches_back_over_the_last_two_weeks(self):
-        old = timezone.localdate() - timedelta(days=5)
+        old = next(day for day in (timezone.localdate() - timedelta(days=n) for n in (5, 6, 7)) if day != self.DAY)  # not the day the setup already used
         DailyAttendance.objects.create(employee=self.person, date=old, shift=self.shift, status="absent")
         event = MealEvent.objects.create(employee=self.person, device=self.device, timestamp=timezone.make_aware(datetime.combine(old, datetime.min.time().replace(hour=12))), external_event_id="abs-old", source_system="device")
         MealCollection.objects.create(event=event, employee=self.person, work_date=old, sequence_number=1, entitlement_snapshot=2, rate_snapshot=Decimal("700.00"), status="within_entitlement")
@@ -3452,3 +3452,14 @@ class SundayNightIsOneTicketTests(TestCase):
             made.append((collection.sequence_number, collection.entitlement_snapshot, collection.status))
         self.assertEqual(made, [(1, 1, "within_entitlement"), (2, 1, "excess")])
         self.assertEqual(MealCollection.objects.filter(employee=self.employee).count(), 2)
+
+    def test_after_the_first_scan_on_a_sunday_night_the_person_has_nothing_left_so_the_terminal_switches_them_off(self):
+        from meals.gating import tickets_left_today
+
+        self.roster(self.SUNDAY, self.night)
+        MealDevice.objects.create(name="Off Device", serial_number="OFFDEV", active=True)
+        BiometricIdentity.objects.create(employee=self.employee, system="device", source_identifier="OFFDEV", external_user_id="OFFID", is_active=True)
+        evening = timezone.make_aware(datetime(2026, 10, 11, 19, 30))
+        self.assertEqual(tickets_left_today(self.employee, evening), 1)
+        MealService.ingest(system="device", source_identifier="OFFDEV", device_serial_number="OFFDEV", external_user_id="OFFID", external_event_id="off-1", timestamp=evening)
+        self.assertEqual(tickets_left_today(self.employee, evening + timedelta(minutes=1)), 0)  # reconcile() then queues the switch-off
