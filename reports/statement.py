@@ -69,7 +69,7 @@ def build_statement(employee, year, month, *, today=None, can_change=False):
     shown_until = min(last, today)
 
     attendance = {row.date: row for row in DailyAttendance.objects.filter(employee=employee, date__range=(first, last)).select_related("shift")}
-    roster = {row.date: row for row in EmployeeRosterDay.objects.filter(employee=employee, date__range=(first, last))}
+    roster = {row.date: row for row in EmployeeRosterDay.objects.filter(employee=employee, date__range=(first, last)).select_related("shift")}
 
     days, counts = [], {key: 0 for key in ("present", "late", "absent", "leave", "incomplete", "rest")}
     worked_minutes = late_minutes = 0
@@ -87,7 +87,11 @@ def build_statement(employee, year, month, *, today=None, can_change=False):
         if row is not None:
             worked_minutes += row.worked_minutes
             late_minutes += row.late_minutes
+        roster_day = roster.get(current)
+        no_attendance = bool(roster_day is not None and roster_day.status == RosterDayStatus.WORK and roster_day.shift_id and roster_day.shift.attendance_not_required)
         days.append({
+            "no_attendance": no_attendance,
+            "can_mark_absent": bool(can_change and no_attendance and status in ("present", "none") and current <= today),
             "date": current.isoformat(),
             "weekday": current.strftime("%a"),
             "status": status,

@@ -42,6 +42,26 @@ class ExceptionChangeDecisionAPIView(APIView):
         return Response({"message": "Charge changed.", "exception": AttendanceExceptionSerializer(exception).data})
 
 
+class MarkAbsentAPIView(APIView):
+    """Say that someone on a no-attendance shift did not work a day (they are present by default)."""
+
+    permission_classes = [IsAuthenticated, CanReverseAttendanceCharges]
+
+    def post(self, request):
+        from datetime import date as date_type
+
+        from attendance.services.marked_absence import mark_absent
+        from employees.models import Employee
+
+        employee = get_object_or_404(Employee, pk=request.data.get("employee"))
+        try:
+            day = date_type.fromisoformat(str(request.data.get("date", "")))
+            exception = mark_absent(employee, day, request.data.get("reason", ""), request.user)
+        except ValueError as error:
+            return Response({"detail": str(error) if "isoformat" not in str(error) else "Choose a valid date."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"message": "Marked absent.", "exception": AttendanceExceptionSerializer(exception).data}, status=status.HTTP_201_CREATED)
+
+
 class AttendanceExceptionListAPIView(APIView):
 
     permission_classes = [

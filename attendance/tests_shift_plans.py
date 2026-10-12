@@ -1,5 +1,5 @@
 from io import StringIO
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
@@ -945,3 +945,85 @@ class SecurityShiftsTests(PlanTestCase):
         guard = Employee.objects.create(employee_id="SEC-2", first_name="Sec", last_name="Guard2", department=dept)
         assign_plan([guard], self.night_plan, start_date=MONDAY, day_off=2)  # Wednesday
         self.assertEqual(EmployeeRosterDay.objects.get(employee=guard, date=MONDAY + timedelta(days=2)).status, "rest")
+
+
+class NoAttendanceRequiredTests(PlanTestCase):
+    """People who need not punch: present every working day, never late or absent, unless someone marks a day absent."""
+
+    def setUp(self):
+        super().setUp()
+        from django.core.management import call_command
+
+        call_command("setup_no_attendance_shifts", stdout=StringIO())
+        self.plan = ShiftPlan.objects.get(name="No Attendance Required (Mon-Fri)")
+        self.person = Employee.objects.create(employee_id="NA-1", first_name="Out", last_name="AndAbout", basic_salary=150000)
+        self.start = MONDAY
+        assign_plan([self.person], self.plan, start_date=MONDAY - timedelta(days=7))
+        self.now = timezone.make_aware(datetime.combine(MONDAY + timedelta(days=10), time(23, 0)))
+
+    def process(self, day):
+        from .services.processing import process_employee_attendance
+
+        return process_employee_attendance(self.person, day, now=self.now)
+
+    def test_a_working_day_is_present_without_any_punch(self):
+        row = self.process(MONDAY)
+        self.assertEqual(row.status, "present")
+        self.assertFalse(row.exceptions.exists())
+
+    def test_weekends_are_rest_days_and_untouched(self):
+        self.assertIsNone(self.process(MONDAY + timedelta(days=5)))  # Saturday on a Mon-Fri plan
+
+    def test_a_late_punch_changes_nothing_but_is_kept_for_information(self):
+        from datetime import datetime
+
+        from .models import AttendanceEvent
+
+        AttendanceEvent.objects.create(employee=self.person, timestamp=timezone.make_aware(datetime.combine(MONDAY, time(15, 30))), external_event_id="na-late")
+        row = self.process(MONDAY)
+        self.assertEqual((row.late_minutes, row.status), (0, "present"))
+        self.assertIsNotNone(row.actual_clock_in)
+        self.assertFalse(row.exceptions.exists())
+
+    def test_approved_leave_shows_as_leave(self):
+        from leave.models import LeaveRequest, LeaveStatus, LeaveType
+
+        kind = LeaveType.objects.create(name="NA Leave", code="NA-LV")
+        LeaveRequest.objects.create(request_number="NA-1", employee=self.person, leave_type=kind, start_date=MONDAY, end_date=MONDAY, approved_start_date=MONDAY, approved_end_date=MONDAY, total_days=1, approved_days=1, reason="x", status=LeaveStatus.APPROVED)
+        self.assertEqual(self.process(MONDAY).status, "leave")
+
+    def test_marking_a_day_absent_records_a_decided_absence_that_reprocessing_keeps(self):
+        from django.contrib.auth import get_user_model
+
+        from .services.marked_absence import mark_absent
+
+        self.process(MONDAY)
+        actor = get_user_model().objects.create_user(username="marker", password="pw", first_name="Mark", last_name="Er")
+        exception = mark_absent(self.person, MONDAY, "Reported by the transport manager.", actor)
+        self.assertEqual((exception.status, exception.reviewed_by), ("approved", "Mark Er"))
+        row = self.process(MONDAY)
+        self.assertEqual((row.status, row.absence_marked_by), ("absent", "Mark Er"))
+        self.assertEqual(row.exceptions.filter(exception_type="absence", status="approved").count(), 1)
+
+    def test_reversing_a_marked_absence_makes_the_day_present_again(self):
+        from django.contrib.auth import get_user_model
+
+        from .services.marked_absence import mark_absent
+        from .services.reversal import change_decision
+
+        self.process(MONDAY)
+        actor = get_user_model().objects.create_user(username="marker2", password="pw")
+        exception = mark_absent(self.person, MONDAY, "Reported absent.", actor)
+        change_decision(exception, "waived", "He was at a delivery after all.", actor)
+        row = self.process(MONDAY)
+        self.assertEqual((row.status, row.absence_marked_by), ("present", ""))
+
+    def test_a_normal_shift_cannot_be_marked_absent_this_way(self):
+        from django.contrib.auth import get_user_model
+
+        from .services.marked_absence import mark_absent
+
+        other = Employee.objects.create(employee_id="NA-2", first_name="Normal", last_name="Person")
+        EmployeeRosterDay.objects.create(employee=other, date=MONDAY, status="work", shift=Shift.objects.exclude(attendance_not_required=True).first(), source="manual")
+        with self.assertRaisesMessage(ValueError, "not on a no-attendance shift"):
+            mark_absent(other, MONDAY, "x", get_user_model().objects.create_user(username="marker3", password="pw"))

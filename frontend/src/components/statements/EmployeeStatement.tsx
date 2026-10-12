@@ -6,7 +6,7 @@ import { Section } from "@/components/ui";
 import { apiFetch, getCurrentUser } from "@/lib/api";
 
 type Employee = { id: number; employee_id: string; full_name: string; department_name?: string | null };
-type Day = { date: string; weekday: string; status: string; status_label: string; shift: string | null; clock_in: string | null; clock_out: string | null; late_minutes: number; hours_worked: number };
+type Day = { no_attendance?: boolean; can_mark_absent?: boolean; date: string; weekday: string; status: string; status_label: string; shift: string | null; clock_in: string | null; clock_out: string | null; late_minutes: number; hours_worked: number };
 type Charge = { date: string | null; kind: string; description: string; amount: string; status: string; status_label: string };
 type Case = { id: number; date: string; kind: string; minutes: number | null; shift: string | null; scheduled: string | null; clock_in: string | null; clock_out: string | null; status: string; status_label: string; decided_by: string | null; decided_on: string | null; comment: string | null; can_change: boolean };
 type Reward = { description: string; amount: string; status_label: string };
@@ -85,6 +85,20 @@ export function EmployeeStatement() {
     } finally { setChanging(null); }
   }
 
+  async function markAbsent(day: Day) {
+    const reason = window.prompt(`This person is on a no-attendance shift, so they count as present. Mark ${fullDate(day.date)} as NOT worked? Say who reported it and how it is known:`);
+    if (reason === null) return;
+    setError("");
+    try {
+      const response = await apiFetch("/attendance/mark-absent/", { method: "POST", body: JSON.stringify({ employee: Number(employeeId), date: day.date, reason }) });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.detail || "The day could not be marked absent.");
+      await load(false);
+    } catch (markError) {
+      setError(markError instanceof Error ? markError.message : "The day could not be marked absent.");
+    }
+  }
+
   async function generate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await load(true);
@@ -151,7 +165,7 @@ export function EmployeeStatement() {
           <Tile label="Hours worked" value={summary.hours_worked} />
         </div>
         <div className="mt-4 overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-xs font-semibold uppercase text-slate-500"><tr><th className="px-3 py-2">Date</th><th className="px-3 py-2">Day</th><th className="px-3 py-2">Status</th><th className="px-3 py-2">Shift</th><th className="px-3 py-2">In</th><th className="px-3 py-2">Out</th><th className="px-3 py-2 text-right">Late (min)</th><th className="px-3 py-2 text-right">Hours</th></tr></thead>
-          <tbody className="divide-y divide-slate-100">{statement.days.map((day) => <tr key={day.date}><td className="px-3 py-1.5">{dayLabel(day.date)}</td><td className="px-3 py-1.5 text-slate-500">{day.weekday}</td><td className={`px-3 py-1.5 ${statusTone[day.status] || ""}`}>{day.status_label}</td><td className="px-3 py-1.5 text-slate-600">{day.shift || "-"}</td><td className="px-3 py-1.5">{day.clock_in || "-"}</td><td className="px-3 py-1.5">{day.clock_out || "-"}</td><td className="px-3 py-1.5 text-right">{day.late_minutes || "-"}</td><td className="px-3 py-1.5 text-right">{day.hours_worked || "-"}</td></tr>)}</tbody></table></div>
+          <tbody className="divide-y divide-slate-100">{statement.days.map((day) => <tr key={day.date}><td className="px-3 py-1.5">{dayLabel(day.date)}</td><td className="px-3 py-1.5 text-slate-500">{day.weekday}</td><td className={`px-3 py-1.5 ${statusTone[day.status] || ""}`}>{day.status_label}{day.no_attendance && day.status !== "absent" && <span className="ml-1 text-xs text-slate-400">(no attendance required)</span>}{day.can_mark_absent && <button type="button" onClick={() => void markAbsent(day)} className="ml-2 rounded-lg border border-red-300 px-2 py-0.5 text-xs font-semibold text-red-700 hover:bg-red-50 print:hidden">Mark absent</button>}</td><td className="px-3 py-1.5 text-slate-600">{day.shift || "-"}</td><td className="px-3 py-1.5">{day.clock_in || "-"}</td><td className="px-3 py-1.5">{day.clock_out || "-"}</td><td className="px-3 py-1.5 text-right">{day.late_minutes || "-"}</td><td className="px-3 py-1.5 text-right">{day.hours_worked || "-"}</td></tr>)}</tbody></table></div>
         {statement.attendance_deduction_note && <p className="mt-3 rounded-xl bg-slate-50 p-3 text-xs text-slate-600">{statement.attendance_deduction_note}</p>}
 
         {statement.attendance_cases.length > 0 && <>

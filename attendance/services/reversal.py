@@ -55,6 +55,11 @@ def change_decision(exception, decision, reason, actor):
         exception.proposed_deduction = result[0] if result else 0
     exception.save()
 
+    marked = exception.attendance
+    if decision == "waived" and exception.exception_type == "absence" and marked.absence_marked_by:
+        # Someone had marked this day absent on a no-attendance shift: taking it back makes it a normal present day again.
+        marked.status, marked.absence_marked_by = "present", ""
+        marked.save(update_fields=["status", "absence_marked_by"])
     if exception.exception_type == "absence":
         MealService.sync_absence_penalties(employee, day, actor=actor)
     if payroll is not None:

@@ -32,6 +32,13 @@ class Shift(models.Model):
         default=False,
     )
 
+    # Nobody has to punch (management who need not come in, drivers who work out and about): every working day is
+    # recorded as present automatically - no lateness, no early departure, no missing punch, no absence - unless
+    # someone specifically marks a day as not worked (DailyAttendance.absence_marked_by).
+    attendance_not_required = models.BooleanField(
+        default=False,
+    )
+
     active = models.BooleanField(
         default=True,
     )
@@ -40,6 +47,8 @@ class Shift(models.Model):
         def clock(value):  # a time, or the raw "07:00" string on an instance that was just created from one
             return value.strftime("%H:%M") if hasattr(value, "strftime") else str(value)[:5]
 
+        if self.attendance_not_required:
+            return f"{self.name} (no attendance required)"
         if self.is_flexible:
             return f"{self.name} (flexible hours)"
         return f"{self.name} ({clock(self.start_time)}-{clock(self.end_time)}{', overnight' if self.is_overnight else ''})"
@@ -426,6 +435,12 @@ class DailyAttendance(models.Model):
 
     processed_at = models.DateTimeField(
         auto_now=True,
+    )
+
+    # Who said this person did not work this day, on a shift where attendance is not required (blank = nobody did).
+    absence_marked_by = models.CharField(
+        max_length=150,
+        blank=True,
     )
 
     class Meta:

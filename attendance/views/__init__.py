@@ -3,6 +3,7 @@ from .dashboard import AttendanceDashboardAPIView
 from .exceptions import (
     AttendanceExceptionListAPIView,
     ExceptionChangeDecisionAPIView,
+    MarkAbsentAPIView,
     ExceptionDecisionAPIView,
     PendingExceptionAPIView,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "AttendanceDashboardAPIView",
     "AttendanceExceptionListAPIView",
     "ExceptionChangeDecisionAPIView",
+    "MarkAbsentAPIView",
     "ExceptionDecisionAPIView",
     "PendingExceptionAPIView",
     "TodayAttendanceAPIView",

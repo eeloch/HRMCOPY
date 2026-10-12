@@ -152,6 +152,36 @@ def _log_attendance_changes(attendance, previous):
         )
 
 
+def _process_exempt_day(employee, work_date, shift, existing, leave_ids, now):
+    """A shift where nobody has to punch: the day is simply present (or on leave), never late, never absent. A person
+    who punches anyway has their times kept for information. The only way to be absent is for someone to say so
+    (mark_absent), and that is then left exactly as it was marked; so is a day whose absence was already decided."""
+    if work_date > timezone.localtime(now).date():
+        return existing
+    if existing is not None and (existing.absence_marked_by or existing.exceptions.filter(exception_type="absence").exclude(status=PENDING_EXCEPTION_STATUS).exists()):
+        return existing
+    scheduled_start, scheduled_end = shift_schedule(shift, work_date)
+    has_leave = employee.pk in (leave_ids if leave_ids is not None else set(approved_leave_employee_ids(work_date)))
+    punches = AttendanceEvent.objects.filter(
+        employee=employee, timestamp__gte=combine_date_and_time(work_date, datetime.min.time()), timestamp__lt=combine_date_and_time(work_date + timedelta(days=1), datetime.min.time()),
+    ).order_by("timestamp")
+    first, last = punches.first(), punches.last()
+    with transaction.atomic():
+        attendance, _ = DailyAttendance.objects.select_for_update().get_or_create(
+            employee=employee, date=work_date,
+            defaults={"shift": shift, "scheduled_start": scheduled_start, "scheduled_end": scheduled_end},
+        )
+        attendance.shift, attendance.scheduled_start, attendance.scheduled_end = shift, scheduled_start, scheduled_end
+        attendance.actual_clock_in = first.timestamp if first else None
+        attendance.actual_clock_out = last.timestamp if last and last != first else None
+        attendance.late_minutes = attendance.early_departure_minutes = attendance.overtime_minutes = attendance.worked_minutes = 0
+        attendance.status = "leave" if has_leave else "present"
+        attendance.save()
+        # Whatever an earlier shift raised and nobody has decided yet no longer applies.
+        AttendanceException.objects.filter(attendance=attendance, status=PENDING_EXCEPTION_STATUS).delete()
+    return attendance
+
+
 def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None):
     """Process one employee's assigned shift date without duplicating facts.
 
@@ -169,6 +199,9 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
     shift = roster_day.shift if roster_day else None
     if not shift:
         return None
+
+    if shift.attendance_not_required:
+        return _process_exempt_day(employee, work_date, shift, existing_attendance, leave_ids, now)
 
     scheduled_start, scheduled_end = shift_schedule(shift, work_date)
     # A flexible shift is the calendar day itself, so punches of the neighbouring days must not leak in.
