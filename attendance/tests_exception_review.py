@@ -123,8 +123,8 @@ class ExceptionReviewTests(TestCase):
         self.case("bayo", date(2026, 9, 29), "missing_clock_out")
         self.case("ada", date(2026, 9, 30), "absence", 720)
         rules = self.rules()
-        self.assertEqual({key: rule["matching"] for key, rule in rules.items()}, {"long_lateness": 1, "missing_punches": 2, "absences_hold": 1})  # the two retired rules are no longer offered
-        self.assertEqual({key: rule["decision"] for key, rule in rules.items()}, {"long_lateness": "approved", "missing_punches": "held", "absences_hold": "held"})
+        self.assertEqual({key: rule["matching"] for key, rule in rules.items()}, {"long_lateness": 1})  # the retired rules are no longer offered
+        self.assertEqual({key: rule["decision"] for key, rule in rules.items()}, {"long_lateness": "approved"})
 
     def test_applying_a_rule_through_the_ids_and_bulk_endpoints_decides_exactly_its_cases(self):
         short = [self.case("ada", date(2026, 9, 24), "late", 5), self.case("bayo", date(2026, 9, 25), "late", 15)]
@@ -170,12 +170,12 @@ class ApplyExceptionRulesCommandTests(TestCase):
         between = self.case(date(2026, 9, 27), "late", 30)
         out = StringIO()
         call_command("apply_exception_rules", "--dry-run", stdout=out)
-        self.assertIn("DRY RUN - 2 case(s) in total.", out.getvalue())  # the retired rules are not run by default
+        self.assertIn("DRY RUN - 1 case(s) in total.", out.getvalue())  # the retired rules are not run by default
         self.assertEqual(AttendanceException.objects.filter(status="pending").count(), 5)
 
         call_command("apply_exception_rules", "--by", "Test run", stdout=StringIO())
         statuses = {case.pk: AttendanceException.objects.get(pk=case.pk) for case in (early, small, big, punch, between)}
-        self.assertEqual([statuses[early.pk].status, statuses[small.pk].status, statuses[big.pk].status, statuses[punch.pk].status, statuses[between.pk].status], ["pending", "pending", "approved", "held", "pending"])
+        self.assertEqual([statuses[early.pk].status, statuses[small.pk].status, statuses[big.pk].status, statuses[punch.pk].status, statuses[between.pk].status], ["pending", "pending", "approved", "pending", "pending"])
         self.assertEqual(statuses[big.pk].reviewed_by, "Test run")
         self.assertTrue(AuditEvent.objects.filter(event_type="attendance.exception_approved").exists())
 

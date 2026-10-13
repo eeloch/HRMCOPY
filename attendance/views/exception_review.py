@@ -78,9 +78,10 @@ def filtered_queryset(params, *, default_status="pending"):
     return queryset.order_by("-reviewed_at", "-id")
 
 
-# Rules that no longer belong on the page (the terminals are long live, and lateness inside the allowance is waived as it
-# is recorded). They still exist, by name, for the command line.
-RETIRED_RULE_KEYS = {"before_go_live", "short_lateness"}
+# Rules that no longer belong on the page: the terminals are long live, lateness inside the allowance is waived as it is
+# recorded, absences are approved as they are recorded, and a missing punch is fined through approval rather than held in
+# bulk. They still exist, by name, for the command line.
+RETIRED_RULE_KEYS = {"before_go_live", "short_lateness", "missing_punches", "absences_hold"}
 
 
 def rule_definitions(include_retired=False):
