@@ -125,9 +125,15 @@ class EmployeeAttendanceHistorySerializer(DailyAttendanceSerializer):
     """Adds the operational conflict state without changing stored facts."""
 
     operational_status = serializers.SerializerMethodField()
+    charges = serializers.SerializerMethodField()
 
     class Meta(DailyAttendanceSerializer.Meta):
-        fields = DailyAttendanceSerializer.Meta.fields + ["operational_status"]
+        fields = DailyAttendanceSerializer.Meta.fields + ["operational_status", "charges"]
+
+    def get_charges(self, attendance):
+        """What the day's lateness / early departure / absence / missing punch came to: kind, status and - for people who may
+        see money - the amount (the payroll deduction once it exists, otherwise the proposal)."""
+        return (self.context.get("charges") or {}).get(attendance.pk, [])
 
     def get_operational_status(self, attendance):
         if getattr(attendance, "leave_punch_conflicts", []):

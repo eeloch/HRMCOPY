@@ -120,3 +120,31 @@ class MissingPunchFineAndAutoAbsenceTests(TestCase):
         attendance = process_employee_attendance(self.employee, date(2032, 6, 7), now=self.after)
         self.assertEqual(attendance.status, "present")
         self.assertEqual(attendance.exceptions.get(exception_type="absence").status, "waived")
+
+
+class AttendanceHistoryShowsChargesTests(MissingPunchFineAndAutoAbsenceTests):
+    """The history says what each day's case amounted to - for people who may see money only."""
+
+    def history(self, user):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client.get(f"/api/attendance/records/?employee={self.employee.pk}").json()["results"]
+
+    def test_a_charge_shows_its_state_and_amount_to_someone_who_may_see_money(self):
+        exception = self.lone_clock_in()
+        row = next(item for item in self.history(self.actor) if item["date"] == "2032-06-03")
+        self.assertEqual([(c["label"], c["state"], c["amount"]) for c in row["charges"]], [("No clock-out", "Proposed", "1000.00")])
+        self.decide(exception, amount="2500")
+        sync_attendance_deductions_for_period(self.period)
+        row = next(item for item in self.history(self.actor) if item["date"] == "2032-06-03")
+        self.assertEqual([(c["state"], c["amount"]) for c in row["charges"]], [("Charged", "2500.00")])  # the payroll deduction itself
+        change_decision(exception, "waived", "Forgot the scan.", self.actor)
+        row = next(item for item in self.history(self.actor) if item["date"] == "2032-06-03")
+        self.assertEqual([(c["state"], c["amount"]) for c in row["charges"]], [("Waived", "0.00")])
+
+    def test_someone_without_money_access_sees_the_state_but_no_amount(self):
+        self.lone_clock_in()
+        plain = get_user_model().objects.create_user(username="plain-viewer", password="pw")
+        plain.user_permissions.add(Permission.objects.get(codename="manage_devices"))  # may open attendance pages, not see money
+        row = next(item for item in self.history(plain) if item["date"] == "2032-06-03")
+        self.assertEqual([(c["state"], c["amount"]) for c in row["charges"]], [("Proposed", None)])

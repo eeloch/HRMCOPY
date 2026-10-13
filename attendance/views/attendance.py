@@ -116,9 +116,13 @@ class EmployeeAttendanceHistoryAPIView(APIView):
             )
             .order_by("-date", "-id")
         )
+        from attendance.services.charges import charges_by_attendance
+
+        records = list(records)
+        show_amounts = request.user.is_superuser or request.user.has_perm("payroll.view_payroll") or request.user.has_perm("attendance.review_attendanceexception")
         return Response(
             {
-                "count": records.count(),
-                "results": EmployeeAttendanceHistorySerializer(records, many=True).data,
+                "count": len(records),
+                "results": EmployeeAttendanceHistorySerializer(records, many=True, context={"charges": charges_by_attendance(records, show_amounts=show_amounts)}).data,
             }
         )

@@ -5,7 +5,18 @@ import { useEffect, useEffectEvent, useState } from "react";
 import { Section, StatusBadge } from "@/components/ui";
 import { apiFetch } from "@/lib/api";
 
+type Charge = { type: string; label: string; minutes: number; status: string; state: string; amount: string | null };
+
+const chargeTone: Record<string, string> = { approved: "text-red-700", pending: "text-amber-700", waived: "text-emerald-700", held: "text-slate-500" };
+
+function ChargeNote({ charge }: { charge?: Charge }) {
+  if (!charge) return null;
+  const amount = charge.amount != null && charge.status !== "waived" ? ` ${"₦" + Number(charge.amount).toLocaleString()}` : "";
+  return <span className={`mt-0.5 block text-xs font-medium ${chargeTone[charge.status] || "text-slate-500"}`}>{charge.state}{amount}{charge.status === "waived" ? " - no charge" : ""}</span>;
+}
+
 type AttendanceRecord = {
+  charges?: Charge[];
   id: number;
   date: string;
   shift_name: string | null;
@@ -43,7 +54,7 @@ export function EmployeeAttendancePanel({ employeeId }: { employeeId: number }) 
 
   return <div className="mt-6">
     <Section title="Attendance History" subtitle="Processed attendance records. Raw device punches are shown separately under Biometric." actions={<button type="button" onClick={() => void loadRecords()} disabled={loading} className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Refresh</button>}>
-      {error ? <PanelError message={error} retry={loadRecords} /> : loading ? <PanelSkeleton /> : records.length ? <div className="overflow-x-auto"><table className="w-full min-w-[1100px] text-left"><thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3">Date</th><th className="px-5 py-3">Shift</th><th className="px-5 py-3">Clock In</th><th className="px-5 py-3">Clock Out</th><th className="px-5 py-3">Late</th><th className="px-5 py-3">Early Departure</th><th className="px-5 py-3">Worked</th><th className="px-5 py-3">Overtime</th><th className="px-5 py-3">Status</th></tr></thead><tbody className="divide-y divide-slate-100">{records.map((record) => <tr key={record.id} className="hover:bg-slate-50"><td className="px-5 py-4 text-sm font-medium text-slate-800">{formatDate(record.date)}</td><td className="px-5 py-4 text-sm text-slate-600">{record.shift_name || "No shift"}</td><td className="px-5 py-4 text-sm text-slate-600">{formatDateTime(record.actual_clock_in)}</td><td className="px-5 py-4 text-sm text-slate-600">{formatDateTime(record.actual_clock_out)}</td><td className="px-5 py-4 text-sm text-slate-600">{formatMinutes(record.late_minutes)}</td><td className="px-5 py-4 text-sm text-slate-600">{formatMinutes(record.early_departure_minutes)}</td><td className="px-5 py-4 text-sm text-slate-600">{formatMinutes(record.worked_minutes)}</td><td className="px-5 py-4 text-sm text-slate-600">{formatMinutes(record.overtime_minutes)}</td><td className="px-5 py-4"><StatusBadge status={record.operational_status} /></td></tr>)}</tbody></table></div> : <Empty message="No processed attendance records found." />}
+      {error ? <PanelError message={error} retry={loadRecords} /> : loading ? <PanelSkeleton /> : records.length ? <div className="overflow-x-auto"><table className="w-full min-w-[1100px] text-left"><thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3">Date</th><th className="px-5 py-3">Shift</th><th className="px-5 py-3">Clock In</th><th className="px-5 py-3">Clock Out</th><th className="px-5 py-3">Late</th><th className="px-5 py-3">Early Departure</th><th className="px-5 py-3">Worked</th><th className="px-5 py-3">Overtime</th><th className="px-5 py-3">Status</th></tr></thead><tbody className="divide-y divide-slate-100">{records.map((record) => <tr key={record.id} className="hover:bg-slate-50"><td className="px-5 py-4 text-sm font-medium text-slate-800">{formatDate(record.date)}</td><td className="px-5 py-4 text-sm text-slate-600">{record.shift_name || "No shift"}</td><td className="px-5 py-4 text-sm text-slate-600">{formatDateTime(record.actual_clock_in)}</td><td className="px-5 py-4 text-sm text-slate-600">{formatDateTime(record.actual_clock_out)}</td><td className="px-5 py-4 text-sm text-slate-600">{formatMinutes(record.late_minutes)}<ChargeNote charge={record.charges?.find((item) => item.type === "late")} /></td><td className="px-5 py-4 text-sm text-slate-600">{formatMinutes(record.early_departure_minutes)}<ChargeNote charge={record.charges?.find((item) => item.type === "early_departure")} /></td><td className="px-5 py-4 text-sm text-slate-600">{formatMinutes(record.worked_minutes)}</td><td className="px-5 py-4 text-sm text-slate-600">{formatMinutes(record.overtime_minutes)}</td><td className="px-5 py-4"><StatusBadge status={record.operational_status} />{record.charges?.filter((item) => ["absence", "missing_clock_in", "missing_clock_out"].includes(item.type)).map((item) => <span key={item.type} className="block"><span className="mt-1 block text-xs text-slate-500">{item.label}</span><ChargeNote charge={item} /></span>)}</td></tr>)}</tbody></table></div> : <Empty message="No processed attendance records found." />}
     </Section>
   </div>;
 }
