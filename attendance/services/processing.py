@@ -181,11 +181,12 @@ def _log_attendance_changes(attendance, previous):
 def _process_exempt_day(employee, work_date, shift, existing, leave_ids, now):
     """A shift where nobody has to punch: the day is simply present (or on leave), never late, never absent. A person
     who punches anyway has their times kept for information. The only way to be absent is for someone to say so
-    (mark_absent), and that is then left exactly as it was marked; so is a day whose absence was already decided."""
+    (mark_absent), and that is then left exactly as it was marked; so is a day whose absence was approved. An absence
+    that was only waived, held or pending (from before they were on this shift) no longer applies: the day is present."""
     if work_date > timezone.localtime(now).date():
         return existing
-    if existing is not None and (existing.absence_marked_by or existing.exceptions.filter(exception_type="absence").exclude(status=PENDING_EXCEPTION_STATUS).exists()):
-        return existing
+    if existing is not None and (existing.absence_marked_by or existing.exceptions.filter(exception_type="absence", status="approved").exists()):
+        return existing  # someone said this day was not worked: it stays as they said
     scheduled_start, scheduled_end = shift_schedule(shift, work_date)
     has_leave = employee.pk in (leave_ids if leave_ids is not None else set(approved_leave_employee_ids(work_date)))
     punches = AttendanceEvent.objects.filter(

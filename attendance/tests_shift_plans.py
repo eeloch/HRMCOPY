@@ -1027,3 +1027,13 @@ class NoAttendanceRequiredTests(PlanTestCase):
         EmployeeRosterDay.objects.create(employee=other, date=MONDAY, status="work", shift=Shift.objects.exclude(attendance_not_required=True).first(), source="manual")
         with self.assertRaisesMessage(ValueError, "not on a no-attendance shift"):
             mark_absent(other, MONDAY, "x", get_user_model().objects.create_user(username="marker3", password="pw"))
+
+    def test_an_old_waived_or_held_absence_does_not_keep_the_day_absent_but_an_approved_one_does(self):
+        from .models import AttendanceException, DailyAttendance
+
+        waived = DailyAttendance.objects.create(employee=self.person, date=MONDAY, shift=Shift.objects.first(), status="absent")
+        AttendanceException.objects.create(attendance=waived, exception_type="absence", status="waived", reviewed_by="HR")
+        approved = DailyAttendance.objects.create(employee=self.person, date=MONDAY + timedelta(days=1), shift=Shift.objects.first(), status="absent")
+        AttendanceException.objects.create(attendance=approved, exception_type="absence", status="approved", reviewed_by="HR")
+        self.assertEqual(self.process(MONDAY).status, "present")
+        self.assertEqual(self.process(MONDAY + timedelta(days=1)).status, "absent")
