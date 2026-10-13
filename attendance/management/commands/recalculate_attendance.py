@@ -14,7 +14,7 @@ from django.utils import timezone
 
 from attendance.management.commands.realign_rotation import snapshot
 from attendance.models import AttendanceException, ShiftPlanAssignment
-from attendance.services.processing import process_employee_attendance
+from attendance.services.recalculate import recalculate_attendance_for
 from attendance.services.shift_plans import clear_false_absences_on_rest_days
 from employees.models import Employee
 
@@ -56,12 +56,7 @@ class Command(BaseCommand):
         others = AttendanceException.objects.filter(attendance__employee_id__in=ids, attendance__date__range=(start, today)).exclude(status="pending").count()
         self.stdout.write(f"False absences on rest days removed: {len(cleared)}. Test decisions on the old roster discarded: {discarded_count}. Other people's decisions left alone: {others}.")
 
-        processed, day = 0, start
-        while day <= today:
-            for employee in employees:
-                process_employee_attendance(employee, day)
-                processed += 1
-            day += timedelta(days=1)
+        processed = recalculate_attendance_for(employees, start, today, actor="recalculate_attendance")
         self.stdout.write(f"Reprocessed {processed} person-days.")
         self.stdout.write(f"AFTER:  {snapshot(ids, start, today)}")
         if options["dry_run"]:

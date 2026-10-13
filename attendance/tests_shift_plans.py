@@ -3,7 +3,7 @@ from datetime import date, datetime, time, timedelta
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -15,8 +15,27 @@ from .services.shift_plans import assign_plan, day_group_for_week, extend_roster
 MONDAY = date(2026, 9, 21)  # a Monday: Group A starts on Day this week
 
 
+def late_evening(test):
+    """Run a test as if it were 23:30 today, so the day's shifts and their punch-capture windows are over whatever time the
+    suite runs at (these tests judge whole days from the punches)."""
+    import functools
+    from unittest import mock
+
+    @functools.wraps(test)
+    def wrapper(*args, **kwargs):
+        fixed = timezone.make_aware(datetime.combine(timezone.localdate(), time(23, 30)))
+        with mock.patch("django.utils.timezone.now", return_value=fixed):
+            return test(*args, **kwargs)
+
+    return wrapper
+
+
 class PlanTestCase(TestCase):
     def setUp(self):
+        # These tests set up their own attendance history; the automatic re-read on a plan change has its own tests below.
+        override = override_settings(ATTENDANCE_RECALC_ON_PLAN_CHANGE=False)
+        override.enable()
+        self.addCleanup(override.disable)
         self.day = Shift.objects.create(name="Day", start_time=time(7), end_time=time(19))
         self.night = Shift.objects.create(name="Night", start_time=time(19), end_time=time(7), is_overnight=True)
         self.admin_shift = Shift.objects.create(name="Admin", start_time=time(8), end_time=time(18))
@@ -628,6 +647,7 @@ class RealignRotationTests(PlanTestCase):
         self.monday = monday
         assign_plan([self.person], self.rotation, group="A", start_date=monday - timedelta(days=14))
 
+    @late_evening
     def test_the_roster_swaps_from_the_date_and_attendance_is_recalculated_from_the_punches(self):
         from datetime import datetime, time as dtime
 
@@ -660,6 +680,7 @@ class RealignRotationTests(PlanTestCase):
         self.assertEqual((fixed.shift, fixed.status, fixed.late_minutes), (self.day, "present", 0))
         self.assertEqual((timezone.localtime(fixed.actual_clock_in).strftime("%H:%M"), timezone.localtime(fixed.actual_clock_out).strftime("%H:%M")), ("06:40", "19:05"))
 
+    @late_evening
     def test_only_the_named_reviewers_decisions_on_the_old_roster_are_removed(self):
         from django.core.management import call_command
 
@@ -753,6 +774,7 @@ class GroupLettersMeanMorningAndEveningTests(PlanTestCase):
 class RecalculateAttendanceTests(PlanTestCase):
     """People whose roster was corrected for past days get their attendance redone from the punches."""
 
+    @late_evening
     def test_punches_are_reread_against_the_corrected_roster_and_old_test_decisions_are_discarded(self):
         from datetime import datetime, time as dtime
 
@@ -764,6 +786,8 @@ class RecalculateAttendanceTests(PlanTestCase):
 
         today = timezone.localdate()
         day = today - timedelta(days=2)
+        if day.weekday() == 6:  # a Sunday is a rest day on the Mon-Sat plans
+            day -= timedelta(days=1)
         dept = Department.objects.create(name="Recalc Dept")
         person = Employee.objects.create(employee_id="RC-1", first_name="Re", last_name="Calc", department=dept)
         assign_plan([person], self.perm_night, start_date=day - timedelta(days=7))  # wrongly on Nights
@@ -776,7 +800,7 @@ class RecalculateAttendanceTests(PlanTestCase):
         theirs = AttendanceException.objects.create(attendance=wrong, exception_type="missing_clock_out", status="held", reviewed_by="Someone Real")
 
         assign_plan([person], self.perm_day, start_date=day)  # the roster upload: corrected from a past date
-        since = (timezone.now() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M")
+        since = (timezone.now() - timedelta(minutes=5)).astimezone(__import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M")  # the command reads it as UTC
         call_command("recalculate_attendance", "--from", day.isoformat(), "--assigned-since", since)
 
         fixed = DailyAttendance.objects.get(employee=person, date=day)
@@ -1037,3 +1061,64 @@ class NoAttendanceRequiredTests(PlanTestCase):
         AttendanceException.objects.create(attendance=approved, exception_type="absence", status="approved", reviewed_by="HR")
         self.assertEqual(self.process(MONDAY).status, "present")
         self.assertEqual(self.process(MONDAY + timedelta(days=1)).status, "absent")
+
+
+class AutomaticRecalculationOnPlanChangeTests(PlanTestCase):
+    """Moving someone to a plan from a past date reads their past attendance again on the new shift."""
+
+    def setUp(self):
+        super().setUp()
+        override = override_settings(ATTENDANCE_RECALC_ON_PLAN_CHANGE=True)
+        override.enable()
+        self.addCleanup(override.disable)
+        from .models import AttendanceEvent
+
+        self.person = Employee.objects.create(employee_id="AR-1", first_name="Auto", last_name="Recalc")
+        self.today = timezone.localdate()
+        self.start = self.today - timedelta(days=3)
+        if self.start.weekday() == 6:  # a Sunday is a rest day on the Mon-Sat plans
+            self.start -= timedelta(days=1)
+        # first on the Night plan: they really worked days, so the night roster misreads their punches
+        assign_plan([self.person], self.perm_night, start_date=self.start - timedelta(days=5))
+        for offset in range((self.today - self.start).days + 1):
+            day = self.start + timedelta(days=offset)
+            AttendanceEvent.objects.create(employee=self.person, timestamp=timezone.make_aware(datetime.combine(day, time(7, 2))), external_event_id=f"ar-in-{offset}")
+            AttendanceEvent.objects.create(employee=self.person, timestamp=timezone.make_aware(datetime.combine(day, time(19, 1))), external_event_id=f"ar-out-{offset}")
+
+    def test_past_attendance_follows_the_new_shift_without_anyone_asking(self):
+        from .models import DailyAttendance
+        from .services.processing import process_employee_attendance
+
+        past = self.start
+        process_employee_attendance(self.person, past)
+        before = DailyAttendance.objects.get(employee=self.person, date=past)
+        self.assertEqual(before.shift, self.night)  # judged on the wrong roster
+
+        _, summary = assign_plan([self.person], self.perm_day, start_date=self.start)
+        after = DailyAttendance.objects.get(employee=self.person, date=past)
+        self.assertEqual(after.shift, self.day)
+        self.assertEqual(after.status, "present")  # no longer "late" by hours against a night start
+        self.assertLessEqual(after.late_minutes, 5)
+        self.assertGreater(summary.attendance_recalculated, 0)
+
+    def test_a_decision_already_taken_is_left_as_decided(self):
+        from .models import AttendanceException, DailyAttendance
+        from .services.processing import process_employee_attendance
+
+        process_employee_attendance(self.person, self.start)
+        record = DailyAttendance.objects.get(employee=self.person, date=self.start)
+        decided = AttendanceException.objects.create(attendance=record, exception_type="late", status="approved", reviewed_by="HR", proposed_deduction=300)
+        assign_plan([self.person], self.perm_day, start_date=self.start)
+        decided.refresh_from_db()
+        self.assertEqual((decided.status, decided.reviewed_by), ("approved", "HR"))
+
+    def test_a_record_on_a_day_that_became_a_rest_day_is_removed_but_a_future_start_changes_nothing(self):
+        from .models import DailyAttendance
+
+        sunday = next(self.start + timedelta(days=n) for n in range(7) if (self.start + timedelta(days=n)).weekday() == 6)
+        if sunday <= self.today:
+            DailyAttendance.objects.create(employee=self.person, date=sunday, shift=self.night, status="incomplete")
+            assign_plan([self.person], self.perm_day, start_date=self.start)  # Mon-Sat plan: Sunday is a rest day
+            self.assertFalse(DailyAttendance.objects.filter(employee=self.person, date=sunday).exists())
+        _, summary = assign_plan([self.person], self.perm_day, start_date=self.today + timedelta(days=2))
+        self.assertEqual(summary.attendance_recalculated, 0)

@@ -88,14 +88,16 @@ class SyncSummary:
     created: int = 0
     updated: int = 0
     kept: int = 0  # already right, or a manual/override day that was left alone
+    attendance_recalculated: int = 0  # person-days of past attendance read again on the new roster (0 when none, or done in the background)
 
     def add(self, other):
         self.created += other.created
         self.updated += other.updated
         self.kept += other.kept
+        self.attendance_recalculated += other.attendance_recalculated
 
     def as_dict(self):
-        return {"created": self.created, "updated": self.updated, "kept": self.kept}
+        return {"created": self.created, "updated": self.updated, "kept": self.kept, "attendance_recalculated": self.attendance_recalculated}
 
 
 def sync_rosters(assignments, start, end):
@@ -153,7 +155,7 @@ def split_groups(people):
 KEEP = object()  # assign_plan: carry the person's existing day off over to the new plan
 
 
-def assign_plan(employees, plan, *, group="", start_date=None, actor="", day_off=KEEP, by_label=False):
+def assign_plan(employees, plan, *, group="", start_date=None, actor="", day_off=KEEP, by_label=False, recalculate=True):
     """Put these people on a plan from start_date. A person's earlier assignment is closed the day before, and the
     generated roster from start_date on is rewritten to follow the new plan (manual days are kept).
     `group` is the stored team, unless by_label=True: then "A" means the morning team and "B" the evening team in the
@@ -188,6 +190,11 @@ def assign_plan(employees, plan, *, group="", start_date=None, actor="", day_off
         # Days planned earlier beyond the horizon (from an old plan or an older generation) would be stale.
         EmployeeRosterDay.objects.filter(employee__in=[a.employee_id for a in created], date__gt=horizon_end, source=RosterDaySource.GENERATED).delete()
         summary = sync_rosters(created, start_date, horizon_end)
+    if recalculate:
+        from attendance.services.recalculate import recalculate_after_roster_change
+
+        # Days already worked were judged on the old roster: read them again on the new one.
+        summary.attendance_recalculated = recalculate_after_roster_change([a.employee for a in created], start_date, actor=actor)
     return created, summary
 
 
@@ -289,4 +296,7 @@ def set_day_off(employees, day_off, effective_from, *, actor=""):
             summary["people"] += 1
         summary["roster"] = sync_rosters(touched, effective_from, horizon_end)
         summary["absences_cleared"] = clear_false_absences_on_rest_days(people, effective_from, min(timezone.localdate(), horizon_end), actor=actor)
+    from attendance.services.recalculate import recalculate_after_roster_change
+
+    summary["attendance_recalculated"] = recalculate_after_roster_change([person for person in people if person.employee_id not in summary["no_plan"]], effective_from, actor=actor)
     return summary
