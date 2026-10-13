@@ -78,8 +78,18 @@ def filtered_queryset(params, *, default_status="pending"):
     return queryset.order_by("-reviewed_at", "-id")
 
 
-def rule_definitions():
+# Rules that no longer belong on the page (the terminals are long live, and lateness inside the allowance is waived as it
+# is recorded). They still exist, by name, for the command line.
+RETIRED_RULE_KEYS = {"before_go_live", "short_lateness"}
+
+
+def rule_definitions(include_retired=False):
     """Ready-made rules: a filter on pending exceptions plus the decision and the reason recorded with it."""
+    rules = _all_rule_definitions()
+    return rules if include_retired else [rule for rule in rules if rule["key"] not in RETIRED_RULE_KEYS]
+
+
+def _all_rule_definitions():
     live = go_live_date()
     allowance = settings.ATTENDANCE_LATE_ALLOWANCE_MINUTES
     long_late = settings.ATTENDANCE_LONG_LATE_MINUTES

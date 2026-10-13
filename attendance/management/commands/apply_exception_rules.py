@@ -5,7 +5,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from attendance.models import AttendanceException
-from attendance.views.exception_review import decide, filtered_queryset, rule_definitions
+from attendance.views.exception_review import RETIRED_RULE_KEYS, decide, filtered_queryset, rule_definitions
 
 
 class Command(BaseCommand):
@@ -17,9 +17,9 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true", help="Show how many cases each rule would decide without saving.")
 
     def handle(self, *args, **options):
-        rules = rule_definitions()
+        rules = rule_definitions(include_retired=True)
         keys = {rule["key"] for rule in rules}
-        wanted = options["rule"] or [rule["key"] for rule in rules]
+        wanted = options["rule"] or [rule["key"] for rule in rules if rule["key"] not in RETIRED_RULE_KEYS]  # retired rules only by name
         unknown = [key for key in wanted if key not in keys]
         if unknown:
             raise CommandError(f"Unknown rule(s): {', '.join(unknown)}. Choose from: {', '.join(sorted(keys))}.")

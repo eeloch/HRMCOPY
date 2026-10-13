@@ -123,13 +123,15 @@ class ExceptionReviewTests(TestCase):
         self.case("bayo", date(2026, 9, 29), "missing_clock_out")
         self.case("ada", date(2026, 9, 30), "absence", 720)
         rules = self.rules()
-        self.assertEqual({key: rule["matching"] for key, rule in rules.items()}, {"before_go_live": 2, "short_lateness": 2, "long_lateness": 1, "missing_punches": 2, "absences_hold": 1})
-        self.assertEqual({key: rule["decision"] for key, rule in rules.items()}, {"before_go_live": "waived", "short_lateness": "waived", "long_lateness": "approved", "missing_punches": "held", "absences_hold": "held"})
+        self.assertEqual({key: rule["matching"] for key, rule in rules.items()}, {"long_lateness": 1, "missing_punches": 2, "absences_hold": 1})  # the two retired rules are no longer offered
+        self.assertEqual({key: rule["decision"] for key, rule in rules.items()}, {"long_lateness": "approved", "missing_punches": "held", "absences_hold": "held"})
 
     def test_applying_a_rule_through_the_ids_and_bulk_endpoints_decides_exactly_its_cases(self):
         short = [self.case("ada", date(2026, 9, 24), "late", 5), self.case("bayo", date(2026, 9, 25), "late", 15)]
         other = self.case("ada", date(2026, 9, 26), "late", 30)
-        rule = self.rules()["short_lateness"]
+        from attendance.views.exception_review import rule_definitions
+
+        rule = {item["key"]: item for item in rule_definitions(include_retired=True)}["short_lateness"]
         ids = self.client.get("/api/attendance/exceptions/queue/ids/", rule["filters"]).json()["ids"]
         self.assertEqual(sorted(ids), sorted(case.pk for case in short))
         self.client.post("/api/attendance/exceptions/bulk-decision/", {"ids": ids, "decision": rule["decision"], "comment": rule["comment"]}, format="json")
@@ -156,7 +158,7 @@ class ApplyExceptionRulesCommandTests(TestCase):
         attendance, _ = DailyAttendance.objects.get_or_create(employee=self.person, date=day, defaults={"shift": self.shift})
         return AttendanceException.objects.create(attendance=attendance, exception_type=kind, minutes_affected=minutes)
 
-    def test_a_dry_run_changes_nothing_and_a_real_run_applies_every_rule(self):
+    def test_a_dry_run_changes_nothing_and_a_real_run_applies_every_current_rule(self):
         from io import StringIO
 
         from django.core.management import call_command
@@ -168,14 +170,14 @@ class ApplyExceptionRulesCommandTests(TestCase):
         between = self.case(date(2026, 9, 27), "late", 30)
         out = StringIO()
         call_command("apply_exception_rules", "--dry-run", stdout=out)
-        self.assertIn("DRY RUN - 4 case(s) in total.", out.getvalue())
+        self.assertIn("DRY RUN - 2 case(s) in total.", out.getvalue())  # the retired rules are not run by default
         self.assertEqual(AttendanceException.objects.filter(status="pending").count(), 5)
 
         call_command("apply_exception_rules", "--by", "Test run", stdout=StringIO())
         statuses = {case.pk: AttendanceException.objects.get(pk=case.pk) for case in (early, small, big, punch, between)}
-        self.assertEqual([statuses[early.pk].status, statuses[small.pk].status, statuses[big.pk].status, statuses[punch.pk].status, statuses[between.pk].status], ["waived", "waived", "approved", "held", "pending"])
-        self.assertEqual(statuses[small.pk].reviewed_by, "Test run")
-        self.assertTrue(AuditEvent.objects.filter(event_type="attendance.exception_waived").exists())
+        self.assertEqual([statuses[early.pk].status, statuses[small.pk].status, statuses[big.pk].status, statuses[punch.pk].status, statuses[between.pk].status], ["pending", "pending", "approved", "held", "pending"])
+        self.assertEqual(statuses[big.pk].reviewed_by, "Test run")
+        self.assertTrue(AuditEvent.objects.filter(event_type="attendance.exception_approved").exists())
 
     def test_one_rule_can_be_chosen_and_a_wrong_name_is_refused(self):
         from django.core.management import CommandError, call_command
