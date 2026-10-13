@@ -105,4 +105,4 @@ def _refresh_terminal(employee):
     """Switch the person on (or off) at the terminal now rather than at the next full check."""
     from .gating import refresh
 
-    refresh(employee)
+    refresh(employee, trigger="extra ticket authorised or changed")

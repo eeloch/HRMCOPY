@@ -2074,6 +2074,33 @@ class MealGatingTests(TestCase):
         commands = DeviceCommand.objects.filter(command_type="set_user_enabled")
         self.assertEqual([(c.payload["enrollid"], c.payload["enabled"], "legacy" in c.payload) for c in commands], [(7, False, False)])
 
+    def test_every_switch_records_why_it_was_made_and_what_triggered_it(self):
+        self.scan(self.pilot, "why-1"); self.scan(self.pilot, "why-2")
+        self.gating.refresh(self.pilot, trigger="after a meal scan")
+        reason = DeviceCommand.objects.get(command_type="set_user_enabled").payload["reason"]
+        self.assertEqual(reason["trigger"], "after a meal scan")
+        self.assertIn("all 2 ticket(s) used", reason["text"])
+        self.assertEqual((reason["state"]["used"], reason["state"]["left"], reason["state"]["entitlement_today"]), (2, 0, 2))
+
+    def test_a_periodic_check_says_so_and_a_rest_day_or_clock_in_wait_is_explained(self):
+        EmployeeRosterDay.objects.filter(employee=self.pilot, date=self.today).update(status=RosterDayStatus.REST, shift=None)
+        self.gating.reconcile()
+        self.gating.reconcile(trigger="periodic check")
+        reason = DeviceCommand.objects.get(command_type="set_user_enabled").payload["reason"]
+        self.assertEqual(reason["trigger"], "periodic check")
+        self.assertIn("not rostered to work today", reason["text"])
+
+    def test_the_employee_profile_lists_the_switches_with_their_reasons(self):
+        self.scan(self.pilot, "log-1"); self.scan(self.pilot, "log-2")
+        self.gating.refresh(self.pilot)
+        viewer = get_user_model().objects.create_user("log-viewer", password="pw")
+        viewer.user_permissions.add(Permission.objects.get(codename="record_meal_operations"))
+        client = APIClient()
+        client.force_authenticate(viewer)
+        data = client.get(f"/api/meals/employees/{self.pilot.pk}/profile/").json()
+        self.assertEqual([(item["enabled"], item["trigger"]) for item in data["terminal_log"]], [(False, "re-check")])
+        self.assertIn("ticket(s) used", data["terminal_log"][0]["text"])
+
     def confirm_all(self):
         from meals.gating import record_state
 
@@ -3263,7 +3290,7 @@ class SundayNightMealsOpenAfterClockInTests(TestCase):
 
         with mock.patch.object(self.gating, "refresh") as refresh, mock.patch.object(self.gating.timezone, "now", return_value=self.evening):
             self.gating.refresh_for_clock_in(self.worker)
-        refresh.assert_called_once_with(self.worker.pk)
+        refresh.assert_called_once_with(self.worker.pk, trigger="clock-in punch saved")
 
     def test_the_recheck_is_skipped_for_day_staff_and_when_the_rule_is_off(self):
         from unittest import mock

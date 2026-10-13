@@ -738,7 +738,7 @@ class MealService:
         exception.save()
         from .gating import refresh
 
-        refresh(exception.employee_id)
+        refresh(exception.employee_id, trigger="excess ticket declined")
         AuditService.log(event_type="meals.excess_declined", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.WARNING, title="Meal excess declined", description=f"{len(excess_tickets)} ticket(s) beyond entitlement declined; vendor not billed, no deduction.", metadata={"exception": exception.pk, "reason": reason, "tickets_voided": [t.pk for t in excess_tickets]})
         if notify:
             for user in get_user_model().objects.filter(is_superuser=True): NotificationService.create(recipient=user, event_type="meals.excess_declined", title="Meal excess declined", message=f"{exception.employee.full_name}: {reason or 'No reason given'}", severity="warning", employee=exception.employee, related_url="/meals")
@@ -778,7 +778,7 @@ class MealService:
         AuditService.log(event_type="meals.ticket_voided", module="meals", employee=collection.employee, actor=actor, object=collection, severity=AuditSeverity.WARNING, title="Meal ticket voided", description=f"Meal ticket for {collection.work_date} voided.", metadata={"collection": collection.pk, "reason": reason, "rate": str(collection.rate_snapshot)})
         from .gating import refresh
 
-        refresh(collection.employee_id)  # a voided ticket may free one: switch them back on at the terminal
+        refresh(collection.employee_id, trigger="ticket voided")  # a voided ticket may free one: switch them back on at the terminal
         return collection
 
     LATE_ENTITLEMENT_GRACE_DAYS = 14
@@ -852,7 +852,7 @@ class MealService:
         AuditService.log(event_type="meals.excess_balanced", module="meals", employee=exception.employee, actor=actor, object=exception, severity=AuditSeverity.SUCCESS, title="Meal excess balanced against late entitlement", description=f"{len(covered)} ticket(s) on {exception.work_date} fall within the entitlement entered afterwards; no deduction.", metadata={"exception": exception.pk, "entitlement": entitlement, "tickets_balanced": [t.pk for t in covered], "tickets_still_excess": remaining})
         from .gating import refresh
 
-        refresh(exception.employee_id)
+        refresh(exception.employee_id, trigger="excess ticket decided")
         return len(covered)
 
     @staticmethod
@@ -1031,7 +1031,7 @@ def apply_import_meal_entitlement(employee, tickets_per_day, *, actor=None, reas
     if refresh_terminals:
         from .gating import refresh
 
-        refresh(employee)  # switch them on/off at a meal terminal straight away if this changed what they're owed today
+        refresh(employee, trigger="meal entitlement changed")  # switch them on/off at a meal terminal straight away if this changed what they're owed today
     return "created" if current is None else "changed"
 
 

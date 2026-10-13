@@ -675,7 +675,7 @@ class Command(BaseCommand):
             employee = Employee.objects.get(pk=employee_id)
             if employee.pk in {e.pk for e in gated_employees(only=[employee.pk])}:
                 # The new entry starts switched on; make it match what the person has left today.
-                _queue(device, employee, to_id, tickets_left_today(employee) > 0)
+                _queue(device, employee, to_id, tickets_left_today(employee) > 0, trigger="terminal id changed")
 
     async def _run_name_probe(self, ws, sn, command_id):
         """Ask a terminal for the NAME it holds against some ids, to work out whose leftover entries they are. One
@@ -1079,7 +1079,7 @@ class Command(BaseCommand):
         try:
             from meals.gating import refresh
 
-            refresh(employee_id)
+            refresh(employee_id, trigger="person enrolled on a terminal")
         except Exception:
             pass
 
@@ -1104,7 +1104,7 @@ class Command(BaseCommand):
             employee = Employee.objects.filter(pk=employee_id).first()
             if employee is None or not gated_employees(only=[employee_id]).exists():
                 return
-            _queue(device, employee, enrollid, tickets_left_today(employee) > 0)
+            _queue(device, employee, enrollid, tickets_left_today(employee) > 0, trigger="person enrolled on this terminal")
         except Exception:
             pass
 

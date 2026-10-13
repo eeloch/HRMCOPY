@@ -5,6 +5,8 @@ from django.db.models import Count, Max, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
+from attendance.models import DeviceCommand
+
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -1217,6 +1219,20 @@ class EmployeeMealsProfileAPIView(APIView):
                         "payroll": x.payroll_id,
                     }
                     for x in exceptions
+                ],
+                # Why this person's meal terminal access was switched on or off, newest first (the terminal access log).
+                "terminal_log": [
+                    {
+                        "id": command.pk,
+                        "at": command.created_at,
+                        "device": command.device.name,
+                        "enabled": bool(command.payload.get("enabled")),
+                        "text": (command.payload.get("reason") or {}).get("text") or ("Switched ON" if command.payload.get("enabled") else "Switched OFF") + " (made before reasons were recorded)",
+                        "trigger": (command.payload.get("reason") or {}).get("trigger") or "",
+                        "status": command.status,
+                        "confirmed_at": command.completed_at,
+                    }
+                    for command in DeviceCommand.objects.filter(command_type="set_user_enabled", payload__employee_id=employee.pk).select_related("device").order_by("-created_at")[:40]
                 ],
             }
         )

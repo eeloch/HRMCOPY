@@ -64,24 +64,60 @@ def refresh_for_clock_in(employee):
         return
     work_date, roster = MealService.resolve_work_day(employee, timezone.now())
     if requires_clock_in(work_date, roster):
-        refresh(employee.pk)
+        refresh(employee.pk, trigger="clock-in punch saved")
 
 
-def tickets_left_today(employee, now=None):
-    """Tickets this person may still collect today (0 on a rest day, with no allocation, or once used up)."""
+def ticket_state(employee, now=None):
+    """Everything that decides whether this person may collect a ticket right now, so a switch can say WHY it was made."""
     now = now or timezone.now()
     from .authorizations import extra_unused
 
     work_date, roster = MealService.resolve_work_day(employee, now)
+    state = {
+        "work_date": work_date.isoformat(), "roster": roster.status if roster else "none",
+        "shift": roster.shift.name if roster and roster.shift_id else None,
+        "entitlement_base": 0, "entitlement_today": 0, "absence_penalty": 0, "waiting_for_clock_in": False, "used": 0, "extra": 0, "left": 0,
+    }
     entitlement = 0
     if roster and roster.status == RosterDayStatus.WORK:
-        entitlement = max(MealService.entitlement_for_day(employee, work_date, roster) - MealService.absence_penalty_reduction(employee, work_date), 0)
+        state["entitlement_base"] = MealService.approved_entitlement(employee, work_date)
+        state["entitlement_today"] = MealService.entitlement_for_day(employee, work_date, roster)  # a Sunday night is one ticket
+        state["absence_penalty"] = MealService.absence_penalty_reduction(employee, work_date)
+        entitlement = max(state["entitlement_today"] - state["absence_penalty"], 0)
         if entitlement and requires_clock_in(work_date, roster) and not has_clocked_in(employee, work_date, roster.shift):
+            state["waiting_for_clock_in"] = True
             entitlement = 0  # not at work yet: the terminal stays switched off for them until they clock in
-    used = MealCollection.objects.filter(employee=employee, work_date=work_date, voided_at__isnull=True).count()
+    state["used"] = MealCollection.objects.filter(employee=employee, work_date=work_date, voided_at__isnull=True).count()
+    state["extra"] = extra_unused(employee, work_date)
     # What is left of the entitlement, plus extras a supervisor authorised that nobody has collected yet
     # (that works on a rest day too). A used authorisation adds nothing more.
-    return max(entitlement - used, 0) + extra_unused(employee, work_date)
+    state["left"] = max(entitlement - state["used"], 0) + state["extra"]
+    return state
+
+
+def tickets_left_today(employee, now=None):
+    """Tickets this person may still collect today (0 on a rest day, with no allocation, or once used up)."""
+    return ticket_state(employee, now)["left"]
+
+
+def explain_switch(state, enabled):
+    """A plain sentence for why the terminal was switched on or off for this person."""
+    if enabled:
+        parts = [f"{state['left']} ticket(s) left today ({state['used']} of {state['entitlement_today'] - state['absence_penalty']} used"]
+        parts[0] += f", +{state['extra']} authorised extra" if state["extra"] else ""
+        parts[0] += ")"
+        return "Switched ON: " + parts[0]
+    if state["roster"] != "work":
+        return f"Switched OFF: not rostered to work today (roster: {state['roster']})"
+    if state["waiting_for_clock_in"]:
+        return "Switched OFF: waiting for their clock-in (this night's meals open after clock-in)"
+    if state["entitlement_today"] == 0:
+        return "Switched OFF: no meal entitlement for today"
+    if state["entitlement_today"] - state["absence_penalty"] <= 0:
+        return f"Switched OFF: a meal penalty from absence takes away their {state['entitlement_today']} ticket(s) today"
+    cap = f", capped to {state['entitlement_today']} on this shift" if state["entitlement_today"] < state["entitlement_base"] else ""
+    penalty = f", {state['absence_penalty']} taken off by an absence penalty" if state["absence_penalty"] else ""
+    return f"Switched OFF: all {state['used']} ticket(s) used (entitlement {state['entitlement_base']}{cap}{penalty})"
 
 
 def _meal_identities(employee):
@@ -105,20 +141,26 @@ def disable_everywhere(employee):
     for identity in identities:
         device = devices.get(identity.source_identifier)
         if device is not None:
-            queued += _queue(device, employee, identity.external_user_id, False)
+            queued += _queue(device, employee, identity.external_user_id, False, trigger="employee exited - switched off everywhere")
     return queued
 
 
-def _queue(device, employee, enrollid, enabled):
-    """One pending switch per person per direction is enough."""
+def _queue(device, employee, enrollid, enabled, trigger="terminal check"):
+    """One pending switch per person per direction is enough. The command records WHY it was made: what triggered the
+    check and the numbers it was decided on (the meal terminal access log)."""
     already = DeviceCommand.objects.filter(device=device, command_type=COMMAND_TYPE, status__in=["pending", "sent"], payload__enrollid=int(enrollid), payload__enabled=enabled).exists()
     if not already:
-        DeviceCommand.objects.create(device=device, command_type=COMMAND_TYPE, payload={"enrollid": int(enrollid), "enabled": enabled, "employee_id": employee.pk})
+        try:
+            state = ticket_state(employee)
+            reason = {"trigger": trigger, "text": explain_switch(state, enabled), "state": state}
+        except Exception:  # noqa: BLE001 - the log must never stop a switch
+            reason = {"trigger": trigger, "text": "Switched " + ("ON" if enabled else "OFF"), "state": {}}
+        DeviceCommand.objects.create(device=device, command_type=COMMAND_TYPE, payload={"enrollid": int(enrollid), "enabled": enabled, "employee_id": employee.pk, "reason": reason})
         return True
     return False
 
 
-def reconcile(*, release=False, employees=None):
+def reconcile(*, release=False, employees=None, trigger=None):
     """Queue the switches needed so each managed person's terminal state matches their tickets left today.
     `employees` (ids) limits it to those people, which is what a scan does; without it everyone managed is checked.
     `release` switches everyone this has ever switched off back on, whatever the setting says (a safety valve).
@@ -128,7 +170,7 @@ def reconcile(*, release=False, employees=None):
         for state in MealTerminalUserState.objects.filter(enabled=False).select_related("employee"):
             for identity in _meal_identities(state.employee).filter(source_identifier=state.device_serial):
                 device = BiometricDevice.objects.get(serial_number=identity.source_identifier)
-                queued += _queue(device, state.employee, identity.external_user_id, True)
+                queued += _queue(device, state.employee, identity.external_user_id, True, trigger="release - everyone switched back on")
         return queued
     managed = list(gated_employees(only=employees))
     if not managed:
@@ -147,14 +189,14 @@ def reconcile(*, release=False, employees=None):
                 # Nobody has ever been switched off here: the terminal starts everyone enabled, so just remember that.
                 MealTerminalUserState.objects.update_or_create(employee=employee, device_serial=identity.source_identifier, defaults={"enabled": True})
             elif state is None or state.enabled != wanted:
-                queued += _queue(devices[identity.source_identifier], employee, identity.external_user_id, wanted)
+                queued += _queue(devices[identity.source_identifier], employee, identity.external_user_id, wanted, trigger=trigger or ("periodic check" if employees is None else "re-check"))
     return queued
 
 
-def refresh(employee):
+def refresh(employee, trigger="re-check"):
     """Re-check one person right now (after a scan, an authorisation, a voided ticket...). Never raises."""
     try:
-        return reconcile(employees=[employee.pk if hasattr(employee, "pk") else employee])
+        return reconcile(employees=[employee.pk if hasattr(employee, "pk") else employee], trigger=trigger)
     except Exception:
         return 0
 

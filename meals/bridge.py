@@ -141,7 +141,7 @@ class MealVendorGatewayPunchBridgeAPIView(APIView):
             scanned_collections = list(MealCollection.objects.filter(pk__in=scanned).select_related("employee", "event")) if scanned else []
             people = {c.employee_id for c in scanned_collections}
             if people:
-                reconcile(employees=people)  # e.g. switch someone off at the terminal the moment they have had their last ticket
+                reconcile(employees=people, trigger="after a meal scan")  # e.g. switch someone off at the terminal the moment they have had their last ticket
             _notify_card_gating_bypass(scanned_collections)
         except Exception:  # a problem here must never lose a scan
             pass

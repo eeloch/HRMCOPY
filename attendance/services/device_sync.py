@@ -167,7 +167,7 @@ def link_ids_by_staff_number(devices):
             if device.purpose == "meal_ticket":
                 from meals.gating import refresh
 
-                refresh(matches[0])
+                refresh(matches[0], trigger="enrolment / terminal listing")
     return linked
 
 
