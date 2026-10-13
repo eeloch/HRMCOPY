@@ -1,4 +1,7 @@
+export type DeductionBreakdown = { key: string; label: string; amount: string; count: number };
+
 export type PayrollPeriod = {
+  deduction_breakdown?: DeductionBreakdown[];
   id: number;
   year: number;
   month: number;
@@ -34,6 +37,7 @@ export type EmployeePayroll = {
   basic_salary: string;
   gross_earnings: string;
   total_deductions: string;
+  deduction_breakdown?: DeductionBreakdown[];
   net_pay: string;
   status: string;
   line_items?: PayrollLineItem[];

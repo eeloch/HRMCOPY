@@ -74,7 +74,13 @@ class PayrollPeriodDetailAPIView(APIView):
     permission_classes = [IsAuthenticated, CanViewPayroll]
 
     def get(self, request, period_id):
-        return Response(PayrollPeriodSerializer(get_object_or_404(period_queryset(), pk=period_id)).data)
+        from payroll.models import PayrollLineItem
+        from payroll.services.breakdown import breakdown
+
+        period = get_object_or_404(period_queryset(), pk=period_id)
+        data = PayrollPeriodSerializer(period).data
+        data["deduction_breakdown"] = breakdown(PayrollLineItem.objects.filter(payroll__payroll_period=period, item_type="deduction").only("item_type", "code", "source_type", "amount"))
+        return Response(data)
 
 
 class PayrollPeriodGenerateAPIView(APIView):
@@ -219,7 +225,7 @@ class PayrollPeriodEmployeeListAPIView(APIView):
 
     def get(self, request, period_id):
         get_object_or_404(PayrollPeriod, pk=period_id)
-        payrolls = EmployeePayroll.objects.filter(payroll_period_id=period_id).select_related("employee", "employee__department")
+        payrolls = EmployeePayroll.objects.filter(payroll_period_id=period_id).select_related("employee", "employee__department").prefetch_related("line_items")
         search = request.query_params.get("search", "").strip()
         department = request.query_params.get("department", "").strip()
         if search:
@@ -274,6 +280,7 @@ class EmployeePayrollHistoryAPIView(APIView):
         payrolls = (
             EmployeePayroll.objects.filter(employee_id=employee_id)
             .select_related("employee", "employee__department", "payroll_period")
+            .prefetch_related("line_items")
             .order_by("-payroll_period__year", "-payroll_period__month", "-id")
         )
         return Response({"count": payrolls.count(), "results": EmployeePayrollListSerializer(payrolls, many=True).data})

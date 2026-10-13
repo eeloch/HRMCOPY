@@ -42,6 +42,7 @@ class PayrollLineItemCreateSerializer(serializers.ModelSerializer):
 
 
 class EmployeePayrollListSerializer(serializers.ModelSerializer):
+    deduction_breakdown = serializers.SerializerMethodField()
     employee_id = serializers.CharField(source="employee.employee_id", read_only=True)
     employee_name = serializers.CharField(source="employee.full_name", read_only=True)
     department_name = serializers.CharField(source="employee.department.name", read_only=True, default=None)
@@ -49,7 +50,12 @@ class EmployeePayrollListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = EmployeePayroll
-        fields = ("id", "employee", "employee_id", "employee_name", "department_name", "payroll_period_name", "basic_salary", "gross_earnings", "total_deductions", "net_pay", "status", "generated_at", "updated_at")
+        fields = ("id", "employee", "employee_id", "employee_name", "department_name", "payroll_period_name", "basic_salary", "gross_earnings", "total_deductions", "deduction_breakdown", "net_pay", "status", "generated_at", "updated_at")
+
+    def get_deduction_breakdown(self, obj):
+        from payroll.services.breakdown import breakdown
+
+        return breakdown(obj.line_items.all())
 
 
 class EmployeePayrollDetailSerializer(EmployeePayrollListSerializer):
