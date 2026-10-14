@@ -578,6 +578,8 @@ class MealShiftReportAPIView(APIView):
         for key, given in tickets.items():
             if self.review_info(reviews.get(key)) is not None:
                 continue
+            if absence_status.get(key) == "waived":
+                continue  # an excused / waived absence is not an absence: nothing to charge back
             attendance = absences[key]
             employee = attendance.employee
             alarms.append({
@@ -621,10 +623,13 @@ class MealShiftReportAPIView(APIView):
             entitled = max(base - reduction, 0)
             given = tickets.get(employee.pk, [])
             attended = attendance.get(employee.pk)
-            absent = attended is not None and attended.status == "absent"
+            excused = absence_status.get(employee.pk) == "waived"
+            absent = attended is not None and attended.status == "absent" and not excused
             present = attended is not None and not absent and bool(attended.actual_clock_in or attended.actual_clock_out)
             if given and absent:
                 result = "absent_collected"
+            elif given and excused and len(given) <= entitled:
+                result = "collected"  # the absence was waived, so the day counts as worked
             elif given and len(given) > entitled:
                 result = "extra"
             elif given and not present:
@@ -699,6 +704,35 @@ class MealShiftReportDecideAPIView(APIView):
         except (ValueError, TypeError) as exc:
             return Response({"detail": str(exc)}, status=400)
         return Response({"decision": review.decision, "reason": review.reason, "chargeback": review.chargeback_id})
+
+
+class MealShiftReportDecideManyAPIView(APIView):
+    """Decide many absent-but-collected cases at once, with one reason: charge the tickets back, or let them go."""
+
+    permission_classes = [IsAuthenticated, CanChargeBackMealTickets]
+    MAX_ITEMS = 200
+
+    def post(self, request):
+        data = request.data
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            return Response({"detail": "Choose at least one case."}, status=400)
+        if len(items) > self.MAX_ITEMS:
+            return Response({"detail": f"Decide at most {self.MAX_ITEMS} cases at a time."}, status=400)
+        decided, failed = 0, []
+        for item in items:
+            employee = Employee.objects.filter(employee_id=str((item or {}).get("employee_number", "")).strip()).first()
+            work_date = _date_param((item or {}).get("work_date"))
+            label = f"{(item or {}).get('employee_number', '?')} {(item or {}).get('work_date', '')}".strip()
+            if employee is None or work_date is None:
+                failed.append({"case": label, "detail": "Unknown employee or date."})
+                continue
+            try:
+                decide_absent_ticket(employee, work_date, data.get("decision", ""), data.get("reason", ""), request.user)
+                decided += 1
+            except (ValueError, TypeError) as exc:
+                failed.append({"case": f"{employee.employee_id} {employee.full_name} {work_date}", "detail": str(exc)})
+        return Response({"decided": decided, "failed": failed})
 
 
 class MealDeviceListAPIView(APIView):

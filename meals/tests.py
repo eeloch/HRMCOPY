@@ -3490,3 +3490,28 @@ class SundayNightIsOneTicketTests(TestCase):
         self.assertEqual(tickets_left_today(self.employee, evening), 1)
         MealService.ingest(system="device", source_identifier="OFFDEV", device_serial_number="OFFDEV", external_user_id="OFFID", external_event_id="off-1", timestamp=evening)
         self.assertEqual(tickets_left_today(self.employee, evening + timedelta(minutes=1)), 0)  # reconcile() then queues the switch-off
+
+
+class AbsentButCollectedBulkAndExcusedTests(AbsentButCollectedTests):
+    """Waived absences are not alarms; a whole selection can be decided at once with one reason."""
+
+    def alarms(self):
+        return self.client.get(f"/api/meals/shift-report/?date={self.DAY.isoformat()}").json()["waiting"]
+
+    def test_a_waived_absence_is_not_waiting_for_a_decision(self):
+        from attendance.models import AttendanceException
+
+        before = len(self.alarms())
+        attendance = DailyAttendance.objects.get(employee=self.person, date=self.DAY)
+        AttendanceException.objects.create(attendance=attendance, exception_type="absence", status="waived", reviewed_by="HR")
+        self.assertEqual(len(self.alarms()), before - 1 if before else 0)
+
+    def test_many_cases_are_decided_with_one_reason_and_a_bad_one_does_not_stop_the_rest(self):
+        items = [{"employee_number": self.person.employee_id, "work_date": self.DAY.isoformat()}, {"employee_number": "NOBODY", "work_date": self.DAY.isoformat()}]
+        response = self.client.post("/api/meals/shift-report/decide-many/", {"items": items, "decision": "waive", "reason": "Excused by the supervisor"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["decided"], 1)
+        self.assertEqual(len(body["failed"]), 1)
+        self.assertEqual(self.client.post("/api/meals/shift-report/decide-many/", {"items": [], "decision": "waive", "reason": "x"}, format="json").status_code, 400)
+        self.assertEqual(self.alarms(), [])
