@@ -79,7 +79,7 @@ class PayrollPeriodDetailAPIView(APIView):
 
         period = get_object_or_404(period_queryset(), pk=period_id)
         data = PayrollPeriodSerializer(period).data
-        data["deduction_breakdown"] = breakdown(PayrollLineItem.objects.filter(payroll__payroll_period=period, item_type="deduction").only("item_type", "code", "source_type", "amount"))
+        data["deduction_breakdown"] = breakdown(PayrollLineItem.objects.filter(payroll__payroll_period=period, item_type="deduction").only("item_type", "code", "source_type", "amount"), include_empty=True)
         return Response(data)
 
 

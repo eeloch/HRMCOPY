@@ -27,8 +27,9 @@ def category_of(code, source_type):
     return OTHER
 
 
-def breakdown(lines):
-    """[{"key", "label", "amount", "count"}] for the deduction lines given, in display order, empty kinds left out."""
+def breakdown(lines, *, include_empty=False):
+    """[{"key", "label", "amount", "count"}] for the deduction lines given, in display order. Kinds with nothing in them are
+    left out, unless include_empty is set (the period summary shows every kind, even at zero)."""
     totals = OrderedDict((key, [label, Decimal("0.00"), 0]) for key, label, _, _ in CATEGORIES)
     totals[OTHER[0]] = [OTHER[1], Decimal("0.00"), 0]
     for line in lines:
@@ -37,4 +38,4 @@ def breakdown(lines):
         key, _ = category_of(line.code, line.source_type)
         totals[key][1] += line.amount
         totals[key][2] += 1
-    return [{"key": key, "label": label, "amount": str(amount), "count": count} for key, (label, amount, count) in totals.items() if count]
+    return [{"key": key, "label": label, "amount": str(amount), "count": count} for key, (label, amount, count) in totals.items() if count or include_empty]

@@ -38,3 +38,10 @@ class DeductionBreakdownTests(TestCase):
         data = EmployeePayrollListSerializer(EmployeePayroll.objects.prefetch_related("line_items").get(pk=self.payroll.pk)).data
         self.assertEqual(sum(Decimal(part["amount"]) for part in data["deduction_breakdown"]), Decimal("10300.00"))
         self.assertEqual([part["label"] for part in data["deduction_breakdown"]], ["Lateness", "Salary advance"])
+
+    def test_the_period_summary_can_list_every_kind_even_at_zero(self):
+        self.line("ATTENDANCE_LATE", "300", "attendance_exception", "1")
+        everything = breakdown(self.payroll.line_items.all(), include_empty=True)
+        self.assertEqual([part["key"] for part in everything], ["absence", "late", "early_departure", "missing_punch", "unpaid_leave", "meals", "ppe", "salary_advance", "deferred_fund", "offences", "other"])
+        self.assertEqual({part["key"]: (part["amount"], part["count"]) for part in everything}["ppe"], ("0.00", 0))
+        self.assertEqual([part["key"] for part in breakdown(self.payroll.line_items.all())], ["late"])  # an employee's own list stays short
