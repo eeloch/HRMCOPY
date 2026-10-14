@@ -16,6 +16,8 @@ class EmployeePPEIssueSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source="employee.full_name", read_only=True)
     employee_id = serializers.CharField(source="employee.employee_id", read_only=True)
     department_name = serializers.CharField(source="employee.department.name", read_only=True, default=None)
+    employee_status = serializers.CharField(source="employee.status", read_only=True)
+    employee_exit_date = serializers.DateField(source="employee.exit_date", read_only=True, default=None)
     ppe_type_name = serializers.CharField(source="ppe_type.name", read_only=True)
     ppe_type_code = serializers.CharField(source="ppe_type.code", read_only=True)
     target_payroll_period_name = serializers.CharField(source="target_payroll_period.display_name", read_only=True, default=None)
@@ -23,7 +25,7 @@ class EmployeePPEIssueSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = EmployeePPEIssue
-        fields = ("id", "employee", "employee_id", "employee_name", "department_name", "ppe_type", "ppe_type_name", "ppe_type_code", "quantity", "issue_date", "unit_cost", "total_cost", "notes", "employee_deductible", "deduction_status", "target_payroll_period", "target_payroll_period_name", "deducted_payroll_id", "payroll_line_item", "reviewed_by", "reviewed_at", "review_comment", "created_at")
+        fields = ("id", "employee", "employee_id", "employee_name", "department_name", "employee_status", "employee_exit_date", "ppe_type", "ppe_type_name", "ppe_type_code", "quantity", "issue_date", "unit_cost", "total_cost", "notes", "employee_deductible", "deduction_status", "target_payroll_period", "target_payroll_period_name", "deducted_payroll_id", "payroll_line_item", "reviewed_by", "reviewed_at", "review_comment", "created_at")
         read_only_fields = ("total_cost", "employee_deductible", "deduction_status", "target_payroll_period", "deducted_payroll_id", "payroll_line_item", "reviewed_by", "reviewed_at", "review_comment", "created_at")
 
 

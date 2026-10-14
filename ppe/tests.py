@@ -284,3 +284,16 @@ class PPEWorkflowTests(TestCase):
         client.force_authenticate(user=self.actor)
         response = client.post(f"/api/ppe/issues/{issue.pk}/hold/", {"comment": "Reviewed"}, format="json")
         self.assertEqual(response.status_code, 200)
+
+
+class PPEIssueShowsInactiveEmployeeTests(TestCase):
+    def test_the_issue_says_when_the_employee_is_no_longer_active(self):
+        from datetime import date as _date
+
+        from ppe.serializers import EmployeePPEIssueSerializer
+
+        employee = Employee.objects.create(employee_id="PPE-IN-1", first_name="Gone", last_name="Away", status="inactive", exit_date=_date(2026, 10, 5))
+        kind = PPEType.objects.create(name="Inactive Test Boots", code="INACTIVE_BOOTS", potentially_employee_deductible=True)
+        issue = EmployeePPEIssue.objects.create(employee=employee, ppe_type=kind, quantity=1, issue_date=_date(2026, 10, 1), unit_cost=12000)
+        data = EmployeePPEIssueSerializer(issue).data
+        self.assertEqual((data["employee_status"], str(data["employee_exit_date"])), ("inactive", "2026-10-05"))
