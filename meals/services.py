@@ -1207,7 +1207,7 @@ def decide_absent_ticket(employee, work_date, decision, reason, actor, *, quanti
     tickets = MealCollection.objects.filter(employee=employee, work_date=work_date, voided_at__isnull=True).count()
     if attendance is None or not tickets:
         raise ValueError("This person was not recorded absent with a ticket on that day, so there is nothing to decide.")
-    existing = MealAbsenceTicketReview.objects.select_for_update().filter(employee=employee, work_date=work_date).select_related("chargeback").first()
+    existing = MealAbsenceTicketReview.objects.select_for_update(of=("self",)).filter(employee=employee, work_date=work_date).select_related("chargeback").first()  # of=self: Postgres refuses to lock the nullable side of the chargeback join
     if existing is not None and not (existing.decision == "charged" and existing.chargeback is not None and existing.chargeback.status == MealChargebackStatus.CANCELLED):
         raise ValueError("This case has already been decided.")
     chargeback = None
