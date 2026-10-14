@@ -148,3 +148,23 @@ class AttendanceHistoryShowsChargesTests(MissingPunchFineAndAutoAbsenceTests):
         plain.user_permissions.add(Permission.objects.get(codename="manage_devices"))  # may open attendance pages, not see money
         row = next(item for item in self.history(plain) if item["date"] == "2032-06-03")
         self.assertEqual([(c["state"], c["amount"]) for c in row["charges"]], [("Proposed", None)])
+
+
+class PendingAbsenceHealsOnReprocessTests(MissingPunchFineAndAutoAbsenceTests):
+    """An absence left pending (a run on older code) is approved when the day is processed again - unless it was sent back for review."""
+
+    def test_a_pending_absence_on_an_absent_day_is_approved_on_the_next_run_and_the_meal_penalty_follows(self):
+        attendance = process_employee_attendance(self.employee, date(2032, 6, 9), now=self.after)
+        exception = attendance.exceptions.get(exception_type="absence")
+        AttendanceException.objects.filter(pk=exception.pk).update(status="pending", reviewed_by="", reviewed_at=None, admin_comment="")  # as the old code left it
+        attendance = process_employee_attendance(self.employee, date(2032, 6, 9), now=self.after)
+        exception.refresh_from_db()
+        self.assertEqual((exception.status, exception.reviewed_by), ("approved", "System (automatic)"))
+
+    def test_an_absence_someone_sent_back_for_review_stays_pending(self):
+        attendance = process_employee_attendance(self.employee, date(2032, 6, 9), now=self.after)
+        exception = attendance.exceptions.get(exception_type="absence")
+        AttendanceException.objects.filter(pk=exception.pk).update(status="pending", reviewed_by="", reviewed_at=None, admin_comment="Reopened from approved by HR: check the terminal log")
+        process_employee_attendance(self.employee, date(2032, 6, 9), now=self.after)
+        exception.refresh_from_db()
+        self.assertEqual(exception.status, "pending")

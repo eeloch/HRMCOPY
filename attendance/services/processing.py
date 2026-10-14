@@ -377,8 +377,11 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
         )
         if created and proposed and attendance.date >= timezone.localdate() - timedelta(days=3):
             _alert_proposed_absence(attendance, note)
-        if created and attendance.status == "absent":
-            _auto_approve_absence(absence)
+        if attendance.status == "absent":
+            # Approved the moment it is recorded - and also when one was left pending (an earlier run, or code that
+            # predates the rule). A case someone sent back for review on purpose (it carries their note) stays pending.
+            if absence is not None and absence.status == PENDING_EXCEPTION_STATUS and not absence.admin_comment and not absence.reviewed_by:
+                _auto_approve_absence(absence)
         elif attendance.status != "absent":
             _undo_auto_absence(attendance)
         # A forgotten clock-in or clock-out is fined (N1,000 at least, raised by whoever approves it). A flexible shift has
