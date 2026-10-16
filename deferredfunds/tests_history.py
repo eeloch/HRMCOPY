@@ -128,3 +128,44 @@ class ImportDeferredFundHistoryTests(TestCase):
     def test_a_disbursement_with_no_one_on_the_history_sheet_is_reported(self):
         text = self.run_command(paid=[(99, "Nobody Known", 10)])
         self.assertIn("no matching person on the history sheet", text)
+
+
+class ImportDeferredFundHistoryEdgeCaseTests(TestCase):
+    def setUp(self):
+        self.admin = get_user_model().objects.create_user(username="admin", password="pw")
+        make = lambda number, first, last: Employee.objects.create(employee_id=number, first_name=first, last_name=last, employment_type="contract", status="active")
+        self.twice = make("000877", "Ebubechukwu", "Elosiuba")   # on two rows of the sheet, under two staff numbers
+        self.extra = make("000705", "Shedrack", "Bismarck")      # holds one month more than the history shows
+        DeferredFundService.enrol(employee=self.twice, percent=15, opening_balance=160, actor=self.admin)
+        DeferredFundService.enrol(employee=self.extra, percent=15, opening_balance=180, actor=self.admin)
+
+    def run_command(self, people, *flags, paid=()):
+        out = StringIO()
+        call_command("import_deferred_fund_history", workbook(people, paid), *flags, stdout=out)
+        return out.getvalue()
+
+    def test_one_person_on_two_rows_is_combined_month_by_month(self):
+        people = [(162, "Ebubechukwu Elosiuba", "Male", 0, 0.15, None, 50, 50, None, 100), (877, "Ebubechukwu Elosiuba", "Male", 0, 0.15, None, None, 10, 50, 60)]
+        text = self.run_command(people, "--apply")
+        self.assertIn("are the same person", text)
+        account = DeferredFundAccount.objects.get(employee=self.twice)
+        self.assertEqual(account.balance, Decimal("160.00"))
+        self.assertEqual([(e.entry_date, e.amount) for e in account.entries.all()], [(date(2025, 2, 25), Decimal("50.00")), (date(2025, 3, 25), Decimal("60.00")), (date(2026, 1, 26), Decimal("50.00"))])
+
+    def test_a_difference_is_left_alone_unless_it_is_asked_for_as_an_adjustment(self):
+        people = [(705, "Shedrack Bismarck", "Male", 0, 0.15, None, 60, 60, 42, 162)]
+        text = self.run_command(people, "--apply")
+        self.assertIn("Left for a person to decide, or add --adjust-differences", text)
+        self.assertEqual(DeferredFundAccount.objects.get(employee=self.extra).entries.get().entry_type, "opening")
+        self.run_command(people, "--apply", "--adjust-differences")
+        account = DeferredFundAccount.objects.get(employee=self.extra)
+        self.assertEqual(account.balance, Decimal("180.00"))  # the balance did not move
+        adjustment = account.entries.get(entry_type="adjustment")
+        self.assertEqual(adjustment.amount, Decimal("18.00"))
+        self.assertTrue(adjustment.note.endswith("(history)"))
+
+    def test_someone_nobody_matches_is_reported_with_what_the_system_holds(self):
+        text = self.run_command([(877, "Someone Else", "Male", 0, 0.15, None, 5, None, None, 5)], paid=[(877, "Someone Else", 5)])
+        self.assertIn("staff no. 000877 is Ebubechukwu Elosiuba (active)", text)
+        self.assertIn("5.00 paid out", text)
+        self.assertNotIn("no matching person on the history sheet", text)  # reported once, against the person
