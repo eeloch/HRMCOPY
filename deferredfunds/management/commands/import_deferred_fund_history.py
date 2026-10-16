@@ -28,7 +28,7 @@ from audit.models import AuditSeverity
 from audit.services import AuditService
 from deferredfunds.management.commands.import_deferred_fund_sheet import find_employee, name_key
 from deferredfunds.models import DeferredFundAccount, DeferredFundEntry, EntryType
-from employees.models import Employee
+from employees.models import Employee, EmploymentType
 
 TWO = Decimal("0.01")
 HISTORY_TAG = "(history)"
@@ -71,6 +71,7 @@ def read_history(path):
         raise CommandError(f"The history sheet has no column called {names[0]!r}.")
 
     number, name, percent, status = column("employee number", "employee id"), column("name"), column("fund contribution"), column("status")
+    gender = next((position for position, value in enumerate(header) if value == "gender"), None)
     months = [(position, month_date(value)) for position, value in enumerate(rows[0]) if month_date(value) is not None]
     if not months:
         raise CommandError("The history sheet has no month columns.")
@@ -80,6 +81,7 @@ def read_history(path):
             continue
         people.append({
             "row": line, "id": values[number], "name": (values[name] or "").strip(), "percent": values[percent], "status": values[status],
+            "gender": (values[gender] or "") if gender is not None else "",
             "months": [(day, values[position]) for position, day in months],
         })
     disbursements = []
@@ -98,6 +100,8 @@ class Command(BaseCommand):
         parser.add_argument("file")
         parser.add_argument("--disbursement-date", help="Date (YYYY-MM-DD) to give the disbursement lines; the sheet has none. Needed with --apply.")
         parser.add_argument("--create-missing", action="store_true", help="Also create an inactive account (no monthly deductions) for people in the sheet who have none, so their history is on record.")
+        parser.add_argument("--create-former-staff", action="store_true", help="Add an INACTIVE contract employee record (and an inactive account) for people on the sheet who are not in the system, using the sheet's staff number. A number already used by someone else, or used twice on the sheet, is held back: give another with --assign.")
+        parser.add_argument("--assign", action="append", default=[], metavar="ROW=NUMBER", help="With --create-former-staff: the staff number to give the person on this sheet row, e.g. --assign 12=001300. Repeat for each.")
         parser.add_argument("--adjust-differences", action="store_true", help="For an account whose balance differs from what the history adds up to, load the history anyway and record the difference as one adjustment line, so the balance stays exactly as it is.")
         parser.add_argument("--apply", action="store_true", help="Save. Without it nothing is changed.")
         parser.add_argument("--actor", default="admin", help="Username recorded as the person who loaded it.")
@@ -113,6 +117,13 @@ class Command(BaseCommand):
                 disbursed_on = date.fromisoformat(options["disbursement_date"])
             except ValueError:
                 raise CommandError("--disbursement-date must be YYYY-MM-DD.")
+
+        assignments = {}
+        for text in options["assign"]:
+            row, _, number = text.partition("=")
+            if not row.strip().isdigit() or not number.strip():
+                raise CommandError(f"--assign wants ROW=NUMBER, for example 12=001300 (got {text!r}).")
+            assignments[int(row)] = number.strip()
 
         problems, plan, skipped, notes = [], [], [], []
         self._everyone = None
@@ -130,9 +141,20 @@ class Command(BaseCommand):
 
         # One entry per person. A person on two rows (two staff numbers) is one person: the rows are combined month by month.
         by_employee = {}
-        for person in people:
+        matched = [(person, *find_employee(person)) for person in people]
+        sheet_numbers = {}
+        for person, employee, _ in matched:
+            if employee is None:
+                number = assignments.get(person["row"]) or self.padded(person["id"])
+                sheet_numbers[number] = sheet_numbers.get(number, 0) + 1
+        for person, employee, how in matched:
             payments = paid_out.pop((str(person["id"]), tuple(name_key(person["name"]))), [])
-            employee, how = find_employee(person)
+            if employee is None and options["create_former_staff"]:
+                employee, held = self.new_former_staff(person, assignments, sheet_numbers)
+                if employee is None:
+                    problems.append(f"Row {person['row']}: {person['name']} (staff no. {person['id']}) - not added: {held}.")
+                    continue
+                notes.append(f"Row {person['row']}: {person['name']} will be ADDED as staff no. {employee.employee_id} (inactive contract employee).")
             if employee is None:
                 problems.append(f"Row {person['row']}: {person['name']} (staff no. {person['id']}) - no unique match{self.hint(person, payments)}.")
                 continue
@@ -154,7 +176,7 @@ class Command(BaseCommand):
                     months[day] = amount
             if bad:
                 continue
-            entry = by_employee.setdefault(employee.pk, {"employee": employee, "person": person, "rows": [], "months": {}, "payments": []})
+            entry = by_employee.setdefault(employee.pk or f"new:{employee.employee_id}", {"employee": employee, "person": person, "rows": [], "months": {}, "payments": []})
             entry["rows"].append(person["row"])
             for day, amount in months.items():
                 entry["months"][day] = entry["months"].get(day, Decimal("0.00")) + amount
@@ -176,12 +198,14 @@ class Command(BaseCommand):
                 skipped.append(f"{label} - paid out {disbursed:,.2f} but only {gross:,.2f} was saved ({-net:,.2f} more than the history holds). Left for a person to decide.")
                 continue
             item = {"person": person, "employee": employee, "contributions": contributions, "payments": payments, "gross": gross, "disbursed": disbursed, "net": net, "label": label, "adjustment": Decimal("0.00")}
-            account = DeferredFundAccount.objects.filter(employee=employee).first()
+            account = DeferredFundAccount.objects.filter(employee=employee).first() if employee.pk else None
             if account is None:
-                if options["create_missing"]:
+                if options["create_missing"] or employee.pk is None:
                     item["account"] = None
                     plan.append(item)
-                    if net > 0:
+                    if net > 0 and employee.pk is None:
+                        notes.append(f"{label} - will hold {net:,.2f} on an INACTIVE account: nothing is deducted and nobody is owed anything automatically.")
+                    elif net > 0:
                         notes.append(f"{label} - will hold {net:,.2f} on an INACTIVE account: no monthly deductions until they are enrolled.")
                 else:
                     skipped.append(f"{label} - no deferred fund account (saved {gross:,.2f}, paid out {disbursed:,.2f}, would hold {net:,.2f}). Add --create-missing to record the history on an inactive account.")
@@ -228,8 +252,41 @@ class Command(BaseCommand):
 
         with transaction.atomic():
             for item in plan:
+                if item["employee"].pk is None:
+                    item["employee"].save()
+                    AuditService.log(
+                        event_type="employees.added_for_deferred_history", module="employees", employee=item["employee"], actor=actor, object=item["employee"], severity=AuditSeverity.INFO,
+                        title="Former staff member added for the deferred fund history",
+                        description=f"{item['employee'].full_name} ({item['employee'].employee_id}) was added as an inactive contract employee so their deferred fund history could be recorded; staff number and name come from the history workbook.",
+                        metadata={"staff_number": item["employee"].employee_id, "sheet_row": item["person"]["row"]},
+                    )
                 self.load(item, actor, disbursed_on)
         self.stdout.write(self.style.SUCCESS(f"Loaded the history for {len(plan)} account(s)."))
+
+    @staticmethod
+    def padded(number):
+        digits = str(number or "").strip()
+        return f"{int(digits):06d}" if digits.isdigit() else ""
+
+    def new_former_staff(self, person, assignments, sheet_numbers):
+        """(an unsaved inactive contract Employee, None), or (None, why the person is held back)."""
+        number = assignments.get(person["row"]) or self.padded(person["id"])
+        if not number:
+            return None, "the sheet has no staff number; give one with --assign"
+        holder = Employee.objects.filter(employee_id=number).first()
+        if holder is not None:
+            return None, f"staff no. {number} already belongs to {holder.full_name}; give this person another with --assign {person['row']}=NUMBER"
+        if sheet_numbers.get(number, 0) > 1:
+            return None, f"staff no. {number} is used by {sheet_numbers[number]} different people on the sheet; give each their own with --assign ROW=NUMBER"
+        words = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", person["name"]).split()
+        if not words:
+            return None, "the name is blank"
+        gender = {"male": "male", "female": "female"}.get(str(person.get("gender") or "").strip().lower(), "")
+        employee = Employee(
+            employee_id=number, first_name=words[0], middle_name=" ".join(words[1:-1]), last_name=words[-1] if len(words) > 1 else "",
+            employment_type=EmploymentType.CONTRACT, status="inactive", gender=gender,
+        )
+        return employee, None
 
     def hint(self, person, payments):
         """What the system holds for a staff number that matched nobody, so the next step is clear."""

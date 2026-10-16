@@ -169,3 +169,65 @@ class ImportDeferredFundHistoryEdgeCaseTests(TestCase):
         self.assertIn("staff no. 000877 is Ebubechukwu Elosiuba (active)", text)
         self.assertIn("5.00 paid out", text)
         self.assertNotIn("no matching person on the history sheet", text)  # reported once, against the person
+
+
+class ImportDeferredFundHistoryFormerStaffTests(TestCase):
+    """People on the sheet who are not in the system at all."""
+
+    def setUp(self):
+        self.admin = get_user_model().objects.create_user(username="admin", password="pw")
+        self.taken = Employee.objects.create(employee_id="000036", first_name="Garba", last_name="Ibrahim", employment_type="contract", status="active")
+
+    PEOPLE = [
+        (23, "Bigland Princess", "Female", None, 0.1, "Paid", 10, 10, None, 20),
+        (76, "Maduka Victor Kosisochukwu", "Male", None, 0.15, "Paid", 40, 40, 40, 120),
+        (36, "Okonkwo Hope Uche", "Female", None, 0.15, None, 5, None, None, 5),   # the number belongs to somebody else
+        (283, "Eguzouwa Godfirst", "Male", None, 0.1, None, 5, None, None, 5),     # one number, two different people
+        (283, "Ezebialu Chidinma", "Female", None, 0.15, None, 3, None, None, 3),
+    ]
+    PAID = [(23, "Bigland Princess", 20)]
+
+    def run_command(self, *flags):
+        out = StringIO()
+        call_command("import_deferred_fund_history", workbook(self.PEOPLE, self.PAID), *flags, stdout=out)
+        return out.getvalue()
+
+    def test_without_the_option_they_are_only_reported(self):
+        text = self.run_command("--apply", "--disbursement-date", "2026-09-30")
+        self.assertIn("no unique match", text)
+        self.assertFalse(Employee.objects.filter(employee_id="000023").exists())
+
+    def test_a_dry_run_adds_nobody(self):
+        text = self.run_command("--create-former-staff")
+        self.assertIn("will be ADDED as staff no. 000023", text)
+        self.assertEqual(Employee.objects.count(), 1)
+
+    def test_they_are_added_as_inactive_contract_staff_with_their_history(self):
+        self.run_command("--create-former-staff", "--disbursement-date", "2026-09-30", "--apply")
+        person = Employee.objects.get(employee_id="000076")
+        self.assertEqual((person.status, person.employment_type, person.gender), ("inactive", "contract", "male"))
+        self.assertEqual((person.first_name, person.middle_name, person.last_name), ("Maduka", "Victor", "Kosisochukwu"))
+        account = DeferredFundAccount.objects.get(employee=person)
+        self.assertEqual((account.active, account.percent, account.balance, account.saving_since), (False, Decimal("15.00"), Decimal("120.00"), date(2025, 2, 25)))
+        paid = DeferredFundAccount.objects.get(employee__employee_id="000023")
+        self.assertEqual((paid.balance, paid.entries.get(entry_type="release").amount), (Decimal("0.00"), Decimal("-20.00")))
+
+    def test_a_number_that_is_taken_or_shared_is_held_back_until_a_number_is_given(self):
+        text = self.run_command("--create-former-staff", "--disbursement-date", "2026-09-30", "--apply")
+        self.assertIn("staff no. 000036 already belongs to Garba Ibrahim", text)
+        self.assertIn("is used by 2 different people on the sheet", text)
+        self.assertEqual(Employee.objects.count(), 3)  # Garba Ibrahim + the two that could be added
+        self.run_command("--create-former-staff", "--disbursement-date", "2026-09-30", "--apply", "--assign", "4=001300", "--assign", "5=001301", "--assign", "6=001302")
+        added = {e.employee_id: e.full_name for e in Employee.objects.filter(employee_id__in=["001300", "001301", "001302"])}
+        self.assertEqual(added, {"001300": "Okonkwo Hope Uche", "001301": "Eguzouwa Godfirst", "001302": "Ezebialu Chidinma"})
+        self.assertEqual(DeferredFundAccount.objects.get(employee__employee_id="001302").balance, Decimal("3.00"))  # not the 5 of the other 283
+
+    def test_running_it_twice_adds_nobody_again(self):
+        self.run_command("--create-former-staff", "--disbursement-date", "2026-09-30", "--apply")
+        count = Employee.objects.count()
+        self.run_command("--create-former-staff", "--disbursement-date", "2026-09-30", "--apply")
+        self.assertEqual(Employee.objects.count(), count)
+
+    def test_a_badly_formed_assign_is_refused(self):
+        with self.assertRaises(CommandError):
+            self.run_command("--create-former-staff", "--assign", "twelve")
