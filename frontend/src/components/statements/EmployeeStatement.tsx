@@ -39,11 +39,13 @@ function Tile({ label, value, hint }: { label: string; value: string | number; h
   return <div className="rounded-xl border border-slate-200 p-3 text-center"><p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</p><p className="mt-1 text-2xl font-bold text-slate-900">{value}</p>{hint && <p className="text-xs text-slate-500">{hint}</p>}</div>;
 }
 
-export function EmployeeStatement() {
+/** With `employeeId` it is the statement of that one person (the employee profile's Statement tab): no employee picker,
+ * and this month's statement is shown straight away. Without it, the Employees page version where anyone can be picked. */
+export function EmployeeStatement({ employeeId: fixedEmployeeId }: { employeeId?: number } = {}) {
   const [allowed, setAllowed] = useState<boolean | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [filter, setFilter] = useState("");
-  const [employeeId, setEmployeeId] = useState("");
+  const [employeeId, setEmployeeId] = useState(fixedEmployeeId ? String(fixedEmployeeId) : "");
   const [month, setMonth] = useState(currentMonth);
   const [statement, setStatement] = useState<Statement | null>(null);
   const [loading, setLoading] = useState(false);
@@ -55,7 +57,7 @@ export function EmployeeStatement() {
       const user = await getCurrentUser();
       const ok = user.is_superuser || user.permissions.view_employee_statement;
       setAllowed(ok);
-      if (!ok) return;
+      if (!ok || fixedEmployeeId) return;
       const response = await apiFetch("/employees/?status=active");
       if (response.ok) setEmployees((await response.json()).results || []);
     } catch { setAllowed(false); }
@@ -133,6 +135,13 @@ export function EmployeeStatement() {
     } finally { setLoading(false); }
   }
 
+  const showOwnStatement = useEffectEvent(() => { void load(true); });
+  useEffect(() => {
+    if (!fixedEmployeeId || !allowed) return;
+    const timer = window.setTimeout(showOwnStatement, 0);
+    return () => window.clearTimeout(timer);
+  }, [allowed, fixedEmployeeId]);
+
   const summary = statement?.attendance_summary;
 
   return <div>
@@ -140,15 +149,15 @@ export function EmployeeStatement() {
     <div className="print:hidden">
       <p className="mb-4 text-sm text-slate-500">Attendance and charges for one employee and month, to show or print when they ask. It does not show salary.</p>
       {allowed === false && <Section title="No access" subtitle="Your account cannot generate employee statements."><p className="p-8 text-sm text-slate-600">Ask an administrator to grant &ldquo;Generate an employee&apos;s monthly statement&rdquo; in Settings.</p></Section>}
-      {allowed && <Section title="Choose employee and month">
+      {allowed && <Section title={fixedEmployeeId ? "Choose the month" : "Choose employee and month"}>
         <form onSubmit={generate} className="grid gap-4 p-5 md:grid-cols-4">
-          <label className="block md:col-span-2"><span className="mb-2 block text-sm font-semibold text-slate-700">Employee</span>
+          {!fixedEmployeeId && <label className="block md:col-span-2"><span className="mb-2 block text-sm font-semibold text-slate-700">Employee</span>
             <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Type to narrow the list by name or staff number..." className={`${inputClass} mb-2`} />
             <select required value={employeeId} onChange={(event) => setEmployeeId(event.target.value)} className={inputClass}>
               <option value="">{shown.length ? `Select employee (${shown.length})` : "No matching employee"}</option>
               {shown.map((employee) => <option key={employee.id} value={employee.id}>{employee.full_name} - {employee.employee_id}{employee.department_name ? ` - ${employee.department_name}` : ""}</option>)}
             </select>
-          </label>
+          </label>}
           <label className="block"><span className="mb-2 block text-sm font-semibold text-slate-700">Month</span><input required type="month" max={currentMonth()} value={month} onChange={(event) => setMonth(event.target.value)} className={inputClass} /></label>
           <div className="flex items-end"><button disabled={loading || !employeeId} className="w-full rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-blue-300">{loading ? "Generating..." : "Generate statement"}</button></div>
         </form>

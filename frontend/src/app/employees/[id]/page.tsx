@@ -10,6 +10,7 @@ import { EmployeeLeavePanel } from "@/components/employees/EmployeeLeavePanel";
 import { EmployeePayrollPanel } from "@/components/employees/EmployeePayrollPanel";
 import { EmployeePPEPanel } from "@/components/employees/EmployeePPEPanel";
 import { EmployeeMealsPanel } from "@/components/employees/EmployeeMealsPanel";
+import { EmployeeStatement } from "@/components/statements/EmployeeStatement";
 
 import Sidebar from "@/components/Sidebar";
 import { apiFetch, getAccessToken } from "@/lib/api";
@@ -77,7 +78,8 @@ type ProfileTab =
   | "documents"
   | "leave"
   | "ppe"
-  | "meals";
+  | "meals"
+  | "statement";
 
 
 export default function EmployeeProfilePage() {
@@ -110,6 +112,7 @@ export default function EmployeeProfilePage() {
     leave: "Leave",
     ppe: "PPE",
     meals: "Meals",
+    statement: "Statement",
   };
 
 
@@ -356,6 +359,15 @@ export default function EmployeeProfilePage() {
               }
             >
               Meals
+            </Tab>
+
+            <Tab
+              active={activeTab === "statement"}
+              onClick={() =>
+                setActiveTab("statement")
+              }
+            >
+              Statement
             </Tab>
 
           </div>
@@ -744,6 +756,12 @@ export default function EmployeeProfilePage() {
           <EmployeeMealsPanel employeeId={employee.id} />
         )}
 
+        {activeTab === "statement" && (
+          <div className="mt-6">
+            <EmployeeStatement employeeId={employee.id} />
+          </div>
+        )}
+
         {activeTab !== "overview" &&
           activeTab !== "documents" &&
           activeTab !== "shift" && (
@@ -753,6 +771,7 @@ export default function EmployeeProfilePage() {
           activeTab !== "payroll" &&
           activeTab !== "ppe" &&
           activeTab !== "meals" &&
+          activeTab !== "statement" &&
 
           <div className="mt-6 bg-white border border-slate-200 rounded-2xl shadow-sm p-8 text-center">
             <div className="font-semibold text-slate-900">
