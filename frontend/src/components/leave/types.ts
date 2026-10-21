@@ -27,6 +27,7 @@ export type LeaveRequest = {
   reason: string;
   status: string;
   status_display: string;
+  requested_by_name?: string | null;
   approved_by: number | null;
   approved_by_name: string | null;
   approved_at: string | null;
