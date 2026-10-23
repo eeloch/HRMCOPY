@@ -117,6 +117,7 @@ urlpatterns = [
     path("api/meals/", include("meals.urls")),
     path("api/offences/", include("offences.urls")),
     path("api/reports/", include("reports.urls")),
+    path("api/integrations/erp/", include("integrations.urls")),
 
     
 ]
