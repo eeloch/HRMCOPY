@@ -195,6 +195,32 @@ class MealService:
         return penalty, created
 
     @classmethod
+    def resync_after_absence_removed(cls, employee, reference_date):
+        """An absence record was deleted (the day became a rest day, or the shift turned out not to be over): the meal
+        penalty it caused must go with it. Never raises - a problem here must not stop the attendance change."""
+        try:
+            cls.sync_absence_penalties(employee, reference_date)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @classmethod
+    def cancel_stale_penalties(cls, reference_date=None):
+        """Safety net (run daily): any active penalty built on an absence that no longer stands is cancelled.
+        Returns the staff numbers whose penalties were re-checked."""
+        from datetime import date as date_type
+
+        reference_date = reference_date or timezone.localdate()
+        checked = []
+        for employee_id in set(MealAbsencePenalty.objects.filter(status__in=[MealAbsencePenaltyStatus.PENDING, MealAbsencePenaltyStatus.ACTIVE]).values_list("employee_id", flat=True)):
+            standing = {d.isoformat() for d in AttendanceException.objects.filter(attendance__employee_id=employee_id, exception_type="absence", status="approved").values_list("attendance__date", flat=True)}
+            stale = MealAbsencePenalty.objects.filter(employee_id=employee_id, status__in=[MealAbsencePenaltyStatus.PENDING, MealAbsencePenaltyStatus.ACTIVE])
+            if any(source not in standing for penalty in stale for source in (penalty.source_absence_dates or [])):
+                employee = Employee.objects.get(pk=employee_id)
+                cls.sync_absence_penalties(employee, reference_date)
+                checked.append(employee.employee_id)
+        return checked
+
+    @classmethod
     def sync_absence_penalties(cls, employee, reference_date, actor=None):
         from attendance.services.leave import leave_dates
 

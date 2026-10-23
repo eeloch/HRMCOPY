@@ -7,7 +7,7 @@ from django.db.models import Q
 from audit.models import AuditSeverity
 from audit.services import AuditService
 from employees.models import Employee
-from payroll.models import EmployeePayroll, PayrollLineItemType
+from payroll.models import EmployeePayroll, EmployeePayrollStatus, PayrollLineItemType
 
 
 @dataclass
@@ -16,6 +16,7 @@ class PayrollGenerationSummary:
     existing: int = 0
     skipped: int = 0
     deductions_applied: int = 0
+    salary_refreshed: int = 0  # draft records still on N0 whose salary has since been entered
 
 
 def employees_for_period(period):
@@ -37,7 +38,7 @@ def generate_payroll_for_period(period, *, actor=None):
 
     with transaction.atomic():
         for employee in employees:
-            _, created = EmployeePayroll.objects.get_or_create(
+            payroll, created = EmployeePayroll.objects.get_or_create(
                 payroll_period=period,
                 employee=employee,
                 defaults={
@@ -51,6 +52,14 @@ def generate_payroll_for_period(period, *, actor=None):
                 summary.created += 1
             else:
                 summary.existing += 1
+                # The salary snapshot is never overwritten (a raise mid-month does not change this month) - except a
+                # draft record still on N0 because the salary was entered after this month's payroll was first
+                # generated: left there, the pay goes negative and a half-day limit cannot be priced.
+                if payroll.status == EmployeePayrollStatus.DRAFT and payroll.basic_salary <= 0 < employee.basic_salary:
+                    payroll.basic_salary = employee.basic_salary
+                    payroll.save(update_fields=["basic_salary", "updated_at"])
+                    recalculate_employee_payroll(payroll)
+                    summary.salary_refreshed += 1
 
         # Deductions accepted/approved before this month's payroll existed (meal
         # excess, offence punishments, PPE) land here, in that month's salary. Deferred

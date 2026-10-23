@@ -168,3 +168,38 @@ class PendingAbsenceHealsOnReprocessTests(MissingPunchFineAndAutoAbsenceTests):
         process_employee_attendance(self.employee, date(2032, 6, 9), now=self.after)
         exception.refresh_from_db()
         self.assertEqual(exception.status, "pending")
+
+
+class RemovedAbsenceTakesItsMealPenaltyTests(TestCase):
+    """When an absence record goes (the day became a rest day), the meal-ticket penalty it caused goes too."""
+
+    def setUp(self):
+        self.employee = Employee.objects.create(employee_id="RMP-001", first_name="Rest", last_name="Day", basic_salary=Decimal("150000.00"))
+        self.shift = Shift.objects.create(name="RMP Shift", start_time="07:00", end_time="19:00")
+        for day in range(1, 31):
+            EmployeeRosterDay.objects.create(employee=self.employee, date=date(2032, 6, day), status="work", shift=self.shift, source="manual")
+        self.after = timezone.make_aware(datetime(2032, 6, 20, 12, 0))
+
+    def active_penalties(self):
+        from meals.models import MealAbsencePenalty
+
+        return MealAbsencePenalty.objects.filter(employee=self.employee, status="active")
+
+    def test_a_cleared_rest_day_absence_cancels_its_penalty(self):
+        from .services.shift_plans import clear_false_absences_on_rest_days
+
+        process_employee_attendance(self.employee, date(2032, 6, 6), now=self.after)  # absent, approved automatically
+        self.assertTrue(self.active_penalties().exists())
+        EmployeeRosterDay.objects.filter(employee=self.employee, date=date(2032, 6, 6)).update(status="rest", shift=None)
+        clear_false_absences_on_rest_days([self.employee], date(2032, 6, 6), date(2032, 6, 6))
+        self.assertFalse(DailyAttendance.objects.filter(employee=self.employee, date=date(2032, 6, 6)).exists())
+        self.assertFalse(self.active_penalties().exists())
+
+    def test_the_daily_safety_net_cancels_a_penalty_whose_absence_is_gone(self):
+        from meals.services import MealService
+
+        process_employee_attendance(self.employee, date(2032, 6, 6), now=self.after)
+        DailyAttendance.objects.filter(employee=self.employee, date=date(2032, 6, 6)).delete()  # removed some other way
+        self.assertTrue(self.active_penalties().exists())
+        self.assertEqual(MealService.cancel_stale_penalties(date(2032, 6, 20)), ["RMP-001"])
+        self.assertFalse(self.active_penalties().exists())

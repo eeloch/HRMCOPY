@@ -45,3 +45,28 @@ class DeductionBreakdownTests(TestCase):
         self.assertEqual([part["key"] for part in everything], ["absence", "late", "early_departure", "missing_punch", "unpaid_leave", "meals", "ppe", "salary_advance", "deferred_fund", "offences", "other"])
         self.assertEqual({part["key"]: (part["amount"], part["count"]) for part in everything}["ppe"], ("0.00", 0))
         self.assertEqual([part["key"] for part in breakdown(self.payroll.line_items.all())], ["late"])  # an employee's own list stays short
+
+
+class SalaryEnteredAfterPayrollWasGeneratedTests(TestCase):
+    """Someone added to a draft payroll before their salary was entered: Generate picks the salary up; no deductions on N0."""
+
+    def test_generate_brings_a_draft_record_up_to_the_salary_now_and_sync_refuses_a_record_with_no_salary(self):
+        from datetime import date as _date
+
+        from payroll.services import generate_payroll_for_period
+        from payroll.services.attendance import PayrollAttendanceSyncSummary, _sync_employee_payroll
+
+        employee = Employee.objects.create(employee_id="LATE-SAL", first_name="Late", last_name="Salary", basic_salary=Decimal("0.00"), employment_date=_date(2033, 2, 1), status="active")
+        period = PayrollPeriod.objects.create(year=2033, month=2)
+        generate_payroll_for_period(period)
+        record = EmployeePayroll.objects.get(payroll_period=period, employee=employee)
+        self.assertEqual(record.basic_salary, Decimal("0.00"))
+        summary = PayrollAttendanceSyncSummary()
+        _sync_employee_payroll(record, summary)
+        self.assertTrue(any("No salary" in error["detail"] for error in summary.errors))
+
+        employee.basic_salary = Decimal("70000.00")
+        employee.save()
+        result = generate_payroll_for_period(period)
+        record.refresh_from_db()
+        self.assertEqual((record.basic_salary, record.net_pay, result.salary_refreshed), (Decimal("70000.00"), Decimal("70000.00"), 1))

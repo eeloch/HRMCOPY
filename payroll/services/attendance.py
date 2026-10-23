@@ -179,6 +179,12 @@ def attendance_exception_deduction(exception, rate):
 
 def _sync_employee_payroll(payroll, summary):
     period, employee = payroll.payroll_period, payroll.employee
+    if payroll.basic_salary <= 0:
+        # No salary on this record (entered late, or never): a day's pay cannot be worked out, and charging the fixed
+        # amounts would push the pay below zero. Generate Payroll picks up the salary once it is entered.
+        summary.skipped += 1
+        summary.errors.append({"employee_id": employee.employee_id, "detail": "No salary on this payroll record - enter the salary, then Generate Payroll and Sync Attendance."})
+        return
     attendance = employee_expected_attendance(employee, period)
     if not attendance["complete"]:
         summary.employees_skipped_incomplete_roster += 1

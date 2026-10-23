@@ -256,6 +256,9 @@ def process_employee_attendance(employee, work_date, *, now=None, leave_ids=None
     if shift_open and not events.exists():
         if existing_attendance is not None and existing_attendance.status == "absent":
             existing_attendance.delete()  # an absence written by an earlier run, before the shift had finished
+            from meals.services import MealService
+
+            MealService.resync_after_absence_removed(employee, work_date)
             return None
         return existing_attendance
 

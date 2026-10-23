@@ -2953,7 +2953,8 @@ class VendorClaimTests(VendorSummaryTests):
     def test_overlapping_future_and_unauthorised_claims_are_refused(self):
         self.claim("2026-09-28", "2026-10-04", 2)
         self.assertEqual(self.claim("2026-10-04", "2026-10-06", 1).status_code, 400)  # overlaps the first
-        self.assertEqual(self.claim("2026-10-20", "2026-10-21", 1).status_code, 400)  # not happened yet
+        soon = timezone.localdate() + timedelta(days=3)
+        self.assertEqual(self.claim(soon.isoformat(), (soon + timedelta(days=1)).isoformat(), 1).status_code, 400)  # not happened yet
         self.assertEqual(self.claim("2026-10-05", "2026-10-04", 1).status_code, 400)  # backwards
         self.client.force_authenticate(self.viewer)  # may look, may not enter
         self.assertEqual(self.client.post("/api/meals/vendor/claims/", {"date_from": "2026-10-05", "date_to": "2026-10-05", "quantity": 1}, format="json").status_code, 403)
@@ -3334,7 +3335,7 @@ class SundayNightTerminalAlertTests(TestCase):
 class AbsentButCollectedTests(TestCase):
     """Someone who was absent but collected a ticket: raised the next day, then charged back or let go."""
 
-    DAY = date(2026, 10, 7)
+    DAY = timezone.localdate() - timedelta(days=2)  # inside the two-week waiting window whenever the suite runs
 
     def setUp(self):
         MealTicketRate.objects.create(amount=Decimal("700.00"), effective_from=date(2026, 9, 1))
@@ -3344,7 +3345,7 @@ class AbsentButCollectedTests(TestCase):
         EmployeeMealEntitlement.objects.create(employee=self.person, tickets_per_work_day=2, effective_from=date(2026, 9, 1), reason="t")
         EmployeeRosterDay.objects.create(employee=self.person, date=self.DAY, status=RosterDayStatus.WORK, shift=self.shift)
         DailyAttendance.objects.create(employee=self.person, date=self.DAY, shift=self.shift, status="absent")
-        event = MealEvent.objects.create(employee=self.person, device=self.device, timestamp=timezone.make_aware(datetime(2026, 10, 7, 12, 30)), external_event_id="abs-1", source_system="device")
+        event = MealEvent.objects.create(employee=self.person, device=self.device, timestamp=timezone.make_aware(datetime.combine(self.DAY, datetime.min.time().replace(hour=12, minute=30))), external_event_id="abs-1", source_system="device")
         MealCollection.objects.create(event=event, employee=self.person, work_date=self.DAY, sequence_number=1, entitlement_snapshot=2, rate_snapshot=Decimal("700.00"), status="within_entitlement")
         self.hr = get_user_model().objects.create_user(username="absent-ticket-hr", password="pw")
         self.hr.user_permissions.add(Permission.objects.get(codename="charge_back_meal_tickets"), Permission.objects.get(codename="record_meal_operations"))
@@ -3365,7 +3366,7 @@ class AbsentButCollectedTests(TestCase):
         row = data["rows"][0]
         self.assertEqual((row["result"], row["needs_decision"], row["needs_a_look"]), ("absent_collected", True, True))
         self.assertEqual((data["totals"]["absent_collected"], data["totals"]["waiting_decision"]), (1, 1))
-        self.assertEqual([(w["employee_number"], w["work_date"], w["tickets"]) for w in data["waiting"]], [("000801", "2026-10-07", 1)])
+        self.assertEqual([(w["employee_number"], w["work_date"], w["tickets"]) for w in data["waiting"]], [("000801", self.DAY.isoformat(), 1)])
 
     def test_charging_it_back_records_the_charge_and_clears_the_alarm(self):
         response = self.decide("charge")

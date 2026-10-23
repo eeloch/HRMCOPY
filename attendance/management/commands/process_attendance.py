@@ -28,3 +28,10 @@ class Command(BaseCommand):
 
         records = process_attendance_for_date(work_date, employee=employee)
         self.stdout.write(self.style.SUCCESS(f"Processed {len(records)} attendance record(s)."))
+        if employee is None:
+            # Safety net: a meal penalty whose absence has since gone (waived, removed, covered by leave) is cancelled.
+            from meals.services import MealService
+
+            rechecked = MealService.cancel_stale_penalties()
+            if rechecked:
+                self.stdout.write(f"Meal penalties re-checked for: {', '.join(rechecked)}")

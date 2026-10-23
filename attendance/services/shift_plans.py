@@ -258,6 +258,9 @@ def clear_false_absences_on_rest_days(employees, start, end, *, actor=""):
             metadata={"date": row.date.isoformat(), "set_by": str(actor)},
         )
         attendance.delete()
+        from meals.services import MealService
+
+        MealService.resync_after_absence_removed(row.employee, row.date)  # its meal penalty goes with it
         removed.append((row.employee.employee_id, row.date))
     return removed
 
