@@ -14,7 +14,6 @@ type Collection = { id: number; employee_number: string; employee_name: string; 
 type OperationsSummary = { today_collections: number; today_within_entitlement: number; today_excess: number; pending_review: number };
 type RangeSummary = { collections: number; within_entitlement: number; excess: number; voided: number };
 type Exception = { balances_on_accept?: boolean; id: number; employee_number: string; employee_name: string; work_date: string; entitlement: number; collected_quantity: number; excess_quantity: number; proposed_deduction: string; status: string; card_verified: boolean; comment: string };
-type Period = { id: number; year: number; month: number; status: string };
 type Device = { id: number; name: string; serial_number: string; active: boolean };
 type Rate = { id: number; amount: string; effective_from: string; effective_to: string | null; active: boolean };
 type Entitlement = { id: number; employee: number; employee_name: string; tickets_per_work_day: number; effective_from: string; effective_to: string | null; reason: string; is_exceptional_override: boolean };
