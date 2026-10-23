@@ -13,6 +13,7 @@ type PeriodSummary = {
   not_yet_in: number;
   present: number;
   late: number;
+  incomplete?: number;
   absent: number;
   conflicts: number;
   overtime: number;
@@ -112,8 +113,8 @@ const periodCards: {
   },
   {
     key: "present",
-    label: "Present",
-    detail: "Clocked in (on time or late)",
+    label: "On time",
+    detail: "Clocked in on time",
     accent: "bg-emerald-50 text-emerald-700 ring-emerald-100",
   },
   {
@@ -122,6 +123,18 @@ const periodCards: {
     detail: "Arrived after shift start",
     accent: "bg-amber-50 text-amber-700 ring-amber-100",
     action: "Click to view the list",
+  },
+  {
+    key: "incomplete",
+    label: "One punch only",
+    detail: "Clocked in but not out (or out but not in)",
+    accent: "bg-orange-50 text-orange-700 ring-orange-100",
+  },
+  {
+    key: "not_yet_in",
+    label: "Not yet in",
+    detail: "Shift has started, no punch yet",
+    accent: "bg-slate-100 text-slate-700 ring-slate-200",
   },
   {
     key: "absent",
@@ -734,6 +747,12 @@ function ShiftColumn({
         )}
       </div>
 
+      {!loading && summary && (
+        <p className="mb-3 rounded-lg bg-white/70 px-3 py-2 text-xs text-slate-600">
+          Expected {summary.expected} = on time {summary.present} + late {summary.late} + one punch only {summary.incomplete || 0} + absent {summary.absent} + not yet in {summary.not_yet_in}
+. People on approved leave (including anyone on leave who still punched) are not counted as expected.
+        </p>
+      )}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-2 2xl:grid-cols-3">
         {loading
           ? periodCards.map((card) => <SummaryCardSkeleton key={card.key} />)

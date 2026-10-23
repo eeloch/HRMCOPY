@@ -141,6 +141,8 @@ class DashboardService:
                 "not_yet_in": len(not_yet_in_ids),
                 "present": period_records.filter(status="present").exclude(employee_id__in=conflict_ids).count(),
                 "late": period_records.filter(status="late").exclude(employee_id__in=conflict_ids).count(),
+                # clocked in or out once only (no clock-out yet, or the clock-in is missing): in, but not complete
+                "incomplete": period_records.filter(status="incomplete").exclude(employee_id__in=conflict_ids).count(),
                 "absent": period_records.filter(status="absent").exclude(employee_id__in=leave_employee_ids).count(),
                 "conflicts": len(conflict_ids),
                 "overtime": period_records.filter(overtime_minutes__gt=0).count(),
